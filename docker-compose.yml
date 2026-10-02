@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17
+    container_name: outbound-db
+    environment:
+      POSTGRES_USER: outbound
+      POSTGRES_PASSWORD: outbound
+      POSTGRES_DB: outbound
+    ports:
+      - "127.0.0.1:4930:5432"
+    volumes:
+      - outbound-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outbound -d outbound"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  outbound-db-data:

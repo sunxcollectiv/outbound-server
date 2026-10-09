@@ -60,7 +60,7 @@ def test_item_validation(client, make_user, make_trip):
     missing_location = {**base, "location_id": str(uuid.uuid4())}
     assert client.post(url, json=missing_location, headers=sun).status_code == 422
 
-    not_on_trip = {**base, "kind": "arrival", "traveler_id": stranger["X-User-Id"]}
+    not_on_trip = {**base, "kind": "arrival", "traveler_id": stranger.user_id}
     assert client.post(url, json=not_on_trip, headers=sun).status_code == 422
 
     item = client.post(url, json=base, headers=sun).json()
@@ -87,7 +87,7 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    client.post(f"{url}/members", json={"user_id": sean["X-User-Id"]}, headers=sun)
+    client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
 
     def add(**item):
         response = client.post(f"{url}/items", json=item, headers=sun)
@@ -106,7 +106,7 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
         kind="arrival",
         title="Sean Salim arrives",
         starts_at="2026-04-09T15:00:00+09:00",
-        traveler_id=sean["X-User-Id"],
+        traveler_id=sean.user_id,
     )
     # 00:30 on the 10th in Tokyo is still the 9th in UTC.
     add(kind="activity", title="Golden Gai", starts_at="2026-04-09T15:30:00Z")

@@ -10,5 +10,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     # Stored lowercased; the schema layer normalises on the way in.
     email: Mapped[str] = mapped_column(String(320), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(120))
     avatar_url: Mapped[str | None] = mapped_column(String(2048))

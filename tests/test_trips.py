@@ -24,7 +24,7 @@ def test_member_roles(client, make_user, make_trip):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    sean_id = sean["X-User-Id"]
+    sean_id = sean.user_id
 
     # Only the owner manages members.
     added = client.post(
@@ -68,7 +68,7 @@ def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_t
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    client.post(f"{url}/members", json={"user_id": sean["X-User-Id"]}, headers=sun)
+    client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
     item = {"kind": "activity", "title": "Dinner", "starts_at": "2026-04-09T18:30:00+09:00"}
     assert client.post(f"{url}/items", json=item, headers=sun).status_code == 201
 

@@ -2,25 +2,12 @@ import uuid
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import User
-from app.schemas import UserCreate, UserRead, UserUpdate
+from app.schemas import UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
-
-
-@router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
-def create_user(payload: UserCreate, session: SessionDep) -> User:
-    user = User(**payload.model_dump())
-    session.add(user)
-    try:
-        session.commit()
-    except IntegrityError:
-        session.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Email is already registered") from None
-    return user
 
 
 @router.get("/me", response_model=UserRead)

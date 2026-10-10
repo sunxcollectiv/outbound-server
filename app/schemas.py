@@ -13,7 +13,14 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import TripItemKind, TripRole
+from app.models import (
+    RsvpStatus,
+    TripItemKind,
+    TripItemRequirement,
+    TripItemScope,
+    TripItemVisibility,
+    TripRole,
+)
 
 
 def _valid_timezone(value: str) -> str:
@@ -160,7 +167,7 @@ class TripRead(ReadModel):
 
 class TripMemberCreate(BaseModel):
     user_id: uuid.UUID
-    role: TripRole = TripRole.EDITOR
+    role: TripRole = TripRole.MEMBER
 
 
 class TripMemberRead(ReadModel):
@@ -172,8 +179,25 @@ class TripMemberRead(ReadModel):
 # --- trip items ---
 
 
+def check_scope_fields(
+    scope: TripItemScope,
+    requirement: TripItemRequirement | None,
+    visibility: TripItemVisibility | None,
+) -> None:
+    """Group items carry a requirement, personal items carry a visibility, never both."""
+    if scope is TripItemScope.GROUP and visibility is not None:
+        raise ValueError("visibility only applies to personal items")
+    if scope is TripItemScope.PERSONAL and requirement is not None:
+        raise ValueError("requirement only applies to group items")
+
+
 class TripItemCreate(BaseModel):
     kind: TripItemKind
+    scope: TripItemScope
+    # Defaults to optional for group items; must be absent for personal ones.
+    requirement: TripItemRequirement | None = None
+    # Defaults to shared for personal items; must be absent for group ones.
+    visibility: TripItemVisibility | None = None
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] = Field(default_factory=list)
@@ -182,17 +206,28 @@ class TripItemCreate(BaseModel):
     image_url: Url | None = None
     location_id: uuid.UUID | None = None
     end_location_id: uuid.UUID | None = None
-    traveler_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
-    def _times_ordered(self) -> Self:
+    def _consistent(self) -> Self:
+        check_scope_fields(self.scope, self.requirement, self.visibility)
+        if self.scope is TripItemScope.GROUP and self.requirement is None:
+            self.requirement = TripItemRequirement.OPTIONAL
+        if self.scope is TripItemScope.PERSONAL and self.visibility is None:
+            self.visibility = TripItemVisibility.SHARED
         if self.ends_at is not None and self.ends_at < self.starts_at:
             raise ValueError("ends_at must be at or after starts_at")
         return self
 
 
 class TripItemUpdate(BaseModel):
+    """scope is fixed at creation and deliberately absent here; extra="forbid"
+    turns an attempt to change it into a 422 instead of a silent no-op."""
+
+    model_config = ConfigDict(extra="forbid")
+
     kind: TripItemKind | None = None
+    requirement: TripItemRequirement | None = None
+    visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] | None = None
@@ -201,13 +236,25 @@ class TripItemUpdate(BaseModel):
     image_url: Url | None = None
     location_id: uuid.UUID | None = None
     end_location_id: uuid.UUID | None = None
-    traveler_id: uuid.UUID | None = None
+
+
+class ParticipantRead(ReadModel):
+    user: UserRead
+    status: RsvpStatus
+    updated_at: datetime
+
+
+class RsvpUpdate(BaseModel):
+    status: RsvpStatus
 
 
 class TripItemRead(ReadModel):
     id: uuid.UUID
     trip_id: uuid.UUID
     kind: TripItemKind
+    scope: TripItemScope
+    requirement: TripItemRequirement | None
+    visibility: TripItemVisibility | None
     title: str
     notes: str | None
     tags: list[str]
@@ -216,7 +263,10 @@ class TripItemRead(ReadModel):
     image_url: str | None
     location: LocationRead | None
     end_location: LocationRead | None
-    traveler: UserRead | None
+    created_by: UserRead | None
+    # RSVPs on a group item; attendees on a personal one. Callers find their
+    # own entry by user id.
+    participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime
 

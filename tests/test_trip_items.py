@@ -18,6 +18,7 @@ def test_item_round_trip_with_locations(client, make_user, make_trip):
         url,
         json={
             "kind": "transit",
+            "scope": "group",
             "title": "Train to Osaka",
             "tags": ["Transit", "JR"],
             "starts_at": "2026-04-14T09:00:00+09:00",
@@ -32,6 +33,10 @@ def test_item_round_trip_with_locations(client, make_user, make_trip):
     assert item["location"]["name"] == "Kyoto Station"
     assert item["end_location"]["name"] == "Shin-Osaka Station"
     assert item["tags"] == ["Transit", "JR"]
+    assert item["requirement"] == "optional"
+    assert item["visibility"] is None
+    assert item["created_by"]["email"] == "sun@example.com"
+    assert item["participants"] == []
 
     # Changing the location id is reflected in the embedded location.
     patched = client.patch(
@@ -49,7 +54,12 @@ def test_item_validation(client, make_user, make_trip):
     sun, stranger = make_user("sun"), make_user("stranger")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    base = {"kind": "activity", "title": "Dinner", "starts_at": "2026-04-09T18:30:00+09:00"}
+    base = {
+        "kind": "activity",
+        "scope": "group",
+        "title": "Dinner",
+        "starts_at": "2026-04-09T18:30:00+09:00",
+    }
 
     naive_time = {**base, "starts_at": "2026-04-09T18:30:00"}
     assert client.post(url, json=naive_time, headers=sun).status_code == 422
@@ -60,13 +70,27 @@ def test_item_validation(client, make_user, make_trip):
     missing_location = {**base, "location_id": str(uuid.uuid4())}
     assert client.post(url, json=missing_location, headers=sun).status_code == 422
 
-    not_on_trip = {**base, "kind": "arrival", "traveler_id": stranger.user_id}
-    assert client.post(url, json=not_on_trip, headers=sun).status_code == 422
+    # Group items carry a requirement, personal items a visibility; never the other.
+    group_with_visibility = {**base, "visibility": "shared"}
+    assert client.post(url, json=group_with_visibility, headers=sun).status_code == 422
+    personal_with_requirement = {**base, "scope": "personal", "requirement": "mandatory"}
+    assert client.post(url, json=personal_with_requirement, headers=sun).status_code == 422
+
+    assert client.post(url, json=base, headers=stranger).status_code == 404
 
     item = client.post(url, json=base, headers=sun).json()
     moved_before_start = {"ends_at": "2026-04-09T10:00:00+09:00"}
     response = client.patch(f"{url}/{item['id']}", json=moved_before_start, headers=sun)
     assert response.status_code == 422
+
+    # Scope is fixed once created, and the scope-bound field can't be nulled or swapped.
+    item_url = f"{url}/{item['id']}"
+    assert client.patch(item_url, json={"scope": "personal"}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"requirement": None}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"visibility": "open"}, headers=sun).status_code == 422
+    changed = client.patch(item_url, json={"requirement": "mandatory"}, headers=sun)
+    assert changed.status_code == 200
+    assert changed.json()["requirement"] == "mandatory"
 
 
 def test_items_are_scoped_to_their_trip(client, make_user, make_trip):
@@ -74,7 +98,12 @@ def test_items_are_scoped_to_their_trip(client, make_user, make_trip):
     japan, other = make_trip(sun), make_trip(sun, title="Other")
     item = client.post(
         f"/trips/{japan['id']}/items",
-        json={"kind": "activity", "title": "Dinner", "starts_at": "2026-04-09T18:30:00+09:00"},
+        json={
+            "kind": "activity",
+            "scope": "group",
+            "title": "Dinner",
+            "starts_at": "2026-04-09T18:30:00+09:00",
+        },
         headers=sun,
     ).json()
 
@@ -89,8 +118,8 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     url = f"/trips/{trip['id']}"
     client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
 
-    def add(**item):
-        response = client.post(f"{url}/items", json=item, headers=sun)
+    def add(headers=sun, scope="group", **item):
+        response = client.post(f"{url}/items", json={"scope": scope, **item}, headers=headers)
         assert response.status_code == 201, response.text
 
     # Inserted out of order on purpose.
@@ -102,11 +131,13 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
         starts_at="2026-04-09T12:00:00+09:00",
         ends_at="2026-04-11T11:00:00+09:00",
     )
+    # Sean posts his own arrival; it's shared so the group sees it.
     add(
+        headers=sean,
+        scope="personal",
         kind="arrival",
         title="Sean Salim arrives",
         starts_at="2026-04-09T15:00:00+09:00",
-        traveler_id=sean.user_id,
     )
     # 00:30 on the 10th in Tokyo is still the 9th in UTC.
     add(kind="activity", title="Golden Gai", starts_at="2026-04-09T15:30:00Z")
@@ -124,7 +155,12 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
         "Sean Salim arrives",
         "Omoide Yokocho dinner",
     ]
-    assert days[0]["items"][2]["traveler"]["email"] == "sean@example.com"
+    arrival = days[0]["items"][2]
+    assert arrival["created_by"]["email"] == "sean@example.com"
+    assert arrival["visibility"] == "shared"
+    assert [(p["user"]["email"], p["status"]) for p in arrival["participants"]] == [
+        ("sean@example.com", "going")
+    ]
     assert [item["title"] for item in days[1]["items"]] == ["Golden Gai"]
 
     phases = [[stay["phase"] for stay in day["lodging"]] for day in days]
@@ -145,6 +181,7 @@ def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(
         f"{url}/items",
         json={
             "kind": "transit",
+            "scope": "personal",
             "title": "Flight to Tokyo",
             "starts_at": "2026-04-08T23:00:00Z",
             "location_id": lax["id"],

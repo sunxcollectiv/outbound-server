@@ -1,11 +1,19 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import CurrentUser, EditableTrip, OwnedTrip, SessionDep, ViewableTrip
-from app.models import Trip, TripItem, TripMember, User
+from app.api.deps import (
+    CurrentUser,
+    OrganizerTrip,
+    OwnedTrip,
+    SessionDep,
+    ViewableTrip,
+    is_organizer,
+)
+from app.api.trip_items import visible_items, with_item_details
+from app.models import Trip, TripItem, TripItemParticipant, TripItemScope, TripMember, User
 from app.schemas import (
     Itinerary,
     TripCreate,
@@ -47,7 +55,7 @@ def read_trip(trip: ViewableTrip) -> Trip:
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
-def update_trip(payload: TripUpdate, trip: EditableTrip, session: SessionDep) -> Trip:
+def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
@@ -71,16 +79,10 @@ def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
 
 
 @router.get("/{trip_id}/itinerary", response_model=Itinerary)
-def read_itinerary(trip: ViewableTrip, session: SessionDep) -> Itinerary:
-    items = session.scalars(
-        select(TripItem)
-        .where(TripItem.trip_id == trip.id)
-        .options(
-            selectinload(TripItem.location),
-            selectinload(TripItem.end_location),
-            selectinload(TripItem.traveler),
-        )
-    )
+def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -> Itinerary:
+    """Everyone's plans in one view: group items plus every member's shared
+    items, each tagged with who added it. Private items show only to their creator."""
+    items = session.scalars(with_item_details(visible_items(trip, user)))
     return build_itinerary(trip, list(items))
 
 
@@ -102,7 +104,7 @@ def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
 @router.post(
     "/{trip_id}/members", response_model=TripMemberRead, status_code=status.HTTP_201_CREATED
 )
-def add_member(payload: TripMemberCreate, trip: OwnedTrip, session: SessionDep) -> TripMember:
+def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionDep) -> TripMember:
     if payload.user_id == trip.owner_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "The owner is already on the trip")
     if session.get(User, payload.user_id) is None:
@@ -119,11 +121,28 @@ def add_member(payload: TripMemberCreate, trip: OwnedTrip, session: SessionDep) 
 def remove_member(
     user_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> None:
-    """The owner can remove anyone; a member can remove themself (leave)."""
-    if user.id not in (trip.owner_id, user_id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the trip owner can remove others")
+    """Organizers can remove anyone but the owner; a member can remove themself (leave).
+
+    Their personal items and RSVPs go with them; group items they posted stay."""
+    if user.id != user_id and not is_organizer(session, trip, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can remove others")
     member = session.get(TripMember, (trip.id, user_id))
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+
+    trip_item_ids = select(TripItem.id).where(TripItem.trip_id == trip.id)
+    session.execute(
+        delete(TripItemParticipant).where(
+            TripItemParticipant.user_id == user_id,
+            TripItemParticipant.item_id.in_(trip_item_ids),
+        )
+    )
+    session.execute(
+        delete(TripItem).where(
+            TripItem.trip_id == trip.id,
+            TripItem.scope == TripItemScope.PERSONAL,
+            TripItem.created_by_id == user_id,
+        )
+    )
     session.delete(member)
     session.commit()

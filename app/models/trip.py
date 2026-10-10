@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 class TripRole(StrEnum):
-    EDITOR = "editor"
-    VIEWER = "viewer"
+    ORGANIZER = "organizer"  # posts group items, manages members
+    MEMBER = "member"  # adds their own items, RSVPs
 
 
 class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -47,7 +47,8 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class TripMember(Base):
-    """Companions on a trip. The owner lives on trips.owner_id, not here."""
+    """Companions on a trip. The owner lives on trips.owner_id, not here,
+    and counts as an organizer everywhere roles are checked."""
 
     __tablename__ = "trip_members"
 
@@ -58,7 +59,7 @@ class TripMember(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     role: Mapped[TripRole] = mapped_column(
-        str_enum(TripRole, "trip_role"), default=TripRole.EDITOR
+        str_enum(TripRole, "trip_role"), default=TripRole.MEMBER
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import (
@@ -13,7 +13,15 @@ from app.api.deps import (
     is_organizer,
 )
 from app.api.trip_items import visible_items, with_item_details
-from app.models import Trip, TripItem, TripItemParticipant, TripItemScope, TripMember, User
+from app.models import (
+    Trip,
+    TripItem,
+    TripItemParticipant,
+    TripItemScope,
+    TripMember,
+    TripRole,
+    User,
+)
 from app.schemas import (
     Itinerary,
     TripCreate,
@@ -31,7 +39,10 @@ NOT_NULLABLE = ("title", "start_date", "end_date")
 
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
+    """The creator becomes the owner and gets an organizer membership row, so
+    trip_members is the full headcount and roles live in one place."""
     trip = Trip(**payload.model_dump(), owner_id=user.id)
+    trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
     session.add(trip)
     session.commit()
     return trip
@@ -39,13 +50,9 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
 
 @router.get("", response_model=list[TripRead])
 def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
-    """Trips the caller owns or has been added to."""
+    """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
-    query = (
-        select(Trip)
-        .where(or_(Trip.owner_id == user.id, Trip.id.in_(member_of)))
-        .order_by(Trip.start_date, Trip.id)
-    )
+    query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
     return list(session.scalars(query))
 
 
@@ -91,7 +98,7 @@ def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -
 
 @router.get("/{trip_id}/members", response_model=list[TripMemberRead])
 def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
-    """Companions only; the owner is trips.owner_id."""
+    """Everyone on the trip, owner included."""
     query = (
         select(TripMember)
         .where(TripMember.trip_id == trip.id)
@@ -105,8 +112,6 @@ def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
     "/{trip_id}/members", response_model=TripMemberRead, status_code=status.HTTP_201_CREATED
 )
 def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionDep) -> TripMember:
-    if payload.user_id == trip.owner_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "The owner is already on the trip")
     if session.get(User, payload.user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if session.get(TripMember, (trip.id, payload.user_id)) is not None:
@@ -129,6 +134,8 @@ def remove_member(
     member = session.get(TripMember, (trip.id, user_id))
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+    if user_id == trip.owner_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The owner can't be removed from their trip")
 
     trip_item_ids = select(TripItem.id).where(TripItem.trip_id == trip.id)
     session.execute(

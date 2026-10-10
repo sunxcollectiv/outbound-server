@@ -46,8 +46,10 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class TripMember(Base):
-    """Companions on a trip. The owner lives on trips.owner_id, not here,
-    and counts as an organizer everywhere roles are checked."""
+    """Everyone on a trip, owner included, with their role. trips.owner_id
+    only says who pays for and can delete the trip; it always has an
+    organizer row here, so counting rows gives the real headcount and a
+    transfer of ownership is a role edit, not a row swap."""
 
     __tablename__ = "trip_members"
 

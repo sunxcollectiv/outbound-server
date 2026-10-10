@@ -30,6 +30,13 @@ def test_member_roles(client, make_user, make_trip):
     }
     personal_item = {**group_item, "scope": "personal", "title": "Coffee"}
 
+    # The owner is on the member list from the start, as an organizer.
+    roster = client.get(f"{url}/members", headers=sun).json()
+    assert [(m["user"]["email"], m["role"]) for m in roster] == [("sun@example.com", "organizer")]
+    re_added = client.post(f"{url}/members", json={"user_id": sun.user_id}, headers=sun)
+    assert re_added.status_code == 409
+    assert client.delete(f"{url}/members/{sun.user_id}", headers=sun).status_code == 409
+
     # Members default to the member role.
     added = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
     assert added.status_code == 201
@@ -37,6 +44,8 @@ def test_member_roles(client, make_user, make_trip):
     assert added.json()["role"] == "member"
     again = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
     assert again.status_code == 409
+    roster = client.get(f"{url}/members", headers=sean).json()
+    assert sorted(m["user"]["email"] for m in roster) == ["sean@example.com", "sun@example.com"]
 
     # A member can read and add their own items, but not change the trip,
     # post group items, or manage members.
@@ -59,6 +68,7 @@ def test_member_roles(client, make_user, make_trip):
     assert client.post(f"{url}/items", json=group_item, headers=sean).status_code == 201
     assert client.post(f"{url}/members", json={"user_id": amy_id}, headers=sean).status_code == 201
     assert client.delete(f"{url}/members/{amy_id}", headers=sean).status_code == 204
+    assert client.delete(f"{url}/members/{sun.user_id}", headers=sean).status_code == 409
     assert client.delete(url, headers=sean).status_code == 403
 
     # A member can leave; after that the trip is gone for them.

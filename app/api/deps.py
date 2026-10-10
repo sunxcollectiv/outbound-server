@@ -59,8 +59,8 @@ def _trip_role(session: Session, trip: Trip, user: User) -> TripRole | None:
 
 
 def is_organizer(session: Session, trip: Trip, user: User) -> bool:
-    """The owner, or a member with the organizer role."""
-    return trip.owner_id == user.id or _trip_role(session, trip, user) is TripRole.ORGANIZER
+    """Roles live on trip_members for everyone, the owner included."""
+    return _trip_role(session, trip, user) is TripRole.ORGANIZER
 
 
 def _load_trip(session: Session, trip_id: uuid.UUID, user: User) -> tuple[Trip, bool, bool]:
@@ -69,16 +69,14 @@ def _load_trip(session: Session, trip_id: uuid.UUID, user: User) -> tuple[Trip, 
     trip = session.get(Trip, trip_id)
     if trip is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Trip not found")
-    if trip.owner_id == user.id:
-        return trip, True, True
     role = _trip_role(session, trip, user)
     if role is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Trip not found")
-    return trip, False, role is TripRole.ORGANIZER
+    return trip, trip.owner_id == user.id, role is TripRole.ORGANIZER
 
 
 def get_viewable_trip(trip_id: uuid.UUID, session: SessionDep, user: CurrentUser) -> Trip:
-    """Any trip the caller is on: owner or member of either role."""
+    """Any trip the caller has a membership row on."""
     trip, _, _ = _load_trip(session, trip_id, user)
     return trip
 

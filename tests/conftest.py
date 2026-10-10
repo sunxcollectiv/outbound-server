@@ -81,16 +81,33 @@ def client(session: Session, google_places: FakeGooglePlaces) -> Iterator[TestCl
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
-def make_user(client: TestClient) -> Callable[[str], dict[str, str]]:
-    """Creates a user and returns the auth headers for acting as them."""
+PASSWORD = "correct horse battery"
 
-    def _make(name: str) -> dict[str, str]:
+
+class AuthHeaders(dict[str, str]):
+    """Headers for acting as a user, plus their id for use in request bodies."""
+
+    user_id: str
+
+
+@pytest.fixture
+def make_user(client: TestClient) -> Callable[[str], AuthHeaders]:
+    """Registers a user and returns the auth headers for acting as them."""
+
+    def _make(name: str) -> AuthHeaders:
         response = client.post(
-            "/users", json={"email": f"{name}@example.com", "display_name": name.title()}
+            "/auth/register",
+            json={
+                "email": f"{name}@example.com",
+                "password": PASSWORD,
+                "display_name": name.title(),
+            },
         )
         assert response.status_code == 201, response.text
-        return {"X-User-Id": response.json()["id"]}
+        body = response.json()
+        headers = AuthHeaders(Authorization=f"Bearer {body['token']}")
+        headers.user_id = body["user"]["id"]
+        return headers
 
     return _make
 

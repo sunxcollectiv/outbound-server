@@ -1,28 +1,50 @@
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.models import Trip, TripMember, TripRole, User
+from app.models import AccessToken, Trip, TripMember, TripRole, User
+from app.security import hash_token
 
 SessionDep = Annotated[Session, Depends(get_session)]
 
+# auto_error=False so get_access_token decides what a missing header returns.
+bearer_scheme = HTTPBearer(auto_error=False)
 
-def get_current_user(
+
+def _unauthorized(detail: str) -> HTTPException:
+    return HTTPException(
+        status.HTTP_401_UNAUTHORIZED, detail, headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
+def get_access_token(
     session: SessionDep,
-    x_user_id: Annotated[uuid.UUID | None, Header()] = None,
-) -> User:
-    # DEV ONLY: trusts whatever id the caller sends. Every route depends on
-    # this function, so swapping in real token verification happens here.
-    if x_user_id is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing X-User-Id header")
-    user = session.get(User, x_user_id)
-    if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Unknown user")
-    return user
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> AccessToken:
+    if credentials is None:
+        raise _unauthorized("Not authenticated")
+    access_token = session.scalar(
+        select(AccessToken).where(
+            AccessToken.token_hash == hash_token(credentials.credentials),
+            AccessToken.expires_at > datetime.now(UTC),
+        )
+    )
+    if access_token is None:
+        raise _unauthorized("Invalid or expired token")
+    return access_token
+
+
+CurrentAccessToken = Annotated[AccessToken, Depends(get_access_token)]
+
+
+def get_current_user(access_token: CurrentAccessToken) -> User:
+    return access_token.user
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]

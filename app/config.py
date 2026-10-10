@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://outbound:outbound@127.0.0.1:4930/outbound"
     google_maps_api_key: str | None = None
+    access_token_ttl_days: int = 90
 
 
 @lru_cache

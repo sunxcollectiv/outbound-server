@@ -25,6 +25,7 @@ def _valid_timezone(value: str) -> str:
 
 
 TimezoneName = Annotated[str, AfterValidator(_valid_timezone)]
+Email = Annotated[EmailStr, AfterValidator(str.lower)]
 Url = Annotated[str, Field(max_length=2048)]
 Tag = Annotated[str, Field(min_length=1, max_length=60)]
 
@@ -37,7 +38,8 @@ class ReadModel(BaseModel):
 
 
 class UserCreate(BaseModel):
-    email: Annotated[EmailStr, AfterValidator(str.lower)]
+    email: Email
+    password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=1, max_length=120)
     avatar_url: Url | None = None
 
@@ -53,6 +55,23 @@ class UserRead(ReadModel):
     display_name: str
     avatar_url: str | None
     created_at: datetime
+
+
+# --- auth ---
+
+
+class Credentials(BaseModel):
+    email: Email
+    # No minimum here: a too-short guess is a failed login, not a 422.
+    password: str = Field(max_length=128)
+
+
+class TokenRead(BaseModel):
+    """`token` goes in the `Authorization: Bearer` header of later requests."""
+
+    token: str
+    expires_at: datetime
+    user: UserRead
 
 
 # --- locations ---

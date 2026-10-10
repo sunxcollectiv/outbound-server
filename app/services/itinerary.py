@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app.models import Trip, TripItem, TripItemKind
@@ -16,20 +16,42 @@ def _item_timezone(item: TripItem) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
+def _arrival_timezone(item: TripItem) -> ZoneInfo:
+    """Where a transit item ends, which may be a different zone from where it starts."""
+    if item.end_location is not None and item.end_location.timezone:
+        return ZoneInfo(item.end_location.timezone)
+    return _item_timezone(item)
+
+
+def _sort_key(entry: tuple[datetime, TripItemRead]) -> tuple[datetime, str]:
+    moment, read = entry
+    return moment, str(read.id)
+
+
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     """Group a trip's items into calendar days, in local time.
 
-    Every item appears once, on the day it starts. Lodging additionally shows
-    up in each day's `lodging` list from check-in through check-out.
+    Every item appears on the day it starts. Transit also appears on the day it
+    arrives when that's a different day (in the destination's zone), so both
+    the departure and the arrival are visible; the item carries both times and
+    the client decides which to emphasise. Lodging additionally shows up in
+    each day's `lodging` list from check-in through check-out.
     """
-    items_by_day: dict[date, list[TripItemRead]] = defaultdict(list)
+    # (sort key, item) so a day's list is ordered by the moment relevant to that
+    # day: a flight arriving at 11:00 sorts by 11:00, not by when it took off.
+    items_by_day: dict[date, list[tuple[datetime, TripItemRead]]] = defaultdict(list)
     lodging_by_day: dict[date, list[LodgingStay]] = defaultdict(list)
 
-    for item in sorted(items, key=lambda i: i.starts_at):
+    for item in items:
         tz = _item_timezone(item)
         start_day = item.starts_at.astimezone(tz).date()
         read = TripItemRead.model_validate(item)
-        items_by_day[start_day].append(read)
+        items_by_day[start_day].append((item.starts_at, read))
+
+        if item.kind is TripItemKind.TRANSIT and item.ends_at is not None:
+            arrival_day = item.ends_at.astimezone(_arrival_timezone(item)).date()
+            if arrival_day != start_day:
+                items_by_day[arrival_day].append((item.ends_at, read))
 
         if item.kind is TripItemKind.LODGING:
             end_day = item.ends_at.astimezone(tz).date() if item.ends_at else start_day
@@ -58,7 +80,7 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
                 date=day,
                 day_number=(day - trip.start_date).days + 1,
                 lodging=lodging_by_day.get(day, []),
-                items=items_by_day.get(day, []),
+                items=[read for _, read in sorted(items_by_day.get(day, []), key=_sort_key)],
             )
         )
         day += timedelta(days=1)

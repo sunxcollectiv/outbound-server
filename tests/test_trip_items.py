@@ -128,18 +128,24 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
 
     # Inserted out of order on purpose.
     add(kind="activity", title="Omoide Yokocho dinner", starts_at="2026-04-09T18:30:00+09:00")
-    add(kind="arrival", title="Land at HND", starts_at="2026-04-09T11:00:00+09:00")
+    # Only the landing time is known: departure and arrival are the same instant.
+    add(
+        kind="transit",
+        title="Land at HND",
+        starts_at="2026-04-09T11:00:00+09:00",
+        ends_at="2026-04-09T11:00:00+09:00",
+    )
     add(
         kind="lodging",
         title="Hotel Kanade Shinjuku",
         starts_at="2026-04-09T12:00:00+09:00",
         ends_at="2026-04-11T11:00:00+09:00",
     )
-    # Sean posts his own arrival; it's shared so the group sees it.
+    # Sean posts his own flight; it's shared so the group sees when he lands.
     add(
         headers=sean,
         scope="personal",
-        kind="arrival",
+        kind="transit",
         title="Sean Salim arrives",
         starts_at="2026-04-09T15:00:00+09:00",
     )
@@ -182,16 +188,31 @@ def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     lax = _location(client, sun, name="LAX", timezone="America/Los_Angeles")
+    hnd = _location(client, sun, name="HND", timezone="Asia/Tokyo")
 
-    # 08:00 on Apr 9 in Tokyo, but the flight leaves LA on the afternoon of the 8th.
-    client.post(
+    # Leaves LA on the afternoon of the 8th. Lands at 22:00 UTC on the 9th,
+    # which is still the 9th in LA but already 07:00 on the 10th in Tokyo.
+    flight = client.post(
         f"{url}/items",
         json={
             "kind": "transit",
             "scope": "personal",
             "title": "Flight to Tokyo",
             "starts_at": "2026-04-08T23:00:00Z",
+            "ends_at": "2026-04-09T22:00:00Z",
             "location_id": lax["id"],
+            "end_location_id": hnd["id"],
+        },
+        headers=sun,
+    ).json()
+    client.post(
+        f"{url}/items",
+        json={
+            "kind": "activity",
+            "scope": "group",
+            "title": "Breakfast",
+            "starts_at": "2026-04-10T06:00:00+09:00",
+            "timezone": "Asia/Tokyo",
         },
         headers=sun,
     )
@@ -200,4 +221,10 @@ def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(
     assert days[0]["date"] == "2026-04-08"
     assert days[0]["day_number"] == 0
     assert [item["title"] for item in days[0]["items"]] == ["Flight to Tokyo"]
+    # The same item shows again on its arrival day, in the destination's zone,
+    # sorted by when it lands rather than when it took off.
+    assert days[1]["items"] == []
+    assert [item["title"] for item in days[2]["items"]] == ["Breakfast", "Flight to Tokyo"]
+    assert days[2]["items"][1]["id"] == flight["id"]
+    assert days[2]["items"][1]["ends_at"] == "2026-04-09T22:00:00Z"
     assert len(days) == 8

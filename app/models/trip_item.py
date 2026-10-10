@@ -18,8 +18,9 @@ from app.models.user import User
 class TripItemKind(StrEnum):
     LODGING = "lodging"  # starts_at = check-in, ends_at = check-out
     ACTIVITY = "activity"
-    TRANSIT = "transit"  # location -> end_location
-    ARRIVAL = "arrival"  # someone joining the trip; a personal item by the arriver
+    # location -> end_location; starts_at = departure, ends_at = arrival. A
+    # member's own transit is how the group learns when they come and go.
+    TRANSIT = "transit"
 
 
 class TripItemScope(StrEnum):

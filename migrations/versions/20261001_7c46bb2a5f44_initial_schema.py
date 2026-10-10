@@ -67,7 +67,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_trips_owner_id'), 'trips', ['owner_id'], unique=False)
     op.create_table('trip_items',
     sa.Column('trip_id', sa.Uuid(), nullable=False),
-    sa.Column('kind', sa.Enum('lodging', 'activity', 'transit', 'arrival', name='trip_item_kind', native_enum=False, length=32), nullable=False),
+    sa.Column('kind', sa.Enum('lodging', 'activity', 'transit', name='trip_item_kind', native_enum=False, length=32), nullable=False),
     sa.Column('scope', sa.Enum('group', 'personal', name='trip_item_scope', native_enum=False, length=32), nullable=False),
     sa.Column('requirement', sa.Enum('mandatory', 'recommended', 'optional', name='trip_item_requirement', native_enum=False, length=32), nullable=True),
     sa.Column('visibility', sa.Enum('private', 'shared', 'open', name='trip_item_visibility', native_enum=False, length=32), nullable=True),
@@ -86,7 +86,7 @@ def upgrade() -> None:
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.CheckConstraint("(scope = 'group') = (requirement IS NOT NULL)", name=op.f('ck_trip_items_group_has_requirement')),
     sa.CheckConstraint("(scope = 'personal') = (visibility IS NOT NULL)", name=op.f('ck_trip_items_personal_has_visibility')),
-    sa.CheckConstraint("kind IN ('lodging', 'activity', 'transit', 'arrival')", name=op.f('ck_trip_items_trip_item_kind')),
+    sa.CheckConstraint("kind IN ('lodging', 'activity', 'transit')", name=op.f('ck_trip_items_trip_item_kind')),
     sa.CheckConstraint("requirement IN ('mandatory', 'recommended', 'optional')", name=op.f('ck_trip_items_trip_item_requirement')),
     sa.CheckConstraint("scope IN ('group', 'personal')", name=op.f('ck_trip_items_trip_item_scope')),
     sa.CheckConstraint("visibility IN ('private', 'shared', 'open')", name=op.f('ck_trip_items_trip_item_visibility')),

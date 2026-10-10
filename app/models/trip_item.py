@@ -81,6 +81,9 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # IANA name for the item's local time, used to bucket it into a day. When
+    # unset the location's timezone is used, then UTC.
+    timezone: Mapped[str | None] = mapped_column(String(64))
     image_url: Mapped[str | None] = mapped_column(String(2048))
 
     location_id: Mapped[uuid.UUID | None] = mapped_column(

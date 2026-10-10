@@ -26,7 +26,7 @@ from app.services.itinerary import build_itinerary
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
-NOT_NULLABLE = ("title", "start_date", "end_date", "timezone")
+NOT_NULLABLE = ("title", "start_date", "end_date")
 
 
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)

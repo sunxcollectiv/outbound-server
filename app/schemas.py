@@ -133,7 +133,6 @@ class TripCreate(BaseModel):
     description: str | None = None
     start_date: date
     end_date: date
-    timezone: TimezoneName
     cover_image_url: Url | None = None
 
     @model_validator(mode="after")
@@ -148,7 +147,6 @@ class TripUpdate(BaseModel):
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None
-    timezone: TimezoneName | None = None
     cover_image_url: Url | None = None
 
 
@@ -159,7 +157,6 @@ class TripRead(ReadModel):
     description: str | None
     start_date: date
     end_date: date
-    timezone: str
     cover_image_url: str | None
     created_at: datetime
     updated_at: datetime
@@ -203,6 +200,8 @@ class TripItemCreate(BaseModel):
     tags: list[Tag] = Field(default_factory=list)
     starts_at: AwareDatetime
     ends_at: AwareDatetime | None = None
+    # Local zone for day bucketing; falls back to the location's, then UTC.
+    timezone: TimezoneName | None = None
     image_url: Url | None = None
     location_id: uuid.UUID | None = None
     end_location_id: uuid.UUID | None = None
@@ -233,6 +232,7 @@ class TripItemUpdate(BaseModel):
     tags: list[Tag] | None = None
     starts_at: AwareDatetime | None = None
     ends_at: AwareDatetime | None = None
+    timezone: TimezoneName | None = None
     image_url: Url | None = None
     location_id: uuid.UUID | None = None
     end_location_id: uuid.UUID | None = None
@@ -260,6 +260,7 @@ class TripItemRead(ReadModel):
     tags: list[str]
     starts_at: datetime
     ends_at: datetime | None
+    timezone: str | None
     image_url: str | None
     location: LocationRead | None
     end_location: LocationRead | None

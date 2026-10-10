@@ -6,10 +6,14 @@ from app.models import Trip, TripItem, TripItemKind
 from app.schemas import Itinerary, ItineraryDay, LodgingStay, TripItemRead, TripRead
 
 
-def _item_timezone(item: TripItem, trip: Trip) -> ZoneInfo:
+def _item_timezone(item: TripItem) -> ZoneInfo:
+    """The item's own zone, else its location's, else UTC. Trips don't carry a
+    timezone because one trip can cross several."""
+    if item.timezone:
+        return ZoneInfo(item.timezone)
     if item.location is not None and item.location.timezone:
         return ZoneInfo(item.location.timezone)
-    return ZoneInfo(trip.timezone)
+    return ZoneInfo("UTC")
 
 
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
@@ -22,7 +26,7 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     lodging_by_day: dict[date, list[LodgingStay]] = defaultdict(list)
 
     for item in sorted(items, key=lambda i: i.starts_at):
-        tz = _item_timezone(item, trip)
+        tz = _item_timezone(item)
         start_day = item.starts_at.astimezone(tz).date()
         read = TripItemRead.model_validate(item)
         items_by_day[start_day].append(read)

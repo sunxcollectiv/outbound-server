@@ -32,9 +32,8 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     start_date: Mapped[date] = mapped_column(Date)
     end_date: Mapped[date] = mapped_column(Date)
-    # IANA name, e.g. "Asia/Tokyo". Used to bucket items into days when an
-    # item's location doesn't carry its own timezone.
-    timezone: Mapped[str] = mapped_column(String(64))
+    # No timezone here: a trip can cross zones, so each item resolves its own
+    # (see TripItem.timezone).
     cover_image_url: Mapped[str | None] = mapped_column(String(2048))
 
     owner: Mapped[User] = relationship()

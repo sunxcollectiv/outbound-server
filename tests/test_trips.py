@@ -7,9 +7,6 @@ def test_trip_validation(client, make_user):
     backwards = {**JAPAN_TRIP, "end_date": "2026-04-01"}
     assert client.post("/trips", json=backwards, headers=sun).status_code == 422
 
-    bad_timezone = {**JAPAN_TRIP, "timezone": "Asia/Tokio"}
-    assert client.post("/trips", json=bad_timezone, headers=sun).status_code == 422
-
 
 def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_trip):
     sun, stranger = make_user("sun"), make_user("stranger")

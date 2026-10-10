@@ -70,6 +70,9 @@ def test_item_validation(client, make_user, make_trip):
     missing_location = {**base, "location_id": str(uuid.uuid4())}
     assert client.post(url, json=missing_location, headers=sun).status_code == 422
 
+    bad_timezone = {**base, "timezone": "Asia/Tokio"}
+    assert client.post(url, json=bad_timezone, headers=sun).status_code == 422
+
     # Group items carry a requirement, personal items a visibility; never the other.
     group_with_visibility = {**base, "visibility": "shared"}
     assert client.post(url, json=group_with_visibility, headers=sun).status_code == 422
@@ -118,8 +121,9 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     url = f"/trips/{trip['id']}"
     client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
 
-    def add(headers=sun, scope="group", **item):
-        response = client.post(f"{url}/items", json={"scope": scope, **item}, headers=headers)
+    def add(headers=sun, scope="group", timezone="Asia/Tokyo", **item):
+        payload = {"scope": scope, "timezone": timezone, **item}
+        response = client.post(f"{url}/items", json=payload, headers=headers)
         assert response.status_code == 201, response.text
 
     # Inserted out of order on purpose.
@@ -141,6 +145,8 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     )
     # 00:30 on the 10th in Tokyo is still the 9th in UTC.
     add(kind="activity", title="Golden Gai", starts_at="2026-04-09T15:30:00Z")
+    # Without a timezone or a located place, days are bucketed in UTC.
+    add(kind="activity", title="Jet-lag nap", starts_at="2026-04-10T23:30:00+09:00", timezone=None)
 
     response = client.get(f"{url}/itinerary", headers=sun)
     assert response.status_code == 200
@@ -161,11 +167,12 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     assert [(p["user"]["email"], p["status"]) for p in arrival["participants"]] == [
         ("sean@example.com", "going")
     ]
-    assert [item["title"] for item in days[1]["items"]] == ["Golden Gai"]
+    assert [item["title"] for item in days[1]["items"]] == ["Golden Gai", "Jet-lag nap"]
 
     phases = [[stay["phase"] for stay in day["lodging"]] for day in days]
     assert phases == [["check_in"], ["staying"], ["check_out"], [], [], [], []]
     assert days[2]["items"] == []
+    assert days[0]["items"][0]["timezone"] == "Asia/Tokyo"
 
 
 def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(

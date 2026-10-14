@@ -176,16 +176,20 @@ class TripMemberRead(ReadModel):
 # --- trip items ---
 
 
-def check_scope_fields(
+def resolve_scope_fields(
     scope: TripItemScope,
     requirement: TripItemRequirement | None,
     visibility: TripItemVisibility | None,
-) -> None:
-    """Group items carry a requirement, personal items carry a visibility, never both."""
-    if scope is TripItemScope.GROUP and visibility is not None:
-        raise ValueError("visibility only applies to personal items")
-    if scope is TripItemScope.PERSONAL and requirement is not None:
+) -> tuple[TripItemRequirement | None, TripItemVisibility | None]:
+    """Group items carry a requirement, personal items carry a visibility, never
+    both. Fills in the default for the missing one and rejects the wrong one."""
+    if scope is TripItemScope.GROUP:
+        if visibility is not None:
+            raise ValueError("visibility only applies to personal items")
+        return requirement or TripItemRequirement.OPTIONAL, None
+    if requirement is not None:
         raise ValueError("requirement only applies to group items")
+    return None, visibility or TripItemVisibility.SHARED
 
 
 class TripItemCreate(BaseModel):
@@ -208,23 +212,24 @@ class TripItemCreate(BaseModel):
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        check_scope_fields(self.scope, self.requirement, self.visibility)
-        if self.scope is TripItemScope.GROUP and self.requirement is None:
-            self.requirement = TripItemRequirement.OPTIONAL
-        if self.scope is TripItemScope.PERSONAL and self.visibility is None:
-            self.visibility = TripItemVisibility.SHARED
+        self.requirement, self.visibility = resolve_scope_fields(
+            self.scope, self.requirement, self.visibility
+        )
         if self.ends_at is not None and self.ends_at < self.starts_at:
             raise ValueError("ends_at must be at or after starts_at")
         return self
 
 
 class TripItemUpdate(BaseModel):
-    """scope is fixed at creation and deliberately absent here; extra="forbid"
-    turns an attempt to change it into a 422 instead of a silent no-op."""
+    """Every field from TripItemCreate, all optional. Unknown keys are a 422
+    rather than a silent no-op."""
 
     model_config = ConfigDict(extra="forbid")
 
     kind: TripItemKind | None = None
+    # Changing scope re-homes the item, so the route requires the caller to be
+    # allowed to modify both the old and the new form.
+    scope: TripItemScope | None = None
     requirement: TripItemRequirement | None = None
     visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)

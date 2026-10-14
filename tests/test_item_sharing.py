@@ -202,3 +202,53 @@ def test_personal_items_can_sit_outside_the_trip_dates(client, wedding):
     assert days[0]["date"] == "2026-04-07"
     assert days[0]["day_number"] == -1
     assert [i["title"] for i in days[0]["items"]] == ["Fly in early"]
+
+
+def test_changing_scope(client, wedding):
+    url, sun, sean, amy, add = (wedding[k] for k in ("url", "sun", "sean", "amy", "add"))
+
+    # A member can't turn their own item into a group item: that needs an organizer.
+    mine = add(sean, scope="personal", title="Karaoke", visibility="open")
+    denied = client.patch(f"{url}/items/{mine['id']}", json={"scope": "group"}, headers=sean)
+    assert denied.status_code == 403
+
+    # An organizer can't take someone else's personal item and make it group either.
+    denied = client.patch(f"{url}/items/{mine['id']}", json={"scope": "group"}, headers=sun)
+    assert denied.status_code == 403
+
+    # The organizer who created a group item can make it their personal one. RSVPs
+    # become attendees: declines drop out, and the creator is always in.
+    dinner = add(sun, scope="group", title="Rehearsal dinner", requirement="mandatory")
+    client.put(f"{url}/items/{dinner['id']}/rsvp", json={"status": "going"}, headers=sean)
+    client.put(f"{url}/items/{dinner['id']}/rsvp", json={"status": "declined"}, headers=amy)
+    # Another organizer who didn't create it can't re-home it.
+    client.post(f"{url}/members", json={"user_id": amy.user_id, "role": "organizer"}, headers=sun)
+    denied = client.patch(f"{url}/items/{dinner['id']}", json={"scope": "personal"}, headers=amy)
+    assert denied.status_code == 403
+
+    demoted = client.patch(f"{url}/items/{dinner['id']}", json={"scope": "personal"}, headers=sun)
+    assert demoted.status_code == 200, demoted.text
+    assert demoted.json()["scope"] == "personal"
+    assert demoted.json()["requirement"] is None
+    assert demoted.json()["visibility"] == "shared"  # default when none was sent
+    assert _rsvps(demoted.json()) == {"sean@example.com": "going", "sun@example.com": "going"}
+
+    # And back to group, this time with the requirement spelled out. The stale
+    # visibility is cleared without the client having to null it.
+    promoted = client.patch(
+        f"{url}/items/{dinner['id']}",
+        json={"scope": "group", "requirement": "recommended"},
+        headers=sun,
+    )
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["requirement"] == "recommended"
+    assert promoted.json()["visibility"] is None
+    assert _rsvps(promoted.json()) == {"sean@example.com": "going", "sun@example.com": "going"}
+
+    # Sending the other scope's field alongside a scope change is still rejected.
+    wrong = client.patch(
+        f"{url}/items/{dinner['id']}",
+        json={"scope": "personal", "requirement": "mandatory"},
+        headers=sun,
+    )
+    assert wrong.status_code == 422

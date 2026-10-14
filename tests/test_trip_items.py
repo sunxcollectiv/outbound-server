@@ -86,11 +86,12 @@ def test_item_validation(client, make_user, make_trip):
     response = client.patch(f"{url}/{item['id']}", json=moved_before_start, headers=sun)
     assert response.status_code == 422
 
-    # Scope is fixed once created, and the scope-bound field can't be nulled or swapped.
+    # The scope-bound field can't be nulled or swapped for the other scope's.
     item_url = f"{url}/{item['id']}"
-    assert client.patch(item_url, json={"scope": "personal"}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"scope": None}, headers=sun).status_code == 422
     assert client.patch(item_url, json={"requirement": None}, headers=sun).status_code == 422
     assert client.patch(item_url, json={"visibility": "open"}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"colour": "red"}, headers=sun).status_code == 422
     changed = client.patch(item_url, json={"requirement": "mandatory"}, headers=sun)
     assert changed.status_code == 200
     assert changed.json()["requirement"] == "mandatory"

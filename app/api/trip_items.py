@@ -17,11 +17,17 @@ from app.models import (
     TripItemVisibility,
     User,
 )
-from app.schemas import RsvpUpdate, TripItemCreate, TripItemRead, TripItemUpdate, check_scope_fields
+from app.schemas import (
+    RsvpUpdate,
+    TripItemCreate,
+    TripItemRead,
+    TripItemUpdate,
+    resolve_scope_fields,
+)
 
 router = APIRouter(prefix="/trips/{trip_id}/items", tags=["trip items"])
 
-NOT_NULLABLE = ("kind", "title", "tags", "starts_at")
+NOT_NULLABLE = ("kind", "scope", "title", "tags", "starts_at")
 
 
 def _unprocessable(detail: str) -> HTTPException:
@@ -72,15 +78,38 @@ def _get_item(session: Session, trip: Trip, user: User, item_id: uuid.UUID) -> T
     return item
 
 
-def _require_can_modify(session: Session, trip: Trip, user: User, item: TripItem) -> None:
-    """Group items belong to the organizers; personal items only to their creator."""
-    if item.scope is TripItemScope.GROUP:
+def _require_can_modify(
+    session: Session,
+    trip: Trip,
+    user: User,
+    item: TripItem,
+    as_scope: TripItemScope | None = None,
+) -> None:
+    """Group items belong to the organizers; personal items only to their creator.
+    Pass as_scope to check against a scope the item is about to take."""
+    scope = as_scope or item.scope
+    if scope is TripItemScope.GROUP:
         if not is_organizer(session, trip, user):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can change group items")
     elif item.created_by_id != user.id:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only the person who added this item can change it"
         )
+
+
+def _settle_participants(item: TripItem) -> None:
+    """After a scope change, make the participant rows fit the new meaning.
+
+    Personal items list who's in, so a 'declined' RSVP from the group days is
+    dropped and the creator is always in. Group items keep rows as RSVPs."""
+    if item.scope is TripItemScope.PERSONAL:
+        for row in list(item.participants):
+            if row.status is RsvpStatus.DECLINED:
+                item.participants.remove(row)
+        if not any(row.user_id == item.created_by_id for row in item.participants):
+            item.participants.append(
+                TripItemParticipant(user_id=item.created_by_id, status=RsvpStatus.GOING)
+            )
 
 
 def _refresh(session: Session, item: TripItem) -> TripItem:
@@ -145,16 +174,28 @@ def update_item(
             raise _unprocessable(f"{field} cannot be null")
     _check_references(session, changes)
 
-    requirement = changes.get("requirement", item.requirement)
-    visibility = changes.get("visibility", item.visibility)
+    scope = changes.get("scope", item.scope)
+    if scope is not item.scope:
+        # The caller must be allowed to modify the item in its new form too, and
+        # the item keeps its creator, who is who a personal item belongs to.
+        _require_can_modify(session, trip, user, item, as_scope=scope)
+        if scope is TripItemScope.PERSONAL and item.created_by_id is None:
+            raise _unprocessable("This item's creator has left the trip; it can't become personal")
+        # The old scope's field doesn't carry over; defaults fill whatever wasn't sent.
+        requirement, visibility = changes.get("requirement"), changes.get("visibility")
+    else:
+        # Clearing the field the current scope needs is an error, not a reset.
+        own_field = "requirement" if scope is TripItemScope.GROUP else "visibility"
+        if own_field in changes and changes[own_field] is None:
+            raise _unprocessable(f"{own_field} cannot be null on a {scope.value} item")
+        requirement = changes.get("requirement", item.requirement)
+        visibility = changes.get("visibility", item.visibility)
     try:
-        check_scope_fields(item.scope, requirement, visibility)
+        changes["requirement"], changes["visibility"] = resolve_scope_fields(
+            scope, requirement, visibility
+        )
     except ValueError as exc:
         raise _unprocessable(str(exc)) from None
-    if item.scope is TripItemScope.GROUP and requirement is None:
-        raise _unprocessable("requirement cannot be null on a group item")
-    if item.scope is TripItemScope.PERSONAL and visibility is None:
-        raise _unprocessable("visibility cannot be null on a personal item")
 
     starts_at = changes.get("starts_at", item.starts_at)
     ends_at = changes.get("ends_at", item.ends_at)
@@ -163,6 +204,8 @@ def update_item(
 
     for field, value in changes.items():
         setattr(item, field, value)
+    if "scope" in changes:
+        _settle_participants(item)
     session.commit()
     return _refresh(session, item)
 

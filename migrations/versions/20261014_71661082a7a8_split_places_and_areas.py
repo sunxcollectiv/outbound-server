@@ -56,7 +56,6 @@ def upgrade() -> None:
         'areas',
         sa.Column('name', sa.String(length=200), nullable=False),
         sa.Column('photo_url', sa.String(length=2048), nullable=True),
-        sa.Column('address', sa.String(length=500), nullable=True),
         sa.Column('created_by_id', sa.Uuid(), nullable=True),
         sa.Column('id', sa.Uuid(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),

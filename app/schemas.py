@@ -79,7 +79,6 @@ class TokenRead(BaseModel):
 
 class AreaBase(BaseModel):
     photo_url: Url | None = None
-    address: str | None = Field(default=None, max_length=500)
 
 
 class AreaCreate(AreaBase):
@@ -94,7 +93,6 @@ class AreaRead(ReadModel):
     id: uuid.UUID
     name: str
     photo_url: str | None
-    address: str | None
     created_at: datetime
     updated_at: datetime
 

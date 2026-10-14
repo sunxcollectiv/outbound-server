@@ -6,7 +6,7 @@ def test_area_crud(client, make_user):
 
     created = client.post(
         "/areas",
-        json={"name": "Paris", "address": "Île-de-France, France", "photo_url": "https://x/p.jpg"},
+        json={"name": "Paris", "photo_url": "https://x/p.jpg"},
         headers=sun,
     )
     assert created.status_code == 201, created.text

@@ -93,9 +93,11 @@ def _component(details: dict[str, Any], *types: str) -> str | None:
 
 
 def apply_area_from_google(session: Session, place: Place, details: dict[str, Any]) -> None:
-    """Point `place` at the area it sits in, get-or-creating that
-    area. A no-op when the place already has a area or is itself a
-    city. Parses the already-fetched Place Details response — no extra API call.
+    """Point `place` at the area it sits in, get-or-creating that area. A no-op
+    when the place already has an area or is itself a city. Parses the
+    already-fetched Place Details response — no extra API call.
+
+    Areas are deduped by name alone for now; same-named cities would share one.
     """
     if place.area_id is not None:
         return
@@ -109,17 +111,8 @@ def apply_area_from_google(session: Session, place: Place, details: dict[str, An
     if not city or (place.name and city.casefold() == place.name.casefold()):
         return
 
-    admin = _component(details, "administrative_area_level_1")
-    country = _component(details, "country")
-    region = ", ".join(part for part in (admin, country) if part) or None
-
-    area = session.scalar(
-        select(Area).where(
-            func.lower(Area.name) == city.lower(),
-            Area.address.is_not_distinct_from(region),
-        )
-    )
+    area = session.scalar(select(Area).where(func.lower(Area.name) == city.lower()))
     if area is None:
-        area = Area(name=city, address=region, created_by_id=place.created_by_id)
+        area = Area(name=city, created_by_id=place.created_by_id)
         session.add(area)
     place.area = area

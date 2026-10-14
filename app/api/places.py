@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area, Place
-from app.schemas import PlaceCreate, PlaceFromGoogle, PlaceRead, PlaceUpdate
+from app.schemas import PlaceCreate, PlaceRead, PlaceUpdate
 from app.services.google_places import (
     GooglePlaceNotFound,
     GooglePlacesClient,
@@ -63,38 +63,23 @@ def _commit_unique_place(session: SessionDep) -> None:
 
 
 @router.post("", response_model=PlaceRead, status_code=status.HTTP_201_CREATED)
-def create_place(payload: PlaceCreate, user: CurrentUser, session: SessionDep) -> Place:
-    _check_area(session, payload.area_id)
-    place = Place(**payload.model_dump(), created_by_id=user.id)
-    session.add(place)
-    _commit_unique_place(session)
-    return place
-
-
-@router.post("/from-google", response_model=PlaceRead)
-def create_place_from_google(
-    payload: PlaceFromGoogle,
-    response: Response,
-    user: CurrentUser,
-    session: SessionDep,
-    places: PlacesDep,
+def create_place(
+    payload: PlaceCreate, response: Response, user: CurrentUser, session: SessionDep
 ) -> Place:
-    """Get-or-create by Google place id: 200 if we already have it, 201 if new."""
+    """Register a Google place as an un-enriched stub: we store only the
+    google_place_id and hand back the generated id (name, address, area and the
+    rest are filled in by a later enrichment/review step). Get-or-create on the
+    unique google_place_id: 200 if we already have it, 201 if new."""
     existing = session.scalar(
         select(Place).where(Place.google_place_id == payload.google_place_id)
     )
     if existing is not None:
+        response.status_code = status.HTTP_200_OK
         return existing
 
-    details = _fetch_place(places, payload.google_place_id)
     place = Place(google_place_id=payload.google_place_id, created_by_id=user.id)
-    apply_google_place(place, details)
-    if place.name is None:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Google returned a place with no name")
-    apply_area_from_google(session, place, details)
     session.add(place)
     _commit_unique_place(session)
-    response.status_code = status.HTTP_201_CREATED
     return place
 
 

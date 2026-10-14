@@ -117,25 +117,22 @@ class PlaceBase(BaseModel):
     timezone: TimezoneName | None = None
 
 
-class PlaceCreate(PlaceBase):
-    name: str = Field(min_length=1, max_length=200)
-    area_id: uuid.UUID | None = None
-    google_place_id: str | None = Field(default=None, min_length=1, max_length=255)
-
-
 class PlaceUpdate(PlaceBase):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     area_id: uuid.UUID | None = None
     google_place_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class PlaceFromGoogle(BaseModel):
+class PlaceCreate(BaseModel):
+    """The one thing a client supplies to register a place: a Google place id.
+    Everything else is filled in later (enrichment, then review)."""
+
     google_place_id: str = Field(min_length=1, max_length=255)
 
 
 class PlaceRead(ReadModel):
     id: uuid.UUID
-    name: str
+    name: str | None
     category: str | None
     notes: str | None
     photo_url: str | None

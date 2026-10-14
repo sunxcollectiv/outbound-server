@@ -25,7 +25,7 @@ class Place(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "places"
 
-    name: Mapped[str] = mapped_column(String(200), index=True)
+    name: Mapped[str | None] = mapped_column(String(200), index=True)
     category: Mapped[str | None] = mapped_column(String(60))
     notes: Mapped[str | None] = mapped_column(Text)
     photo_url: Mapped[str | None] = mapped_column(String(2048))

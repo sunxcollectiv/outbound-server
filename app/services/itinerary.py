@@ -7,8 +7,8 @@ from app.schemas import Itinerary, ItineraryDay, LodgingStay, TripItemRead, Trip
 
 
 def _item_timezone(item: TripItem, trip: Trip) -> ZoneInfo:
-    if item.location is not None and item.location.timezone:
-        return ZoneInfo(item.location.timezone)
+    if item.place is not None and item.place.timezone:
+        return ZoneInfo(item.place.timezone)
     return ZoneInfo(trip.timezone)
 
 

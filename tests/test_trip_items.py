@@ -1,18 +1,18 @@
 import uuid
 
 
-def _location(client, headers, **fields):
-    response = client.post("/locations", json=fields, headers=headers)
+def _place(client, headers, **fields):
+    response = client.post("/places", json=fields, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()
 
 
-def test_item_round_trip_with_locations(client, make_user, make_trip):
+def test_item_round_trip_with_places(client, make_user, make_trip):
     sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    kyoto = _location(client, sun, name="Kyoto Station")
-    osaka = _location(client, sun, name="Shin-Osaka Station")
+    kyoto = _place(client, sun, name="Kyoto Station")
+    osaka = _place(client, sun, name="Shin-Osaka Station")
 
     created = client.post(
         url,
@@ -22,23 +22,23 @@ def test_item_round_trip_with_locations(client, make_user, make_trip):
             "tags": ["Transit", "JR"],
             "starts_at": "2026-04-14T09:00:00+09:00",
             "ends_at": "2026-04-14T09:30:00+09:00",
-            "location_id": kyoto["id"],
-            "end_location_id": osaka["id"],
+            "place_id": kyoto["id"],
+            "end_place_id": osaka["id"],
         },
         headers=sun,
     )
     assert created.status_code == 201, created.text
     item = created.json()
-    assert item["location"]["name"] == "Kyoto Station"
-    assert item["end_location"]["name"] == "Shin-Osaka Station"
+    assert item["place"]["name"] == "Kyoto Station"
+    assert item["end_place"]["name"] == "Shin-Osaka Station"
     assert item["tags"] == ["Transit", "JR"]
 
-    # Changing the location id is reflected in the embedded location.
+    # Changing the place id is reflected in the embedded place.
     patched = client.patch(
-        f"{url}/{item['id']}", json={"location_id": osaka["id"], "notes": "Car 5"}, headers=sun
+        f"{url}/{item['id']}", json={"place_id": osaka["id"], "notes": "Car 5"}, headers=sun
     )
     assert patched.status_code == 200
-    assert patched.json()["location"]["name"] == "Shin-Osaka Station"
+    assert patched.json()["place"]["name"] == "Shin-Osaka Station"
     assert patched.json()["notes"] == "Car 5"
 
     assert client.delete(f"{url}/{item['id']}", headers=sun).status_code == 204
@@ -57,8 +57,8 @@ def test_item_validation(client, make_user, make_trip):
     ends_first = {**base, "ends_at": "2026-04-09T17:00:00+09:00"}
     assert client.post(url, json=ends_first, headers=sun).status_code == 422
 
-    missing_location = {**base, "location_id": str(uuid.uuid4())}
-    assert client.post(url, json=missing_location, headers=sun).status_code == 422
+    missing_place = {**base, "place_id": str(uuid.uuid4())}
+    assert client.post(url, json=missing_place, headers=sun).status_code == 422
 
     not_on_trip = {**base, "kind": "arrival", "traveler_id": stranger.user_id}
     assert client.post(url, json=not_on_trip, headers=sun).status_code == 422
@@ -132,13 +132,13 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     assert days[2]["items"] == []
 
 
-def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(
+def test_itinerary_uses_place_timezone_and_keeps_out_of_range_items(
     client, make_user, make_trip
 ):
     sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    lax = _location(client, sun, name="LAX", timezone="America/Los_Angeles")
+    lax = _place(client, sun, name="LAX", timezone="America/Los_Angeles")
 
     # 08:00 on Apr 9 in Tokyo, but the flight leaves LA on the afternoon of the 8th.
     client.post(
@@ -147,7 +147,7 @@ def test_itinerary_uses_location_timezone_and_keeps_out_of_range_items(
             "kind": "transit",
             "title": "Flight to Tokyo",
             "starts_at": "2026-04-08T23:00:00Z",
-            "location_id": lax["id"],
+            "place_id": lax["id"],
         },
         headers=sun,
     )

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentUser, EditableTrip, SessionDep, ViewableTrip
-from app.models import Location, Trip, TripItem, TripItemKind, TripMember
+from app.models import Place, Trip, TripItem, TripItemKind, TripMember
 from app.schemas import TripItemCreate, TripItemRead, TripItemUpdate
 
 router = APIRouter(prefix="/trips/{trip_id}/items", tags=["trip items"])
@@ -19,10 +19,10 @@ def _unprocessable(detail: str) -> HTTPException:
 
 
 def _check_references(session: Session, trip: Trip, values: dict[str, Any]) -> None:
-    for field in ("location_id", "end_location_id"):
-        location_id = values.get(field)
-        if location_id is not None and session.get(Location, location_id) is None:
-            raise _unprocessable(f"{field} does not match a location")
+    for field in ("place_id", "end_place_id"):
+        place_id = values.get(field)
+        if place_id is not None and session.get(Place, place_id) is None:
+            raise _unprocessable(f"{field} does not match a place")
 
     traveler_id = values.get("traveler_id")
     if traveler_id is not None and traveler_id != trip.owner_id:
@@ -45,8 +45,8 @@ def list_items(
         select(TripItem)
         .where(TripItem.trip_id == trip.id)
         .options(
-            selectinload(TripItem.location),
-            selectinload(TripItem.end_location),
+            selectinload(TripItem.place).selectinload(Place.area),
+            selectinload(TripItem.end_place).selectinload(Place.area),
             selectinload(TripItem.traveler),
         )
         .order_by(TripItem.starts_at, TripItem.id)
@@ -92,7 +92,7 @@ def update_item(
     for field, value in changes.items():
         setattr(item, field, value)
     session.commit()
-    # Reload so the location/traveler relationships follow any changed ids.
+    # Reload so the place/traveler relationships follow any changed ids.
     session.refresh(item)
     return item
 

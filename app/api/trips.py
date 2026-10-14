@@ -5,7 +5,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, EditableTrip, OwnedTrip, SessionDep, ViewableTrip
-from app.models import Trip, TripItem, TripMember, User
+from app.models import Place, Trip, TripItem, TripMember, User
 from app.schemas import (
     Itinerary,
     TripCreate,
@@ -76,8 +76,8 @@ def read_itinerary(trip: ViewableTrip, session: SessionDep) -> Itinerary:
         select(TripItem)
         .where(TripItem.trip_id == trip.id)
         .options(
-            selectinload(TripItem.location),
-            selectinload(TripItem.end_location),
+            selectinload(TripItem.place).selectinload(Place.area),
+            selectinload(TripItem.end_place).selectinload(Place.area),
             selectinload(TripItem.traveler),
         )
     )

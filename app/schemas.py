@@ -74,10 +74,35 @@ class TokenRead(BaseModel):
     user: UserRead
 
 
-# --- locations ---
+# --- areas (the place-on-the-map a place sits in) ---
 
 
-class LocationBase(BaseModel):
+class AreaBase(BaseModel):
+    photo_url: Url | None = None
+    address: str | None = Field(default=None, max_length=500)
+
+
+class AreaCreate(AreaBase):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class AreaUpdate(AreaBase):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class AreaRead(ReadModel):
+    id: uuid.UUID
+    name: str
+    photo_url: str | None
+    address: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- places (specific spots in our catalogue) ---
+
+
+class PlaceBase(BaseModel):
     category: str | None = Field(default=None, max_length=60)
     notes: str | None = None
     photo_url: Url | None = None
@@ -87,21 +112,23 @@ class LocationBase(BaseModel):
     timezone: TimezoneName | None = None
 
 
-class LocationCreate(LocationBase):
+class PlaceCreate(PlaceBase):
     name: str = Field(min_length=1, max_length=200)
+    area_id: uuid.UUID | None = None
     google_place_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class LocationUpdate(LocationBase):
+class PlaceUpdate(PlaceBase):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    area_id: uuid.UUID | None = None
     google_place_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class LocationFromGoogle(BaseModel):
+class PlaceFromGoogle(BaseModel):
     google_place_id: str = Field(min_length=1, max_length=255)
 
 
-class LocationRead(ReadModel):
+class PlaceRead(ReadModel):
     id: uuid.UUID
     name: str
     category: str | None
@@ -111,6 +138,8 @@ class LocationRead(ReadModel):
     latitude: float | None
     longitude: float | None
     timezone: str | None
+    area_id: uuid.UUID | None
+    area: AreaRead | None
     google_place_id: str | None
     google_data: dict[str, Any] | None
     google_fetched_at: datetime | None
@@ -180,8 +209,8 @@ class TripItemCreate(BaseModel):
     starts_at: AwareDatetime
     ends_at: AwareDatetime | None = None
     image_url: Url | None = None
-    location_id: uuid.UUID | None = None
-    end_location_id: uuid.UUID | None = None
+    place_id: uuid.UUID | None = None
+    end_place_id: uuid.UUID | None = None
     traveler_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
@@ -199,8 +228,8 @@ class TripItemUpdate(BaseModel):
     starts_at: AwareDatetime | None = None
     ends_at: AwareDatetime | None = None
     image_url: Url | None = None
-    location_id: uuid.UUID | None = None
-    end_location_id: uuid.UUID | None = None
+    place_id: uuid.UUID | None = None
+    end_place_id: uuid.UUID | None = None
     traveler_id: uuid.UUID | None = None
 
 
@@ -214,8 +243,8 @@ class TripItemRead(ReadModel):
     starts_at: datetime
     ends_at: datetime | None
     image_url: str | None
-    location: LocationRead | None
-    end_location: LocationRead | None
+    place: PlaceRead | None
+    end_place: PlaceRead | None
     traveler: UserRead | None
     created_at: datetime
     updated_at: datetime

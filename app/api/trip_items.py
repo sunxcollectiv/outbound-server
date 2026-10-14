@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentUser, SessionDep, ViewableTrip, is_organizer
 from app.models import (
-    Location,
+    Place,
     RsvpStatus,
     Trip,
     TripItem,
@@ -55,18 +55,18 @@ def visible_items(trip: Trip, user: User) -> Select[tuple[TripItem]]:
 def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]:
     """Eager-load everything TripItemRead embeds."""
     return query.options(
-        selectinload(TripItem.location),
-        selectinload(TripItem.end_location),
+        selectinload(TripItem.place).selectinload(Place.area),
+        selectinload(TripItem.end_place).selectinload(Place.area),
         selectinload(TripItem.created_by),
         selectinload(TripItem.participants).selectinload(TripItemParticipant.user),
     )
 
 
 def _check_references(session: Session, values: dict[str, Any]) -> None:
-    for field in ("location_id", "end_location_id"):
-        location_id = values.get(field)
-        if location_id is not None and session.get(Location, location_id) is None:
-            raise _unprocessable(f"{field} does not match a location")
+    for field in ("place_id", "end_place_id"):
+        place_id = values.get(field)
+        if place_id is not None and session.get(Place, place_id) is None:
+            raise _unprocessable(f"{field} does not match a place")
 
 
 def _get_item(session: Session, trip: Trip, user: User, item_id: uuid.UUID) -> TripItem:

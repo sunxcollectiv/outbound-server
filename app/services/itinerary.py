@@ -7,19 +7,19 @@ from app.schemas import Itinerary, ItineraryDay, LodgingStay, TripItemRead, Trip
 
 
 def _item_timezone(item: TripItem) -> ZoneInfo:
-    """The item's own zone, else its location's, else UTC. Trips don't carry a
+    """The item's own zone, else its place's, else UTC. Trips don't carry a
     timezone because one trip can cross several."""
     if item.timezone:
         return ZoneInfo(item.timezone)
-    if item.location is not None and item.location.timezone:
-        return ZoneInfo(item.location.timezone)
+    if item.place is not None and item.place.timezone:
+        return ZoneInfo(item.place.timezone)
     return ZoneInfo("UTC")
 
 
 def _arrival_timezone(item: TripItem) -> ZoneInfo:
     """Where a transit item ends, which may be a different zone from where it starts."""
-    if item.end_location is not None and item.end_location.timezone:
-        return ZoneInfo(item.end_location.timezone)
+    if item.end_place is not None and item.end_place.timezone:
+        return ZoneInfo(item.end_place.timezone)
     return _item_timezone(item)
 
 

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin, str_enum
-from app.models.location import Location
+from app.models.place import Place
 from app.models.trip import Trip
 from app.models.user import User
 
@@ -18,7 +18,7 @@ from app.models.user import User
 class TripItemKind(StrEnum):
     LODGING = "lodging"  # starts_at = check-in, ends_at = check-out
     ACTIVITY = "activity"
-    # location -> end_location; starts_at = departure, ends_at = arrival. A
+    # place -> end_place; starts_at = departure, ends_at = arrival. A
     # member's own transit is how the group learns when they come and go.
     TRANSIT = "transit"
 
@@ -83,15 +83,15 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # IANA name for the item's local time, used to bucket it into a day. When
-    # unset the location's timezone is used, then UTC.
+    # unset the place's timezone is used, then UTC.
     timezone: Mapped[str | None] = mapped_column(String(64))
     image_url: Mapped[str | None] = mapped_column(String(2048))
 
-    location_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("locations.id", ondelete="SET NULL"), index=True
+    place_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL"), index=True
     )
-    end_location_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("locations.id", ondelete="SET NULL")
+    end_place_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL")
     )
     # For personal items this is the owner: the only person who may edit or
     # delete it, and the only one who can see it when it's private.
@@ -100,8 +100,8 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     trip: Mapped[Trip] = relationship(back_populates="items")
-    location: Mapped[Location | None] = relationship(foreign_keys=[location_id])
-    end_location: Mapped[Location | None] = relationship(foreign_keys=[end_location_id])
+    place: Mapped[Place | None] = relationship(foreign_keys=[place_id])
+    end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_id])
     participants: Mapped[list[TripItemParticipant]] = relationship(
         back_populates="item",

@@ -116,7 +116,6 @@ JAPAN_TRIP = {
     "title": "Japan",
     "start_date": "2026-04-09",
     "end_date": "2026-04-15",
-    "timezone": "Asia/Tokyo",
 }
 
 

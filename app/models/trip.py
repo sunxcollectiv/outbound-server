@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 
 
 class TripRole(StrEnum):
-    EDITOR = "editor"
-    VIEWER = "viewer"
+    ORGANIZER = "organizer"  # posts group items, manages members
+    MEMBER = "member"  # adds their own items, RSVPs
 
 
 class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -32,9 +32,8 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text)
     start_date: Mapped[date] = mapped_column(Date)
     end_date: Mapped[date] = mapped_column(Date)
-    # IANA name, e.g. "Asia/Tokyo". Used to bucket items into days when an
-    # item's location doesn't carry its own timezone.
-    timezone: Mapped[str] = mapped_column(String(64))
+    # No timezone here: a trip can cross zones, so each item resolves its own
+    # (see TripItem.timezone).
     cover_image_url: Mapped[str | None] = mapped_column(String(2048))
 
     owner: Mapped[User] = relationship()
@@ -47,7 +46,10 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class TripMember(Base):
-    """Companions on a trip. The owner lives on trips.owner_id, not here."""
+    """Everyone on a trip, owner included, with their role. trips.owner_id
+    only says who pays for and can delete the trip; it always has an
+    organizer row here, so counting rows gives the real headcount and a
+    transfer of ownership is a role edit, not a row swap."""
 
     __tablename__ = "trip_members"
 
@@ -58,7 +60,7 @@ class TripMember(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     role: Mapped[TripRole] = mapped_column(
-        str_enum(TripRole, "trip_role"), default=TripRole.EDITOR
+        str_enum(TripRole, "trip_role"), default=TripRole.MEMBER
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

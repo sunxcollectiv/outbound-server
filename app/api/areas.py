@@ -20,9 +20,9 @@ def _get_area(session: SessionDep, area_id: uuid.UUID) -> Area:
 
 @router.post("", response_model=AreaRead, status_code=status.HTTP_201_CREATED)
 def create_area(
-    payload: AreaCreate, user: CurrentUser, session: SessionDep
+    payload: AreaCreate, _: CurrentUser, session: SessionDep
 ) -> Area:
-    area = Area(**payload.model_dump(), created_by_id=user.id)
+    area = Area(**payload.model_dump())
     session.add(area)
     session.commit()
     return area

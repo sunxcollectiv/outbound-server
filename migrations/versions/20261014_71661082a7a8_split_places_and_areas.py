@@ -56,14 +56,9 @@ def upgrade() -> None:
         'areas',
         sa.Column('name', sa.String(length=200), nullable=False),
         sa.Column('photo_url', sa.String(length=2048), nullable=True),
-        sa.Column('created_by_id', sa.Uuid(), nullable=True),
         sa.Column('id', sa.Uuid(), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-        sa.ForeignKeyConstraint(
-            ['created_by_id'], ['users.id'],
-            name=op.f('fk_areas_created_by_id_users'), ondelete='SET NULL',
-        ),
         sa.PrimaryKeyConstraint('id', name=op.f('pk_areas')),
     )
     op.create_index(op.f('ix_areas_name'), 'areas', ['name'], unique=False)

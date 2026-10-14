@@ -113,6 +113,6 @@ def apply_area_from_google(session: Session, place: Place, details: dict[str, An
 
     area = session.scalar(select(Area).where(func.lower(Area.name) == city.lower()))
     if area is None:
-        area = Area(name=city, created_by_id=place.created_by_id)
+        area = Area(name=city)
         session.add(area)
     place.area = area

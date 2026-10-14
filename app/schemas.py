@@ -13,7 +13,14 @@ from pydantic import (
     model_validator,
 )
 
-from app.models import TripItemKind, TripRole
+from app.models import (
+    RsvpStatus,
+    TripItemKind,
+    TripItemRequirement,
+    TripItemScope,
+    TripItemVisibility,
+    TripRole,
+)
 
 
 def _valid_timezone(value: str) -> str:
@@ -153,7 +160,6 @@ class TripCreate(BaseModel):
     description: str | None = None
     start_date: date
     end_date: date
-    timezone: TimezoneName
     cover_image_url: Url | None = None
 
     @model_validator(mode="after")
@@ -168,7 +174,6 @@ class TripUpdate(BaseModel):
     description: str | None = None
     start_date: date | None = None
     end_date: date | None = None
-    timezone: TimezoneName | None = None
     cover_image_url: Url | None = None
 
 
@@ -179,7 +184,6 @@ class TripRead(ReadModel):
     description: str | None
     start_date: date
     end_date: date
-    timezone: str
     cover_image_url: str | None
     created_at: datetime
     updated_at: datetime
@@ -187,7 +191,7 @@ class TripRead(ReadModel):
 
 class TripMemberCreate(BaseModel):
     user_id: uuid.UUID
-    role: TripRole = TripRole.EDITOR
+    role: TripRole = TripRole.MEMBER
 
 
 class TripMemberRead(ReadModel):
@@ -199,51 +203,103 @@ class TripMemberRead(ReadModel):
 # --- trip items ---
 
 
+def resolve_scope_fields(
+    scope: TripItemScope,
+    requirement: TripItemRequirement | None,
+    visibility: TripItemVisibility | None,
+) -> tuple[TripItemRequirement | None, TripItemVisibility | None]:
+    """Group items carry a requirement, personal items carry a visibility, never
+    both. Fills in the default for the missing one and rejects the wrong one."""
+    if scope is TripItemScope.GROUP:
+        if visibility is not None:
+            raise ValueError("visibility only applies to personal items")
+        return requirement or TripItemRequirement.OPTIONAL, None
+    if requirement is not None:
+        raise ValueError("requirement only applies to group items")
+    return None, visibility or TripItemVisibility.SHARED
+
+
 class TripItemCreate(BaseModel):
     kind: TripItemKind
+    scope: TripItemScope
+    # Defaults to optional for group items; must be absent for personal ones.
+    requirement: TripItemRequirement | None = None
+    # Defaults to shared for personal items; must be absent for group ones.
+    visibility: TripItemVisibility | None = None
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] = Field(default_factory=list)
     starts_at: AwareDatetime
     ends_at: AwareDatetime | None = None
+    # Local zone for day bucketing; falls back to the place's, then UTC.
+    timezone: TimezoneName | None = None
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
-    traveler_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
-    def _times_ordered(self) -> Self:
+    def _consistent(self) -> Self:
+        self.requirement, self.visibility = resolve_scope_fields(
+            self.scope, self.requirement, self.visibility
+        )
         if self.ends_at is not None and self.ends_at < self.starts_at:
             raise ValueError("ends_at must be at or after starts_at")
         return self
 
 
 class TripItemUpdate(BaseModel):
+    """Every field from TripItemCreate, all optional. Unknown keys are a 422
+    rather than a silent no-op."""
+
+    model_config = ConfigDict(extra="forbid")
+
     kind: TripItemKind | None = None
+    # Changing scope re-homes the item, so the route requires the caller to be
+    # allowed to modify both the old and the new form.
+    scope: TripItemScope | None = None
+    requirement: TripItemRequirement | None = None
+    visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] | None = None
     starts_at: AwareDatetime | None = None
     ends_at: AwareDatetime | None = None
+    timezone: TimezoneName | None = None
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
-    traveler_id: uuid.UUID | None = None
+
+
+class ParticipantRead(ReadModel):
+    user: UserRead
+    status: RsvpStatus
+    updated_at: datetime
+
+
+class RsvpUpdate(BaseModel):
+    status: RsvpStatus
 
 
 class TripItemRead(ReadModel):
     id: uuid.UUID
     trip_id: uuid.UUID
     kind: TripItemKind
+    scope: TripItemScope
+    requirement: TripItemRequirement | None
+    visibility: TripItemVisibility | None
     title: str
     notes: str | None
     tags: list[str]
     starts_at: datetime
     ends_at: datetime | None
+    timezone: str | None
     image_url: str | None
     place: PlaceRead | None
     end_place: PlaceRead | None
-    traveler: UserRead | None
+    created_by: UserRead | None
+    # RSVPs on a group item; attendees on a personal one. Callers find their
+    # own entry by user id.
+    participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime
 

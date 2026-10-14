@@ -7,9 +7,6 @@ def test_trip_validation(client, make_user):
     backwards = {**JAPAN_TRIP, "end_date": "2026-04-01"}
     assert client.post("/trips", json=backwards, headers=sun).status_code == 422
 
-    bad_timezone = {**JAPAN_TRIP, "timezone": "Asia/Tokio"}
-    assert client.post("/trips", json=bad_timezone, headers=sun).status_code == 422
-
 
 def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_trip):
     sun, stranger = make_user("sun"), make_user("stranger")
@@ -21,32 +18,57 @@ def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_trip):
 
 
 def test_member_roles(client, make_user, make_trip):
-    sun, sean = make_user("sun"), make_user("sean")
+    sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    sean_id = sean.user_id
+    sean_id, amy_id = sean.user_id, amy.user_id
+    group_item = {
+        "kind": "activity",
+        "scope": "group",
+        "title": "Ceremony",
+        "starts_at": "2026-04-10T14:00:00+09:00",
+    }
+    personal_item = {**group_item, "scope": "personal", "title": "Coffee"}
 
-    # Only the owner manages members.
-    added = client.post(
-        f"{url}/members", json={"user_id": sean_id, "role": "viewer"}, headers=sun
-    )
+    # The owner is on the member list from the start, as an organizer.
+    roster = client.get(f"{url}/members", headers=sun).json()
+    assert [(m["user"]["email"], m["role"]) for m in roster] == [("sun@example.com", "organizer")]
+    re_added = client.post(f"{url}/members", json={"user_id": sun.user_id}, headers=sun)
+    assert re_added.status_code == 409
+    assert client.delete(f"{url}/members/{sun.user_id}", headers=sun).status_code == 409
+
+    # Members default to the member role.
+    added = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
     assert added.status_code == 201
     assert added.json()["user"]["email"] == "sean@example.com"
+    assert added.json()["role"] == "member"
     again = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
     assert again.status_code == 409
+    roster = client.get(f"{url}/members", headers=sean).json()
+    assert sorted(m["user"]["email"] for m in roster) == ["sean@example.com", "sun@example.com"]
 
-    # A viewer can read but not change anything.
+    # A member can read and add their own items, but not change the trip,
+    # post group items, or manage members.
     assert client.get(url, headers=sean).status_code == 200
     assert [t["id"] for t in client.get("/trips", headers=sean).json()] == [trip["id"]]
+    assert client.post(f"{url}/items", json=personal_item, headers=sean).status_code == 201
+    assert client.post(f"{url}/items", json=group_item, headers=sean).status_code == 403
     assert client.patch(url, json={"title": "Nope"}, headers=sean).status_code == 403
     assert client.delete(url, headers=sean).status_code == 403
+    denied = client.post(f"{url}/members", json={"user_id": amy_id}, headers=sean)
+    assert denied.status_code == 403
 
-    # Re-add as an editor: can edit, still can't delete or manage members.
+    # Re-add as an organizer: can edit the trip, post group items and manage
+    # members, still can't delete the trip.
     assert client.delete(f"{url}/members/{sean_id}", headers=sun).status_code == 204
-    client.post(f"{url}/members", json={"user_id": sean_id, "role": "editor"}, headers=sun)
+    client.post(f"{url}/members", json={"user_id": sean_id, "role": "organizer"}, headers=sun)
     renamed = client.patch(url, json={"title": "Japan 2026"}, headers=sean)
     assert renamed.status_code == 200
     assert renamed.json()["title"] == "Japan 2026"
+    assert client.post(f"{url}/items", json=group_item, headers=sean).status_code == 201
+    assert client.post(f"{url}/members", json={"user_id": amy_id}, headers=sean).status_code == 201
+    assert client.delete(f"{url}/members/{amy_id}", headers=sean).status_code == 204
+    assert client.delete(f"{url}/members/{sun.user_id}", headers=sean).status_code == 409
     assert client.delete(url, headers=sean).status_code == 403
 
     # A member can leave; after that the trip is gone for them.
@@ -69,7 +91,12 @@ def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_t
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
-    item = {"kind": "activity", "title": "Dinner", "starts_at": "2026-04-09T18:30:00+09:00"}
+    item = {
+        "kind": "activity",
+        "scope": "group",
+        "title": "Dinner",
+        "starts_at": "2026-04-09T18:30:00+09:00",
+    }
     assert client.post(f"{url}/items", json=item, headers=sun).status_code == 201
 
     assert client.delete(url, headers=sun).status_code == 204

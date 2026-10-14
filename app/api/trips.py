@@ -1,11 +1,27 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import CurrentUser, EditableTrip, OwnedTrip, SessionDep, ViewableTrip
-from app.models import Place, Trip, TripItem, TripMember, User
+from app.api.deps import (
+    CurrentUser,
+    OrganizerTrip,
+    OwnedTrip,
+    SessionDep,
+    ViewableTrip,
+    is_organizer,
+)
+from app.api.trip_items import visible_items, with_item_details
+from app.models import (
+    Trip,
+    TripItem,
+    TripItemParticipant,
+    TripItemScope,
+    TripMember,
+    TripRole,
+    User,
+)
 from app.schemas import (
     Itinerary,
     TripCreate,
@@ -18,12 +34,15 @@ from app.services.itinerary import build_itinerary
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
-NOT_NULLABLE = ("title", "start_date", "end_date", "timezone")
+NOT_NULLABLE = ("title", "start_date", "end_date")
 
 
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
+    """The creator becomes the owner and gets an organizer membership row, so
+    trip_members is the full headcount and roles live in one place."""
     trip = Trip(**payload.model_dump(), owner_id=user.id)
+    trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
     session.add(trip)
     session.commit()
     return trip
@@ -31,13 +50,9 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
 
 @router.get("", response_model=list[TripRead])
 def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
-    """Trips the caller owns or has been added to."""
+    """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
-    query = (
-        select(Trip)
-        .where(or_(Trip.owner_id == user.id, Trip.id.in_(member_of)))
-        .order_by(Trip.start_date, Trip.id)
-    )
+    query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
     return list(session.scalars(query))
 
 
@@ -47,7 +62,7 @@ def read_trip(trip: ViewableTrip) -> Trip:
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
-def update_trip(payload: TripUpdate, trip: EditableTrip, session: SessionDep) -> Trip:
+def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
@@ -71,16 +86,10 @@ def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
 
 
 @router.get("/{trip_id}/itinerary", response_model=Itinerary)
-def read_itinerary(trip: ViewableTrip, session: SessionDep) -> Itinerary:
-    items = session.scalars(
-        select(TripItem)
-        .where(TripItem.trip_id == trip.id)
-        .options(
-            selectinload(TripItem.place).selectinload(Place.area),
-            selectinload(TripItem.end_place).selectinload(Place.area),
-            selectinload(TripItem.traveler),
-        )
-    )
+def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -> Itinerary:
+    """Everyone's plans in one view: group items plus every member's shared
+    items, each tagged with who added it. Private items show only to their creator."""
+    items = session.scalars(with_item_details(visible_items(trip, user)))
     return build_itinerary(trip, list(items))
 
 
@@ -89,7 +98,7 @@ def read_itinerary(trip: ViewableTrip, session: SessionDep) -> Itinerary:
 
 @router.get("/{trip_id}/members", response_model=list[TripMemberRead])
 def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
-    """Companions only; the owner is trips.owner_id."""
+    """Everyone on the trip, owner included."""
     query = (
         select(TripMember)
         .where(TripMember.trip_id == trip.id)
@@ -102,9 +111,7 @@ def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
 @router.post(
     "/{trip_id}/members", response_model=TripMemberRead, status_code=status.HTTP_201_CREATED
 )
-def add_member(payload: TripMemberCreate, trip: OwnedTrip, session: SessionDep) -> TripMember:
-    if payload.user_id == trip.owner_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "The owner is already on the trip")
+def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionDep) -> TripMember:
     if session.get(User, payload.user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     if session.get(TripMember, (trip.id, payload.user_id)) is not None:
@@ -119,11 +126,30 @@ def add_member(payload: TripMemberCreate, trip: OwnedTrip, session: SessionDep) 
 def remove_member(
     user_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> None:
-    """The owner can remove anyone; a member can remove themself (leave)."""
-    if user.id not in (trip.owner_id, user_id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the trip owner can remove others")
+    """Organizers can remove anyone but the owner; a member can remove themself (leave).
+
+    Their personal items and RSVPs go with them; group items they posted stay."""
+    if user.id != user_id and not is_organizer(session, trip, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can remove others")
     member = session.get(TripMember, (trip.id, user_id))
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
+    if user_id == trip.owner_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "The owner can't be removed from their trip")
+
+    trip_item_ids = select(TripItem.id).where(TripItem.trip_id == trip.id)
+    session.execute(
+        delete(TripItemParticipant).where(
+            TripItemParticipant.user_id == user_id,
+            TripItemParticipant.item_id.in_(trip_item_ids),
+        )
+    )
+    session.execute(
+        delete(TripItem).where(
+            TripItem.trip_id == trip.id,
+            TripItem.scope == TripItemScope.PERSONAL,
+            TripItem.created_by_id == user_id,
+        )
+    )
     session.delete(member)
     session.commit()

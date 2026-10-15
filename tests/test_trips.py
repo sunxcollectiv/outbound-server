@@ -26,7 +26,8 @@ def test_member_roles(client, make_user, make_trip):
         "kind": "activity",
         "scope": "group",
         "title": "Ceremony",
-        "starts_at": "2026-04-10T14:00:00+09:00",
+        "starts_at": "2026-04-10T14:00:00",
+        "start_timezone": "Asia/Tokyo",
     }
     personal_item = {**group_item, "scope": "personal", "title": "Coffee"}
 
@@ -95,7 +96,8 @@ def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_t
         "kind": "activity",
         "scope": "group",
         "title": "Dinner",
-        "starts_at": "2026-04-09T18:30:00+09:00",
+        "starts_at": "2026-04-09T18:30:00",
+        "start_timezone": "Asia/Tokyo",
     }
     assert client.post(f"{url}/items", json=item, headers=sun).status_code == 201
 

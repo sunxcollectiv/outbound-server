@@ -1,11 +1,10 @@
 """Group vs personal items, who can see and change them, and RSVPs."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
-JST = timezone(timedelta(hours=9))
-FIRST_AT = datetime(2026, 4, 10, 9, 0, tzinfo=JST)
+FIRST_AT = datetime(2026, 4, 10, 9, 0)  # wall time in Tokyo
 
 
 def _rsvps(item: dict) -> dict[str, str]:
@@ -28,7 +27,12 @@ def wedding(client, make_user, make_trip):
         """Each item starts an hour after the previous one, so lists come back in
         creation order."""
         starts_at = (FIRST_AT + timedelta(hours=next(clock))).isoformat()
-        payload = {"kind": "activity", "starts_at": starts_at, **fields}
+        payload = {
+            "kind": "activity",
+            "starts_at": starts_at,
+            "start_timezone": "Asia/Tokyo",
+            **fields,
+        }
         response = client.post(f"{url}/items", json=payload, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()
@@ -195,7 +199,7 @@ def test_personal_items_can_sit_outside_the_trip_dates(client, wedding):
         scope="personal",
         kind="transit",
         title="Fly in early",
-        starts_at="2026-04-07T09:00:00+09:00",
+        starts_at="2026-04-07T09:00:00",
     )
 
     days = client.get(f"{url}/itinerary", headers=sean).json()["days"]

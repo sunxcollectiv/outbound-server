@@ -2,12 +2,29 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Enum, func
+from sqlalchemy import DateTime, Enum, TypeDecorator, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 
 class UUIDPrimaryKeyMixin:
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+
+
+class LocalDateTime(TypeDecorator[datetime]):
+    """A naive wall-clock time, paired with a timezone column elsewhere on the row.
+
+    psycopg binds an aware value to a `timestamp` column by silently shifting it
+    into the session's zone, so this refuses aware values outright: callers
+    convert with app.services.timekeeping.to_local first.
+    """
+
+    impl = DateTime(timezone=False)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is not None and value.tzinfo is not None:
+            raise ValueError("LocalDateTime columns take naive local times; convert first")
+        return value
 
 
 class TimestampMixin:

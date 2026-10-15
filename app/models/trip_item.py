@@ -4,15 +4,25 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    event,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
-from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin, str_enum
+from app.models.base import LocalDateTime, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
 from app.models.place import Place
 from app.models.trip import Trip
 from app.models.user import User
+from app.services.timekeeping import to_utc
 
 
 class TripItemKind(StrEnum):
@@ -52,16 +62,33 @@ class RsvpStatus(StrEnum):
 
 
 class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """An entry on a trip's itinerary.
+
+    Times are kept the way a ticket prints them: naive wall time plus the IANA
+    zone it's read in, one pair per end, so a flight departs in its origin's
+    zone and lands in its destination's. The `*_utc` columns hold the matching
+    instants for ordering and are derived on every flush (see sync_instants);
+    nothing writes them directly.
+    """
+
     __tablename__ = "trip_items"
     __table_args__ = (
-        CheckConstraint("ends_at IS NULL OR ends_at >= starts_at", name="times_ordered"),
+        # Instants, not wall times: a westbound flight can land at an earlier
+        # local time than it took off.
+        CheckConstraint(
+            "ends_at_utc IS NULL OR ends_at_utc >= starts_at_utc", name="instants_ordered"
+        ),
+        CheckConstraint(
+            "(ends_at IS NULL) = (end_timezone IS NULL) AND (ends_at IS NULL) = (ends_at_utc IS NULL)",
+            name="end_has_timezone",
+        ),
         CheckConstraint(
             "(scope = 'group') = (requirement IS NOT NULL)", name="group_has_requirement"
         ),
         CheckConstraint(
             "(scope = 'personal') = (visibility IS NOT NULL)", name="personal_has_visibility"
         ),
-        Index("ix_trip_items_trip_id_starts_at", "trip_id", "starts_at"),
+        Index("ix_trip_items_trip_id_starts_at_utc", "trip_id", "starts_at_utc"),
     )
 
     trip_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"))
@@ -80,11 +107,14 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tags: Mapped[list[str]] = mapped_column(
         ARRAY(String(60)), default=list, server_default=text("'{}'")
     )
-    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # IANA name for the item's local time, used to bucket it into a day. When
-    # unset the place's timezone is used, then UTC.
-    timezone: Mapped[str | None] = mapped_column(String(64))
+    # Local wall time at each end, with the IANA zone it's read in.
+    starts_at: Mapped[datetime] = mapped_column(LocalDateTime)
+    start_timezone: Mapped[str] = mapped_column(String(64))
+    ends_at: Mapped[datetime | None] = mapped_column(LocalDateTime)
+    end_timezone: Mapped[str | None] = mapped_column(String(64))
+    # Derived instants; see sync_instants.
+    starts_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     image_url: Mapped[str | None] = mapped_column(String(2048))
 
     place_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -109,6 +139,24 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         order_by="TripItemParticipant.created_at",
     )
+
+    def sync_instants(self) -> None:
+        """Recompute the UTC instants from the local time + zone pairs. Reads
+        only this row's columns so it's safe inside a flush."""
+        if self.starts_at.tzinfo is not None or (
+            self.ends_at is not None and self.ends_at.tzinfo is not None
+        ):
+            raise ValueError("trip item times must be naive local wall times")
+        self.starts_at_utc = to_utc(self.starts_at, self.start_timezone)
+        self.ends_at_utc = (
+            to_utc(self.ends_at, self.end_timezone) if self.ends_at is not None else None
+        )
+
+
+@event.listens_for(TripItem, "before_insert")
+@event.listens_for(TripItem, "before_update")
+def _sync_instants(mapper: object, connection: object, item: TripItem) -> None:
+    item.sync_instants()
 
 
 class TripItemParticipant(TimestampMixin, Base):

@@ -3,6 +3,16 @@ from datetime import date, datetime, timedelta
 
 from app.models import Trip, TripItem, TripItemKind
 from app.schemas import Itinerary, ItineraryDay, LodgingStay, TripItemRead, TripRead
+from app.services.timekeeping import to_utc
+
+
+def _day_zone(trip: Trip, day: date) -> str:
+    """The zone a floating time on `day` is read in for ordering: the trip
+    day's first zone, else UTC. A client would make the same choice."""
+    for trip_day in trip.days:
+        if trip_day.date == day and trip_day.timezones:
+            return trip_day.timezones[0]
+    return "UTC"
 
 
 def _sort_key(entry: tuple[datetime, TripItemRead]) -> tuple[datetime, str]:
@@ -22,19 +32,22 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     """
     # (sort key, item) so a day's list is ordered by the moment relevant to that
     # day: a flight arriving at 11:00 sorts by 11:00, not by when it took off.
-    # Keys are instants, which is the true order on a day that crosses zones.
+    # Keys are instants, the true order on a day that crosses zones; a floating
+    # time is read in the day's zone for this purpose only.
     items_by_day: dict[date, list[tuple[datetime, TripItemRead]]] = defaultdict(list)
     lodging_by_day: dict[date, list[LodgingStay]] = defaultdict(list)
 
     for item in items:
         start_day = item.starts_at.date()
         read = TripItemRead.model_validate(item)
-        items_by_day[start_day].append((item.starts_at_utc, read))
+        start_key = item.starts_at_utc or to_utc(item.starts_at, _day_zone(trip, start_day))
+        items_by_day[start_day].append((start_key, read))
 
         if item.kind is TripItemKind.TRANSIT and item.ends_at is not None:
             arrival_day = item.ends_at.date()
             if arrival_day != start_day:
-                items_by_day[arrival_day].append((item.ends_at_utc, read))
+                end_key = item.ends_at_utc or to_utc(item.ends_at, _day_zone(trip, arrival_day))
+                items_by_day[arrival_day].append((end_key, read))
 
         if item.kind is TripItemKind.LODGING:
             end_day = item.ends_at.date() if item.ends_at else start_day

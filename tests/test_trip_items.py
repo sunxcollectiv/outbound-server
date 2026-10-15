@@ -80,10 +80,10 @@ def test_item_validation(client, make_user, make_trip):
         "start_timezone": "Asia/Tokyo",
     }
 
-    # With no zone sent and no place to take one from, there's nothing to read
-    # the wall time in.
-    no_zone = {k: v for k, v in base.items() if k != "start_timezone"}
-    assert client.post(url, json=no_zone, headers=sun).status_code == 422
+    # An offset with no zone to read it in can't be stored faithfully.
+    offset_no_zone = {**base, "starts_at": "2026-04-09T18:30:00+09:00"}
+    del offset_no_zone["start_timezone"]
+    assert client.post(url, json=offset_no_zone, headers=sun).status_code == 422
 
     ends_first = {**base, "ends_at": "2026-04-09T17:00:00"}
     assert client.post(url, json=ends_first, headers=sun).status_code == 422
@@ -96,6 +96,11 @@ def test_item_validation(client, make_user, make_trip):
 
     end_zone_without_end = {**base, "end_timezone": "Asia/Tokyo"}
     assert client.post(url, json=end_zone_without_end, headers=sun).status_code == 422
+    end_zone_on_floating = {
+        **base, "ends_at": "2026-04-09T20:00:00", "end_timezone": "Asia/Tokyo"
+    }
+    del end_zone_on_floating["start_timezone"]
+    assert client.post(url, json=end_zone_on_floating, headers=sun).status_code == 422
 
     # Group items carry a requirement, personal items a visibility; never the other.
     group_with_visibility = {**base, "visibility": "shared"}
@@ -109,7 +114,6 @@ def test_item_validation(client, make_user, make_trip):
     item_url = f"{url}/{item['id']}"
     moved_before_start = {"ends_at": "2026-04-09T10:00:00"}
     assert client.patch(item_url, json=moved_before_start, headers=sun).status_code == 422
-    assert client.patch(item_url, json={"start_timezone": None}, headers=sun).status_code == 422
     # The old single-zone field is gone, not silently ignored.
     assert client.patch(item_url, json={"timezone": "Asia/Tokyo"}, headers=sun).status_code == 422
 
@@ -121,6 +125,58 @@ def test_item_validation(client, make_user, make_trip):
     changed = client.patch(item_url, json={"requirement": "mandatory"}, headers=sun)
     assert changed.status_code == 200
     assert changed.json()["requirement"] == "mandatory"
+
+
+def test_items_without_a_zone_float(client, make_user, make_trip):
+    """'Dinner at my place at 7 on the 17th' needs no zone: it's kept as
+    written, with no instant, and the client reads it in whatever zone fits."""
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    created = client.post(
+        url,
+        json={
+            "kind": "activity",
+            "scope": "group",
+            "title": "Dinner at my place",
+            "starts_at": "2026-04-17T19:00:00",
+            "ends_at": "2026-04-17T22:00:00",
+        },
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+    item = created.json()
+    assert item["starts_at"] == "2026-04-17T19:00:00"
+    assert item["start_timezone"] is None
+    assert item["starts_at_utc"] is None
+    assert item["ends_at"] == "2026-04-17T22:00:00"
+    assert item["end_timezone"] is None
+    assert item["ends_at_utc"] is None
+    item_url = f"{url}/{item['id']}"
+
+    # Floating ends are ordered as wall times.
+    assert client.patch(item_url, json={"ends_at": "2026-04-17T18:00:00"}, headers=sun).status_code == 422
+
+    # Giving it a zone pins it; the end takes the same zone.
+    pinned = client.patch(item_url, json={"start_timezone": "Asia/Tokyo"}, headers=sun)
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.json()["starts_at"] == "2026-04-17T19:00:00"
+    assert pinned.json()["starts_at_utc"] == "2026-04-17T10:00:00Z"
+    assert pinned.json()["end_timezone"] == "Asia/Tokyo"
+    assert pinned.json()["ends_at_utc"] == "2026-04-17T13:00:00Z"
+
+    # And it can be set adrift again.
+    floating = client.patch(item_url, json={"start_timezone": None}, headers=sun)
+    assert floating.status_code == 200, floating.text
+    assert floating.json()["start_timezone"] is None
+    assert floating.json()["starts_at_utc"] is None
+    assert floating.json()["end_timezone"] is None
+    assert floating.json()["ends_at_utc"] is None
+
+    # A floating item that gets a located place takes the place's zone.
+    hnd = _place(client, sun, name="HND", timezone="Asia/Tokyo")
+    located = client.patch(item_url, json={"place_id": hnd["id"]}, headers=sun)
+    assert located.json()["start_timezone"] == "Asia/Tokyo"
 
 
 def test_aware_times_are_converted_into_the_resolved_zone(client, make_user, make_trip):
@@ -199,9 +255,7 @@ def test_clearing_ends_at_clears_its_timezone(client, make_user, make_trip):
     item_url = f"{url}/{item['id']}"
     assert item["ends_at_utc"] == "2026-04-11T02:00:00Z"
 
-    # The end zone can't be dropped while there's an end time, and can't be
-    # sent without one.
-    assert client.patch(item_url, json={"end_timezone": None}, headers=sun).status_code == 422
+    # The end zone can't be sent without an end time; nulling it just re-resolves.
     cleared = client.patch(item_url, json={"ends_at": None}, headers=sun)
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["ends_at"] is None
@@ -241,7 +295,11 @@ def test_cross_zone_transit_may_arrive_at_an_earlier_wall_time(client, make_user
 
 
 def test_sync_instants():
-    item = TripItem(starts_at=datetime(2026, 4, 14, 9), start_timezone="Asia/Tokyo")
+    item = TripItem(starts_at=datetime(2026, 4, 14, 9), ends_at=datetime(2026, 4, 14, 10))
+    item.sync_instants()
+    assert item.starts_at_utc is None and item.ends_at_utc is None  # floating
+
+    item.start_timezone, item.ends_at = "Asia/Tokyo", None
     item.sync_instants()
     assert item.starts_at_utc == datetime(2026, 4, 14, 0, tzinfo=UTC)
     assert item.ends_at_utc is None
@@ -313,14 +371,10 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     # An instant is fine too: 15:30Z is 00:30 on the 10th in Tokyo.
     golden_gai = add(kind="activity", title="Golden Gai", starts_at="2026-04-09T15:30:00Z")
     assert golden_gai["starts_at"] == "2026-04-10T00:30:00"
-    # A zone other than the offset sent: 23:30+09:00 is 14:30 in UTC, still the 10th.
-    nap = add(
-        kind="activity",
-        title="Jet-lag nap",
-        starts_at="2026-04-10T23:30:00+09:00",
-        start_timezone="UTC",
-    )
-    assert nap["starts_at"] == "2026-04-10T14:30:00"
+    # A floating time sits on the date it names and sorts in the day's zone.
+    client.patch(f"{url}/days/2026-04-10", json={"timezones": ["Asia/Tokyo"]}, headers=sun)
+    nap = add(kind="activity", title="Jet-lag nap", starts_at="2026-04-10T14:30:00", start_timezone=None)
+    assert nap["start_timezone"] is None
 
     response = client.get(f"{url}/itinerary", headers=sun)
     assert response.status_code == 200

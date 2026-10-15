@@ -253,11 +253,12 @@ class TripItemCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] = Field(default_factory=list)
-    # Local wall time at each end. A naive value is read in that end's zone; an
-    # aware one is converted into it. The zone comes from the request, else the
-    # place at that end (the arrival falls back to the departure's zone); with
-    # nothing to go on the request is rejected. Ordering is checked on the
-    # instants once the zones are known, so it lives in the route.
+    # Local wall time at each end, with the zone it's read in when known: from
+    # the request, else the place at that end (the arrival falls back to the
+    # departure's zone). With neither the time floats: kept as written, no
+    # instant. A naive value is taken as is; an aware one is converted into the
+    # zone, so it needs one. Ordering is checked in the route once zones are
+    # settled.
     starts_at: datetime
     start_timezone: TimezoneName | None = None
     ends_at: datetime | None = None
@@ -320,13 +321,15 @@ class TripItemRead(ReadModel):
     title: str
     notes: str | None
     tags: list[str]
-    # Wall time at each end (no offset in the JSON) and the zone it's read in.
+    # Wall time at each end (no offset in the JSON) and, when known, the zone
+    # it's read in. No zone means a floating time: show it as written and pick
+    # a zone (the trip day's, say) only when an instant is needed.
     starts_at: datetime
-    start_timezone: str
+    start_timezone: str | None
     ends_at: datetime | None
     end_timezone: str | None
-    # The same moments as instants, for ordering across zones.
-    starts_at_utc: datetime
+    # The same moments as instants for the zoned ends; null for floating ones.
+    starts_at_utc: datetime | None
     ends_at_utc: datetime | None
     image_url: str | None
     place: PlaceRead | None
@@ -338,14 +341,9 @@ class TripItemRead(ReadModel):
     created_at: datetime
     updated_at: datetime
 
-    # The driver hands back instants in the session's zone; always say Z. Two
-    # serializers so the schema keeps starts_at_utc non-null.
-    @field_serializer("starts_at_utc")
-    def _start_in_utc(self, value: datetime) -> datetime:
-        return value.astimezone(UTC)
-
-    @field_serializer("ends_at_utc")
-    def _end_in_utc(self, value: datetime | None) -> datetime | None:
+    @field_serializer("starts_at_utc", "ends_at_utc")
+    def _in_utc(self, value: datetime | None) -> datetime | None:
+        # The driver hands back instants in the session's zone; always say Z.
         return value.astimezone(UTC) if value is not None else None
 
 

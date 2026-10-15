@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-FIRST_AT = datetime(2026, 4, 10, 9, 0)  # wall time in Tokyo
+FIRST_AT = datetime(2026, 4, 10, 9, 0)  # floating wall time; the wedding needs no zone
 
 
 def _rsvps(item: dict) -> dict[str, str]:
@@ -27,12 +27,7 @@ def wedding(client, make_user, make_trip):
         """Each item starts an hour after the previous one, so lists come back in
         creation order."""
         starts_at = (FIRST_AT + timedelta(hours=next(clock))).isoformat()
-        payload = {
-            "kind": "activity",
-            "starts_at": starts_at,
-            "start_timezone": "Asia/Tokyo",
-            **fields,
-        }
+        payload = {"kind": "activity", "starts_at": starts_at, **fields}
         response = client.post(f"{url}/items", json=payload, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()

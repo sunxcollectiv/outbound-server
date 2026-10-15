@@ -28,7 +28,7 @@ from app.services.timekeeping import to_local, to_utc
 
 router = APIRouter(prefix="/trips/{trip_id}/items", tags=["trip items"])
 
-NOT_NULLABLE = ("kind", "scope", "title", "tags", "starts_at", "start_timezone")
+NOT_NULLABLE = ("kind", "scope", "title", "tags", "starts_at")
 
 
 def _unprocessable(detail: str) -> HTTPException:
@@ -85,14 +85,16 @@ def _resolve_times(
     changes of a PATCH on `item`. Call check_places first.
 
     A zone is only inferred when nothing supplies one: the request, else the
-    item's stored zone, else the place at that end; the arrival then falls back
-    to the departure's zone. So an un-enriched end place leaves a transit's
-    arrival in its origin zone — importers should send end_timezone. Once a
-    zone is stored it changes only when sent explicitly; re-pointing an item at
-    another place doesn't move its times.
+    item's stored zone, else the place at that end; the arrival then falls
+    back to the departure's zone. With no zone at all the time floats, which
+    is the normal case for "dinner at 7 on the 17th". So an un-enriched end
+    place leaves a transit's arrival in its origin zone, and importers should
+    send end_timezone. Sending `start_timezone: null` on a PATCH makes an
+    item float again.
 
     Times are then normalised to wall time in their zone (aware input is
-    converted) and the end may not precede the start as instants.
+    converted, so it needs a zone) and the end may not precede the start: as
+    instants when zoned, as wall times when floating.
     """
 
     def effective(field: str) -> Any:
@@ -102,17 +104,15 @@ def _resolve_times(
 
     starts_at, ends_at = effective("starts_at"), effective("ends_at")
 
-    start_tz = effective("start_timezone") or _place_timezone(session, effective("place_id"))
-    if start_tz is None:
-        raise _unprocessable("start_timezone is required: no place supplies one")
+    if item is not None and "start_timezone" in values:
+        start_tz = values["start_timezone"]  # explicit; null means floating
+    else:
+        start_tz = effective("start_timezone") or _place_timezone(session, effective("place_id"))
 
-    if ends_at is None:
+    if ends_at is None or start_tz is None:
         if values.get("end_timezone") is not None:
-            raise _unprocessable("end_timezone needs an ends_at")
+            raise _unprocessable("end_timezone needs an ends_at and a start_timezone")
         end_tz = None
-    elif item is not None and "end_timezone" in values and values["end_timezone"] is None:
-        # Only a PATCH carries an explicit null; a create dumps every field.
-        raise _unprocessable("end_timezone cannot be null while ends_at is set")
     else:
         end_tz = (
             effective("end_timezone")
@@ -121,12 +121,22 @@ def _resolve_times(
         )
 
     values["start_timezone"], values["end_timezone"] = start_tz, end_tz
-    if "starts_at" in values:
-        values["starts_at"] = starts_at = to_local(starts_at, start_tz)
-    if ends_at is not None and "ends_at" in values:
-        values["ends_at"] = ends_at = to_local(ends_at, end_tz)
-    if ends_at is not None and to_utc(ends_at, end_tz) < to_utc(starts_at, start_tz):
-        raise _unprocessable("ends_at must be at or after starts_at")
+    for field, tz in (("starts_at", start_tz), ("ends_at", end_tz)):
+        if field in values and values[field] is not None:
+            if tz is None and values[field].tzinfo is not None:
+                raise _unprocessable(
+                    f"{field} has an offset but no zone to read it in; send a timezone or a located place"
+                )
+            values[field] = to_local(values[field], tz) if tz else values[field]
+    starts_at, ends_at = effective("starts_at"), effective("ends_at")
+
+    if ends_at is not None:
+        if start_tz is not None:
+            in_order = to_utc(ends_at, end_tz) >= to_utc(starts_at, start_tz)
+        else:
+            in_order = ends_at >= starts_at
+        if not in_order:
+            raise _unprocessable("ends_at must be at or after starts_at")
 
 
 def _get_item(session: Session, trip: Trip, user: User, item_id: uuid.UUID) -> TripItem:
@@ -186,9 +196,8 @@ def list_items(
     kind: TripItemKind | None = None,
     scope: TripItemScope | None = None,
 ) -> list[TripItem]:
-    query = with_item_details(visible_items(trip, user)).order_by(
-        TripItem.starts_at_utc, TripItem.id
-    )
+    # Wall-time order: floating items have no instant to sort by.
+    query = with_item_details(visible_items(trip, user)).order_by(TripItem.starts_at, TripItem.id)
     if kind is not None:
         query = query.where(TripItem.kind == kind)
     if scope is not None:

@@ -2,9 +2,15 @@ import uuid
 
 
 def _place(client, headers, **fields):
-    response = client.post("/places", json=fields, headers=headers)
-    assert response.status_code == 201, response.text
-    return response.json()
+    """Register a stub from a Google id, then fill in the given fields (name,
+    timezone, ...) the way the later enrichment/review step would."""
+    stub = client.post(
+        "/places", json={"google_place_id": f"g-{fields['name']}"}, headers=headers
+    )
+    assert stub.status_code == 201, stub.text
+    enriched = client.patch(f"/places/{stub.json()['id']}", json=fields, headers=headers)
+    assert enriched.status_code == 200, enriched.text
+    return enriched.json()
 
 
 def test_item_round_trip_with_places(client, make_user, make_trip):

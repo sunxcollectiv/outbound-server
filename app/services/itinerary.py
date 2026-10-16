@@ -2,38 +2,55 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from app.models import Trip, TripItem, TripItemKind
-from app.schemas import Itinerary, ItineraryDay, LodgingStay, TripItemRead, TripRead
+from app.schemas import (
+    Itinerary,
+    ItineraryDay,
+    ItineraryEntry,
+    LodgingStay,
+    TripItemRead,
+    TripRead,
+)
 
 
-def _sort_key(entry: tuple[datetime, TripItemRead]) -> tuple[datetime, str]:
-    moment, read = entry
-    return moment, str(read.id)
+def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
+    moment, entry_read = entry
+    return moment, str(entry_read.item.id)
 
 
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     """Group a trip's items into calendar days by their wall times.
 
-    Every item appears on the day its start names. Transit also appears on the
-    day its arrival names when that's different, so both ends are visible; the
-    item carries both times and the client decides which to emphasise. Lodging
-    additionally shows up in each day's `lodging` list from check-in through
-    check-out. Zones are ignored throughout: a day reads like a diary page,
-    ordered by the clock, whichever zone each entry is in.
+    Most items appear once, on the day their start names. A transit item with a
+    distinct arrival is split into two entries instead — a `departure` on its
+    start day and an `arrival` on its arrival day (the same day when it lands
+    before midnight), each placed and sorted by the wall time of that end so a
+    flight sorts by when it leaves on one day and by when it lands on the other.
+    Lodging additionally shows up in each day's `lodging` list from check-in
+    through check-out. Zones are ignored throughout: a day reads like a diary
+    page, ordered by the clock, whichever zone each entry is in.
     """
-    # (sort key, item) so a day's list is ordered by the wall time relevant to
+    # (sort key, entry) so a day's list is ordered by the wall time relevant to
     # that day: a flight arriving at 11:00 sorts by 11:00, not by when it left.
-    items_by_day: dict[date, list[tuple[datetime, TripItemRead]]] = defaultdict(list)
+    items_by_day: dict[date, list[tuple[datetime, ItineraryEntry]]] = defaultdict(list)
     lodging_by_day: dict[date, list[LodgingStay]] = defaultdict(list)
 
     for item in items:
         start_day = item.starts_at.date()
         read = TripItemRead.model_validate(item)
-        items_by_day[start_day].append((item.starts_at, read))
 
-        if item.kind is TripItemKind.TRANSIT and item.ends_at is not None:
-            arrival_day = item.ends_at.date()
-            if arrival_day != start_day:
-                items_by_day[arrival_day].append((item.ends_at, read))
+        if (
+            item.kind is TripItemKind.TRANSIT
+            and item.ends_at is not None
+            and item.ends_at != item.starts_at
+        ):
+            items_by_day[start_day].append(
+                (item.starts_at, ItineraryEntry(item=read, transit_phase="departure"))
+            )
+            items_by_day[item.ends_at.date()].append(
+                (item.ends_at, ItineraryEntry(item=read, transit_phase="arrival"))
+            )
+        else:
+            items_by_day[start_day].append((item.starts_at, ItineraryEntry(item=read)))
 
         if item.kind is TripItemKind.LODGING:
             end_day = item.ends_at.date() if item.ends_at else start_day
@@ -62,7 +79,7 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
                 date=day,
                 day_number=(day - trip.start_date).days + 1,
                 lodging=lodging_by_day.get(day, []),
-                items=[read for _, read in sorted(items_by_day.get(day, []), key=_sort_key)],
+                items=[entry for _, entry in sorted(items_by_day.get(day, []), key=_sort_key)],
             )
         )
         day += timedelta(days=1)

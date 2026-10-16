@@ -70,9 +70,12 @@ def test_private_items_are_only_visible_to_their_creator(client, wedding):
 
     # The itinerary applies the same filter.
     days = client.get(f"{url}/itinerary", headers=amy).json()["days"]
-    assert [i["title"] for day in days for i in day["items"]] == ["Ceremony", "Dinner with cousins"]
+    assert [e["item"]["title"] for day in days for e in day["items"]] == [
+        "Ceremony",
+        "Dinner with cousins",
+    ]
     days = client.get(f"{url}/itinerary", headers=sean).json()["days"]
-    assert len([i for day in days for i in day["items"]]) == 4
+    assert len([e for day in days for e in day["items"]]) == 4
 
 
 def test_only_the_creator_changes_a_personal_item(client, wedding):
@@ -200,7 +203,7 @@ def test_personal_items_can_sit_outside_the_trip_dates(client, wedding):
     days = client.get(f"{url}/itinerary", headers=sean).json()["days"]
     assert days[0]["date"] == "2026-04-07"
     assert days[0]["day_number"] == -1
-    assert [i["title"] for i in days[0]["items"]] == ["Fly in early"]
+    assert [e["item"]["title"] for e in days[0]["items"]] == ["Fly in early"]
 
 
 def test_changing_scope(client, wedding):

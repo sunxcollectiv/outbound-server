@@ -371,8 +371,7 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     # An instant is fine too: 15:30Z is 00:30 on the 10th in Tokyo.
     golden_gai = add(kind="activity", title="Golden Gai", starts_at="2026-04-09T15:30:00Z")
     assert golden_gai["starts_at"] == "2026-04-10T00:30:00"
-    # A floating time sits on the date it names and sorts in the day's zone.
-    client.patch(f"{url}/days/2026-04-10", json={"timezones": ["Asia/Tokyo"]}, headers=sun)
+    # A floating time sits on the date it names.
     nap = add(kind="activity", title="Jet-lag nap", starts_at="2026-04-10T14:30:00", start_timezone=None)
     assert nap["start_timezone"] is None
 
@@ -401,6 +400,50 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     assert phases == [["check_in"], ["staying"], ["check_out"], [], [], [], []]
     assert days[2]["items"] == []
     assert days[0]["items"][0]["start_timezone"] == "Asia/Tokyo"
+
+
+def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make_user, make_trip):
+    """A day reads like a diary page: by the clock, whatever zone each entry is in."""
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}"
+
+    def add(title, starts_at, start_timezone=None, **item):
+        payload = {
+            "kind": "activity",
+            "scope": "group",
+            "title": title,
+            "starts_at": starts_at,
+            "start_timezone": start_timezone,
+            **item,
+        }
+        assert client.post(f"{url}/items", json=payload, headers=sun).status_code == 201
+
+    # As instants these run LA 10:00 (17:00Z) last, Tokyo 09:00 (00:00Z) first.
+    add("Call from LA", "2026-04-10T10:00:00", "America/Los_Angeles")
+    add("Tokyo breakfast", "2026-04-10T09:00:00", "Asia/Tokyo")
+    add("Packing", "2026-04-10T08:00:00")
+    add("Lunch", "2026-04-10T12:30:00")
+    # A flight is listed by its departure clock on one day and its arrival clock on the next.
+    add(
+        "Overnight to Tokyo",
+        "2026-04-10T13:00:00",
+        "America/Los_Angeles",
+        kind="transit",
+        ends_at="2026-04-11T16:00:00",
+        end_timezone="Asia/Tokyo",
+    )
+    add("Check in", "2026-04-11T15:00:00", "Asia/Tokyo")
+
+    days = client.get(f"{url}/itinerary", headers=sun).json()["days"]
+    assert [i["title"] for i in days[1]["items"]] == [
+        "Packing",
+        "Tokyo breakfast",
+        "Call from LA",
+        "Lunch",
+        "Overnight to Tokyo",
+    ]
+    assert [i["title"] for i in days[2]["items"]] == ["Check in", "Overnight to Tokyo"]
 
 
 def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(

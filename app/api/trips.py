@@ -102,7 +102,6 @@ def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -
     """Everyone's plans in one view: group items plus every member's shared
     items, each tagged with who added it. Private items show only to their creator."""
     items = session.scalars(with_item_details(visible_items(trip, user)))
-    session.refresh(trip, ["days"])  # the floating-time sort key reads each day's zone
     return build_itinerary(trip, list(items))
 
 

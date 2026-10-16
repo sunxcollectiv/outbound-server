@@ -1,4 +1,5 @@
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import delete, select
@@ -12,9 +13,11 @@ from app.api.deps import (
     ViewableTrip,
     is_organizer,
 )
-from app.api.trip_items import visible_items, with_item_details
+from app.api.trip_items import check_places, visible_items, with_item_details
 from app.models import (
+    Place,
     Trip,
+    TripDay,
     TripItem,
     TripItemParticipant,
     TripItemScope,
@@ -25,12 +28,15 @@ from app.models import (
 from app.schemas import (
     Itinerary,
     TripCreate,
+    TripDayRead,
+    TripDayUpdate,
     TripMemberCreate,
     TripMemberRead,
     TripRead,
     TripUpdate,
 )
 from app.services.itinerary import build_itinerary
+from app.services.trip_days import sync_trip_days
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
@@ -40,9 +46,13 @@ NOT_NULLABLE = ("title", "start_date", "end_date")
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
-    trip_members is the full headcount and roles live in one place."""
-    trip = Trip(**payload.model_dump(), owner_id=user.id)
+    trip_members is the full headcount and roles live in one place. A day row
+    is made for every date, seeded with the timezone if one was given."""
+    values = payload.model_dump()
+    seed_timezone = values.pop("timezone")
+    trip = Trip(**values, owner_id=user.id)
     trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
+    sync_trip_days(trip, seed_timezone)
     session.add(trip)
     session.commit()
     return trip
@@ -75,6 +85,8 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
         )
     for field, value in changes.items():
         setattr(trip, field, value)
+    if "start_date" in changes or "end_date" in changes:
+        sync_trip_days(trip)
     session.commit()
     return trip
 
@@ -91,6 +103,44 @@ def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -
     items, each tagged with who added it. Private items show only to their creator."""
     items = session.scalars(with_item_details(visible_items(trip, user)))
     return build_itinerary(trip, list(items))
+
+
+# --- days ---
+
+
+def _days_query(trip: Trip):
+    return (
+        select(TripDay)
+        .where(TripDay.trip_id == trip.id)
+        .options(selectinload(TripDay.place).selectinload(Place.area))
+        .order_by(TripDay.date)
+    )
+
+
+@router.get("/{trip_id}/days", response_model=list[TripDayRead])
+def list_days(trip: ViewableTrip, session: SessionDep) -> list[TripDay]:
+    """One entry per date of the trip, in order."""
+    return list(session.scalars(_days_query(trip)))
+
+
+@router.patch("/{trip_id}/days/{day}", response_model=TripDayRead)
+def update_day(
+    day: date, payload: TripDayUpdate, trip: OrganizerTrip, session: SessionDep
+) -> TripDay:
+    """Name a day, say which zones it runs in, or point it at a place. Days
+    themselves come and go with the trip's dates."""
+    trip_day = session.get(TripDay, (trip.id, day))
+    if trip_day is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "That date isn't on the trip")
+    changes = payload.model_dump(exclude_unset=True)
+    if "timezones" in changes and changes["timezones"] is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "timezones cannot be null")
+    check_places(session, changes)
+    for field, value in changes.items():
+        setattr(trip_day, field, value)
+    session.commit()
+    session.refresh(trip_day)
+    return trip_day
 
 
 # --- members ---

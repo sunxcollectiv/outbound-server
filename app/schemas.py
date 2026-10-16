@@ -1,15 +1,15 @@
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated, Any, Literal, Self
-from zoneinfo import ZoneInfo
 
 from pydantic import (
     AfterValidator,
-    AwareDatetime,
     BaseModel,
     ConfigDict,
     EmailStr,
     Field,
+    field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -21,13 +21,12 @@ from app.models import (
     TripItemVisibility,
     TripRole,
 )
+from app.services.timekeeping import is_valid_timezone
 
 
 def _valid_timezone(value: str) -> str:
-    try:
-        ZoneInfo(value)
-    except Exception as exc:  # ZoneInfo raises several unrelated types for bad keys
-        raise ValueError(f"unknown IANA timezone: {value!r}") from exc
+    if not is_valid_timezone(value):
+        raise ValueError(f"unknown IANA timezone: {value!r}")
     return value
 
 
@@ -158,6 +157,8 @@ class TripCreate(BaseModel):
     start_date: date
     end_date: date
     cover_image_url: Url | None = None
+    # Seeds every day of the trip with this zone; each day can be edited after.
+    timezone: TimezoneName | None = None
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -182,6 +183,32 @@ class TripRead(ReadModel):
     start_date: date
     end_date: date
     cover_image_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TripDayUpdate(BaseModel):
+    """Days are made and removed with the trip's dates; this edits one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    # First entry is the default zone for items added to the day.
+    timezones: list[TimezoneName] | None = Field(default=None, max_length=8)
+    place_id: uuid.UUID | None = None
+
+    @field_validator("timezones")
+    @classmethod
+    def _dedupe(cls, zones: list[str] | None) -> list[str] | None:
+        return list(dict.fromkeys(zones)) if zones is not None else None
+
+
+class TripDayRead(ReadModel):
+    date: date
+    day_number: int
+    name: str | None
+    timezones: list[str]
+    place: PlaceRead | None
     created_at: datetime
     updated_at: datetime
 
@@ -226,10 +253,16 @@ class TripItemCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] = Field(default_factory=list)
-    starts_at: AwareDatetime
-    ends_at: AwareDatetime | None = None
-    # Local zone for day bucketing; falls back to the place's, then UTC.
-    timezone: TimezoneName | None = None
+    # Local wall time at each end, with the zone it's read in when known: from
+    # the request, else the place at that end (the arrival falls back to the
+    # departure's zone). With neither the time floats: kept as written, no
+    # instant. A naive value is taken as is; an aware one is converted into the
+    # zone, so it needs one. Ordering is checked in the route once zones are
+    # settled.
+    starts_at: datetime
+    start_timezone: TimezoneName | None = None
+    ends_at: datetime | None = None
+    end_timezone: TimezoneName | None = None
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
@@ -239,8 +272,8 @@ class TripItemCreate(BaseModel):
         self.requirement, self.visibility = resolve_scope_fields(
             self.scope, self.requirement, self.visibility
         )
-        if self.ends_at is not None and self.ends_at < self.starts_at:
-            raise ValueError("ends_at must be at or after starts_at")
+        if self.ends_at is None and self.end_timezone is not None:
+            raise ValueError("end_timezone needs an ends_at")
         return self
 
 
@@ -259,9 +292,10 @@ class TripItemUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     tags: list[Tag] | None = None
-    starts_at: AwareDatetime | None = None
-    ends_at: AwareDatetime | None = None
-    timezone: TimezoneName | None = None
+    starts_at: datetime | None = None
+    start_timezone: TimezoneName | None = None
+    ends_at: datetime | None = None
+    end_timezone: TimezoneName | None = None
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
@@ -287,9 +321,16 @@ class TripItemRead(ReadModel):
     title: str
     notes: str | None
     tags: list[str]
+    # Wall time at each end (no offset in the JSON) and, when known, the zone
+    # it's read in. No zone means a floating time: show it as written and pick
+    # a zone (the trip day's, say) only when an instant is needed.
     starts_at: datetime
+    start_timezone: str | None
     ends_at: datetime | None
-    timezone: str | None
+    end_timezone: str | None
+    # The same moments as instants for the zoned ends; null for floating ones.
+    starts_at_utc: datetime | None
+    ends_at_utc: datetime | None
     image_url: str | None
     place: PlaceRead | None
     end_place: PlaceRead | None
@@ -299,6 +340,11 @@ class TripItemRead(ReadModel):
     participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("starts_at_utc", "ends_at_utc")
+    def _in_utc(self, value: datetime | None) -> datetime | None:
+        # The driver hands back instants in the session's zone; always say Z.
+        return value.astimezone(UTC) if value is not None else None
 
 
 # --- itinerary (the day-by-day view) ---

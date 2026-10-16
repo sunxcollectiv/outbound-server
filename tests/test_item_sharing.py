@@ -1,11 +1,10 @@
 """Group vs personal items, who can see and change them, and RSVPs."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import pytest
 
-JST = timezone(timedelta(hours=9))
-FIRST_AT = datetime(2026, 4, 10, 9, 0, tzinfo=JST)
+FIRST_AT = datetime(2026, 4, 10, 9, 0)  # floating wall time; the wedding needs no zone
 
 
 def _rsvps(item: dict) -> dict[str, str]:
@@ -195,7 +194,7 @@ def test_personal_items_can_sit_outside_the_trip_dates(client, wedding):
         scope="personal",
         kind="transit",
         title="Fly in early",
-        starts_at="2026-04-07T09:00:00+09:00",
+        starts_at="2026-04-07T09:00:00",
     )
 
     days = client.get(f"{url}/itinerary", headers=sean).json()["days"]

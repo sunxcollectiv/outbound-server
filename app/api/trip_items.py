@@ -24,6 +24,7 @@ from app.schemas import (
     TripItemUpdate,
     resolve_scope_fields,
 )
+from app.services.timekeeping import to_local, to_utc
 
 router = APIRouter(prefix="/trips/{trip_id}/items", tags=["trip items"])
 
@@ -62,11 +63,80 @@ def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]
     )
 
 
-def _check_references(session: Session, values: dict[str, Any]) -> None:
+def check_places(session: Session, values: dict[str, Any]) -> None:
+    """422 unless every place id in `values` points at a real place."""
     for field in ("place_id", "end_place_id"):
         place_id = values.get(field)
         if place_id is not None and session.get(Place, place_id) is None:
             raise _unprocessable(f"{field} does not match a place")
+
+
+def _place_timezone(session: Session, place_id: uuid.UUID | None) -> str | None:
+    if place_id is None:
+        return None
+    place = session.get(Place, place_id)
+    return place.timezone if place is not None else None
+
+
+def _resolve_times(
+    session: Session, values: dict[str, Any], item: TripItem | None = None
+) -> None:
+    """Settle the local time + zone pairs in `values`: a create payload, or the
+    changes of a PATCH on `item`. Call check_places first.
+
+    A zone is only inferred when nothing supplies one: the request, else the
+    item's stored zone, else the place at that end; the arrival then falls
+    back to the departure's zone. With no zone at all the time floats, which
+    is the normal case for "dinner at 7 on the 17th". So an un-enriched end
+    place leaves a transit's arrival in its origin zone, and importers should
+    send end_timezone. Sending `start_timezone: null` on a PATCH makes an
+    item float again.
+
+    Times are then normalised to wall time in their zone (aware input is
+    converted, so it needs a zone) and the end may not precede the start: as
+    instants when zoned, as wall times when floating.
+    """
+
+    def effective(field: str) -> Any:
+        if field in values:
+            return values[field]
+        return getattr(item, field) if item is not None else None
+
+    starts_at, ends_at = effective("starts_at"), effective("ends_at")
+
+    if item is not None and "start_timezone" in values:
+        start_tz = values["start_timezone"]  # explicit; null means floating
+    else:
+        start_tz = effective("start_timezone") or _place_timezone(session, effective("place_id"))
+
+    if ends_at is None or start_tz is None:
+        if values.get("end_timezone") is not None:
+            raise _unprocessable("end_timezone needs an ends_at and a start_timezone")
+        end_tz = None
+    else:
+        end_tz = (
+            effective("end_timezone")
+            or _place_timezone(session, effective("end_place_id"))
+            or start_tz
+        )
+
+    values["start_timezone"], values["end_timezone"] = start_tz, end_tz
+    for field, tz in (("starts_at", start_tz), ("ends_at", end_tz)):
+        if field in values and values[field] is not None:
+            if tz is None and values[field].tzinfo is not None:
+                raise _unprocessable(
+                    f"{field} has an offset but no zone to read it in; send a timezone or a located place"
+                )
+            values[field] = to_local(values[field], tz) if tz else values[field]
+    starts_at, ends_at = effective("starts_at"), effective("ends_at")
+
+    if ends_at is not None:
+        if start_tz is not None:
+            in_order = to_utc(ends_at, end_tz) >= to_utc(starts_at, start_tz)
+        else:
+            in_order = ends_at >= starts_at
+        if not in_order:
+            raise _unprocessable("ends_at must be at or after starts_at")
 
 
 def _get_item(session: Session, trip: Trip, user: User, item_id: uuid.UUID) -> TripItem:
@@ -126,6 +196,7 @@ def list_items(
     kind: TripItemKind | None = None,
     scope: TripItemScope | None = None,
 ) -> list[TripItem]:
+    # Wall-time order: floating items have no instant to sort by.
     query = with_item_details(visible_items(trip, user)).order_by(TripItem.starts_at, TripItem.id)
     if kind is not None:
         query = query.where(TripItem.kind == kind)
@@ -141,7 +212,8 @@ def create_item(
     if payload.scope is TripItemScope.GROUP and not is_organizer(session, trip, user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can add group items")
     values = payload.model_dump()
-    _check_references(session, values)
+    check_places(session, values)
+    _resolve_times(session, values)
     item = TripItem(**values, trip_id=trip.id, created_by_id=user.id)
     if item.scope is TripItemScope.PERSONAL:
         item.participants.append(TripItemParticipant(user_id=user.id, status=RsvpStatus.GOING))
@@ -172,7 +244,7 @@ def update_item(
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise _unprocessable(f"{field} cannot be null")
-    _check_references(session, changes)
+    check_places(session, changes)
 
     scope = changes.get("scope", item.scope)
     if scope is not item.scope:
@@ -197,10 +269,7 @@ def update_item(
     except ValueError as exc:
         raise _unprocessable(str(exc)) from None
 
-    starts_at = changes.get("starts_at", item.starts_at)
-    ends_at = changes.get("ends_at", item.ends_at)
-    if ends_at is not None and ends_at < starts_at:
-        raise _unprocessable("ends_at must be at or after starts_at")
+    _resolve_times(session, changes, item)
 
     for field, value in changes.items():
         setattr(item, field, value)

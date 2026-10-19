@@ -132,7 +132,29 @@ def test_trip_can_be_created_with_areas(client, make_user):
     assert {a["name"] for a in listed["areas"]} == {"Japan", "Tokyo"}
 
 
-def test_trip_info_populates_missing_area_photos_on_demand(client, make_user, unsplash):
+def test_trip_flags_areas_missing_photos_without_fetching(client, make_user, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+    unsplash.results = [_photo("a")]  # available, but reads must NOT fetch
+
+    created = client.post(
+        "/trips", json={**JAPAN_TRIP, "area_ids": [tokyo["id"], japan["id"]]}, headers=sun
+    ).json()
+
+    # Step one: the write comes straight back, flagging both photoless areas and
+    # never touching Unsplash.
+    assert set(created["areas_missing_photos"]) == {tokyo["id"], japan["id"]}
+    assert all(a["default_photo_url"] is None for a in created["areas"])
+    assert unsplash.queries == []
+
+    # A read flags the same, still without fetching.
+    fetched = client.get(f"/trips/{created['id']}", headers=sun).json()
+    assert set(fetched["areas_missing_photos"]) == {tokyo["id"], japan["id"]}
+    assert unsplash.queries == []
+
+
+def test_refresh_photos_fills_covers_and_clears_the_flag(client, make_user, unsplash):
     sun = make_user("sun")
     japan = _make_area(client, sun, "Japan", kind="country")
     tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
@@ -140,38 +162,48 @@ def test_trip_info_populates_missing_area_photos_on_demand(client, make_user, un
         "/trips", json={**JAPAN_TRIP, "area_ids": [tokyo["id"], japan["id"]]}, headers=sun
     ).json()
 
-    # Areas start photoless (nothing backfilled); Unsplash now has a match.
+    # Step two: the client calls refresh-photos with the flagged ids.
     unsplash.results = [_photo("a"), _photo("b")]
-    unsplash.queries.clear()
-
-    fetched = client.get(f"/trips/{trip['id']}", headers=sun).json()
-    by_name = {a["name"]: a for a in fetched["areas"]}
-    assert by_name["Tokyo"]["default_photo_url"] == "https://u/a"
-    assert [p["url"] for p in by_name["Tokyo"]["photos"]] == ["https://u/a", "https://u/b"]
-    assert by_name["Japan"]["default_photo_url"] == "https://u/a"
-    # Cities search with their country for context; downloads are pinged.
+    refreshed = client.post(
+        "/areas/refresh-photos",
+        json={"area_ids": trip["areas_missing_photos"]},
+        headers=sun,
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    areas = refreshed.json()["areas"]
+    assert areas[tokyo["id"]]["default_photo_url"] == "https://u/a"
+    assert [p["url"] for p in areas[tokyo["id"]]["photos"]] == ["https://u/a", "https://u/b"]
+    # Cities search with their country for context; download pings fired.
     assert "Tokyo Japan" in unsplash.queries
-    assert unsplash.downloads  # the guideline-required download pings fired
+    assert unsplash.downloads
 
-    # Second read finds the stored photos and doesn't re-query Unsplash.
-    unsplash.queries.clear()
-    client.get(f"/trips/{trip['id']}", headers=sun)
-    assert unsplash.queries == []
+    # The trip no longer flags those areas, and the covers show up.
+    fetched = client.get(f"/trips/{trip['id']}", headers=sun).json()
+    assert fetched["areas_missing_photos"] == []
+    assert {a["default_photo_url"] for a in fetched["areas"]} == {"https://u/a"}
 
 
-def test_trip_info_survives_unsplash_having_no_match(client, make_user, unsplash):
+def test_refresh_photos_is_best_effort_when_unsplash_has_nothing(client, make_user, unsplash):
     sun = make_user("sun")
     japan = _make_area(client, sun, "Japan", kind="country")
-    trip = client.post(
-        "/trips", json={**JAPAN_TRIP, "area_ids": [japan["id"]]}, headers=sun
-    ).json()
+    unsplash.results = []  # no match / rate-limited
 
-    unsplash.results = []  # no match / rate-limited — trip info must still come back
-    fetched = client.get(f"/trips/{trip['id']}", headers=sun)
-    assert fetched.status_code == 200
-    area = fetched.json()["areas"][0]
-    assert area["photos"] == []
-    assert area["default_photo_url"] is None
+    refreshed = client.post("/areas/refresh-photos", json={"area_ids": [japan["id"]]}, headers=sun)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["areas"][japan["id"]]["photos"] == []
+    assert refreshed.json()["areas"][japan["id"]]["default_photo_url"] is None
+
+
+def test_refresh_photos_omits_unknown_ids(client, make_user, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    unsplash.results = [_photo("a")]
+    missing = str(uuid.uuid4())
+
+    refreshed = client.post(
+        "/areas/refresh-photos", json={"area_ids": [japan["id"], missing]}, headers=sun
+    ).json()
+    assert set(refreshed["areas"]) == {japan["id"]}
 
 
 def test_trip_area_ids_must_exist(client, make_user):

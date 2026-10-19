@@ -135,6 +135,20 @@ class AreaRead(ReadModel):
     updated_at: datetime
 
 
+class AreaPhotosRefreshRequest(BaseModel):
+    """The area ids a trip flagged as missing photos (its areas_missing_photos)."""
+
+    area_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class AreaPhotosRefreshResponse(BaseModel):
+    """Current state of the requested areas, keyed by id, after a best-effort
+    fetch — the client patches its cover images by id. Ids that don't match an
+    area are omitted."""
+
+    areas: dict[uuid.UUID, AreaRead]
+
+
 # --- places (specific spots in our catalogue) ---
 
 
@@ -257,6 +271,10 @@ class TripRead(ReadModel):
     # Resolved from the stored area_ids, in order; ids that no longer match an
     # area are dropped (and pruned from storage) so none surface as blanks.
     areas: list[AreaRead] = Field(default_factory=list)
+    # The subset of `areas` that have no photo yet. Render the trip now, then —
+    # if this is non-empty — call POST /areas/refresh-photos with these ids to
+    # fetch covers and patch them in. (Two-step, like places' stale_place_ids.)
+    areas_missing_photos: list[uuid.UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

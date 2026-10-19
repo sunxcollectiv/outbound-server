@@ -122,6 +122,37 @@ def get_unsplash_client() -> UnsplashClient:
     return UnsplashClient(settings.unsplash_access_key, app_name=settings.unsplash_app_name)
 
 
+def search_query_for(area: Area) -> str:
+    """A search query for an area. Cities get their country for context
+    ("Kyoto Japan") so we don't match a same-named place elsewhere."""
+    if area.kind == "city" and area.parent is not None:
+        return f"{area.name} {area.parent.name}"
+    return area.name
+
+
+def ensure_area_photos(session: Session, client: "UnsplashClient", areas: list[Area]) -> None:
+    """Best-effort: fill in photos for any of `areas` that has none yet, so the
+    caller can hand back cover images.
+
+    Every Unsplash failure is swallowed — a request never fails because of
+    photos — and the first failure (not configured, rate-limited, network) stops
+    the rest rather than hammering a source that won't recover within the call.
+    """
+    changed = False
+    for area in (a for a in areas if not a.photos):
+        try:
+            photos = client.search(search_query_for(area), count=DEFAULT_PHOTO_COUNT)
+        except UnsplashError:
+            break
+        if photos:
+            apply_area_photos(session, area, photos)
+            for photo in photos:
+                client.trigger_download(photo.download_location)
+            changed = True
+    if changed:
+        session.commit()
+
+
 def apply_area_photos(session: Session, area: Area, photos: list[UnsplashPhoto]) -> None:
     """Replace `area`'s photos with `photos` (ordered), and set the area's
     `default_photo_url` to the first one when it isn't set by hand already

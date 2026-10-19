@@ -1,15 +1,24 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area
-from app.schemas import AreaCreate, AreaRead, AreaUpdate
+from app.schemas import (
+    AreaCreate,
+    AreaPhotosRefreshRequest,
+    AreaPhotosRefreshResponse,
+    AreaRead,
+    AreaUpdate,
+)
+from app.services.unsplash import UnsplashClient, ensure_area_photos, get_unsplash_client
 
 router = APIRouter(prefix="/areas", tags=["areas"])
+
+UnsplashDep = Annotated[UnsplashClient, Depends(get_unsplash_client)]
 
 # Broader areas rank above narrower ones when a query matches equally well.
 _KIND_RANK = case(
@@ -75,6 +84,34 @@ def list_areas(
         query = query.order_by(Area.name, Area.id)
 
     return list(session.scalars(query))
+
+
+@router.post("/refresh-photos", response_model=AreaPhotosRefreshResponse)
+def refresh_area_photos(
+    payload: AreaPhotosRefreshRequest,
+    _: CurrentUser,
+    session: SessionDep,
+    unsplash: UnsplashDep,
+) -> AreaPhotosRefreshResponse:
+    """Fetch cover photos for the given areas (best-effort), then return their
+    current state keyed by id so the client can patch covers in.
+
+    The second half of the two-step flow: a trip read lists the ids of its areas
+    with no photos (`areas_missing_photos`); the client renders immediately, then
+    calls this to fill them. Areas that already have photos are returned
+    unchanged, unknown ids are omitted, and a failure to reach Unsplash (down,
+    rate-limited, not configured) just returns the areas without photos rather
+    than erroring."""
+    unique = list(dict.fromkeys(payload.area_ids))
+    areas = list(
+        session.scalars(
+            select(Area)
+            .options(selectinload(Area.parent), selectinload(Area.photos))
+            .where(Area.id.in_(unique))
+        )
+    )
+    ensure_area_photos(session, unsplash, areas)
+    return AreaPhotosRefreshResponse(areas={area.id: area for area in areas})
 
 
 @router.get("/{area_id}", response_model=AreaRead)

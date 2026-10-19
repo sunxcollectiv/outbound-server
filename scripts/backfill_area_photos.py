@@ -25,15 +25,8 @@ from app.services.unsplash import (
     UnsplashNotConfigured,
     apply_area_photos,
     get_unsplash_client,
+    search_query_for,
 )
-
-
-def _query_for(area: Area) -> str:
-    """A search query for an area. Cities get their country for context
-    ("Kyoto Japan") so we don't match a same-named place elsewhere."""
-    if area.kind == "city" and area.parent is not None:
-        return f"{area.name} {area.parent.name}"
-    return area.name
 
 
 def main() -> None:
@@ -60,7 +53,7 @@ def main() -> None:
         filled = skipped = failed = 0
 
         for index, area in enumerate(areas, start=1):
-            search = _query_for(area)
+            search = search_query_for(area)
             try:
                 photos = client.search(search, count=args.count)
             except UnsplashNotConfigured:

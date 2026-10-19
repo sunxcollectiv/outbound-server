@@ -9,6 +9,7 @@ from app.models.trip_item import (
     TripItemParticipant,
     TripItemRequirement,
     TripItemScope,
+    TripItemTransitSegment,
     TripItemVisibility,
 )
 from app.models.user import User
@@ -25,6 +26,7 @@ __all__ = [
     "TripItemParticipant",
     "TripItemRequirement",
     "TripItemScope",
+    "TripItemTransitSegment",
     "TripItemVisibility",
     "TripMember",
     "TripRole",

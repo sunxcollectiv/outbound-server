@@ -14,7 +14,12 @@ from app.schemas import (
     AreaRead,
     AreaUpdate,
 )
-from app.services.unsplash import UnsplashClient, ensure_area_photos, get_unsplash_client
+from app.services.unsplash import (
+    UnsplashClient,
+    UnsplashNotConfigured,
+    ensure_area_photos,
+    get_unsplash_client,
+)
 
 router = APIRouter(prefix="/areas", tags=["areas"])
 
@@ -99,9 +104,10 @@ def refresh_area_photos(
     The second half of the two-step flow: a trip read lists the ids of its areas
     with no photos (`areas_missing_photos`); the client renders immediately, then
     calls this to fill them. Areas that already have photos are returned
-    unchanged, unknown ids are omitted, and a failure to reach Unsplash (down,
-    rate-limited, not configured) just returns the areas without photos rather
-    than erroring."""
+    unchanged, unknown ids are omitted, and a transient failure to reach Unsplash
+    (down, rate-limited) just returns the areas without photos rather than
+    erroring. A missing key is the exception — it 503s, so a misconfiguration is
+    obvious instead of silently looking like "no photos found"."""
     unique = list(dict.fromkeys(payload.area_ids))
     areas = list(
         session.scalars(
@@ -110,7 +116,12 @@ def refresh_area_photos(
             .where(Area.id.in_(unique))
         )
     )
-    ensure_area_photos(session, unsplash, areas)
+    try:
+        ensure_area_photos(session, unsplash, areas)
+    except UnsplashNotConfigured:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Unsplash is not configured"
+        ) from None
     return AreaPhotosRefreshResponse(areas={area.id: area for area in areas})
 
 

@@ -134,14 +134,18 @@ def ensure_area_photos(session: Session, client: "UnsplashClient", areas: list[A
     """Best-effort: fill in photos for any of `areas` that has none yet, so the
     caller can hand back cover images.
 
-    Every Unsplash failure is swallowed — a request never fails because of
-    photos — and the first failure (not configured, rate-limited, network) stops
-    the rest rather than hammering a source that won't recover within the call.
+    Transient Unsplash failures are swallowed — a request never fails because of
+    a rate limit or a network blip — and the first such failure stops the rest
+    rather than hammering a source that won't recover within the call. A missing
+    key (`UnsplashNotConfigured`) is different: it's a server misconfiguration,
+    not a transient miss, so it propagates for the caller to surface (e.g. 503).
     """
     changed = False
     for area in (a for a in areas if not a.photos):
         try:
             photos = client.search(search_query_for(area), count=DEFAULT_PHOTO_COUNT)
+        except UnsplashNotConfigured:
+            raise
         except UnsplashError:
             break
         if photos:

@@ -1,6 +1,7 @@
 import uuid
 
-from app.services.unsplash import UnsplashPhoto
+from app.main import app
+from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_client
 from tests.conftest import JAPAN_TRIP
 
 
@@ -192,6 +193,16 @@ def test_refresh_photos_is_best_effort_when_unsplash_has_nothing(client, make_us
     assert refreshed.status_code == 200
     assert refreshed.json()["areas"][japan["id"]]["photos"] == []
     assert refreshed.json()["areas"][japan["id"]]["default_photo_url"] is None
+
+
+def test_refresh_photos_503s_when_unsplash_is_not_configured(client, make_user):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    # A real client with no key: a missing key must surface, not look like "no match".
+    app.dependency_overrides[get_unsplash_client] = lambda: UnsplashClient(None)
+
+    resp = client.post("/areas/refresh-photos", json={"area_ids": [japan["id"]]}, headers=sun)
+    assert resp.status_code == 503, resp.text
 
 
 def test_refresh_photos_omits_unknown_ids(client, make_user, unsplash):

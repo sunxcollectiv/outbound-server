@@ -62,14 +62,34 @@ def _commit_unique_place(session: SessionDep) -> None:
         ) from None
 
 
+def _try_enrich(session: SessionDep, places: GooglePlacesClient, place: Place) -> None:
+    """Best-effort enrichment for a freshly created place. A bare stub is an
+    acceptable outcome when Google can't answer (unknown id, not configured,
+    network), so any failure is swallowed and the place is left to be refreshed
+    later rather than failing the create."""
+    try:
+        details = places.fetch_place(place.google_place_id)
+    except GooglePlacesError:
+        session.rollback()  # nothing applied yet; just drop the empty transaction
+        return
+    apply_google_place(place, details)
+    apply_area_from_google(session, place, details)
+    session.commit()
+
+
 @router.post("", response_model=PlaceRead, status_code=status.HTTP_201_CREATED)
 def create_place(
-    payload: PlaceCreate, response: Response, user: CurrentUser, session: SessionDep
+    payload: PlaceCreate,
+    response: Response,
+    user: CurrentUser,
+    session: SessionDep,
+    places: PlacesDep,
 ) -> Place:
-    """Register a Google place as an un-enriched stub: we store only the
-    google_place_id and hand back the generated id (name, address, area and the
-    rest are filled in by a later enrichment/review step). Get-or-create on the
-    unique google_place_id: 200 if we already have it, 201 if new."""
+    """Register a Google place and enrich it from Google Place Details in the
+    same request. Get-or-create on the unique google_place_id: 200 if we already
+    have it (returned as-is, no re-fetch), 201 if new. A new place is enriched
+    best-effort — if Google can't answer it is left as a bare stub for a later
+    refresh, rather than failing the create."""
     existing = session.scalar(
         select(Place).where(Place.google_place_id == payload.google_place_id)
     )
@@ -80,6 +100,7 @@ def create_place(
     place = Place(google_place_id=payload.google_place_id, created_by_id=user.id)
     session.add(place)
     _commit_unique_place(session)
+    _try_enrich(session, places, place)
     return place
 
 

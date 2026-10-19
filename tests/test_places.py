@@ -58,24 +58,35 @@ def _enrich(client, headers, google_place_id):
     return refreshed.json()
 
 
-def test_refresh_google_enriches_a_stub(client, make_user, google_places):
+def test_create_auto_enriches_a_known_place(client, make_user, google_places):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
 
-    stub = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun).json()
-    assert stub["name"] is None
-
-    refreshed = client.post(f"/places/{stub['id']}/refresh-google", headers=sun)
-    assert refreshed.status_code == 200, refreshed.text
-    place = refreshed.json()
-    assert place["id"] == stub["id"]
+    created = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun)
+    assert created.status_code == 201, created.text
+    place = created.json()
+    # Enriched in the create request, not left as a bare stub.
     assert place["name"] == "Hotel Kanade Shinjuku"
     assert place["timezone"] == "Asia/Tokyo"
     assert (place["latitude"], place["longitude"]) == (35.6938, 139.7034)
     # The raw Google response is cached but not exposed on the API (see cover_photo).
     assert place["cover_photo"] is None  # HOTEL_PLACE carries no photos
     assert place["google_fetched_at"] is not None
-    assert google_places.calls == [HOTEL_PLACE_ID]
+    assert google_places.calls == [HOTEL_PLACE_ID]  # enriched exactly once, at creation
+
+
+def test_create_leaves_a_stub_when_google_cant_answer(client, make_user, google_places):
+    sun = make_user("sun")  # HOTEL_PLACE_ID deliberately not registered in the fake
+
+    created = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun)
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] is None  # a bare stub, to be refreshed later
+
+    # Once Google knows it, refresh-google enriches the existing stub.
+    google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
+    refreshed = client.post(f"/places/{created.json()['id']}/refresh-google", headers=sun)
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["name"] == "Hotel Kanade Shinjuku"
 
 
 def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places, session):
@@ -303,7 +314,12 @@ def test_resolve_cover_photo_without_photos_needs_no_key():
     assert resolve_cover_photo(place, api_key=None) is None
 
 
-def test_resolve_cover_photo_raises_when_unconfigured_but_a_photo_exists():
+def test_resolve_cover_photo_raises_when_unconfigured_but_a_photo_exists(monkeypatch):
+    # Force "no key configured" regardless of the developer's .env.
+    from app.config import Settings
+    from app.services import google_places as gp
+
+    monkeypatch.setattr(gp, "get_settings", lambda: Settings(google_maps_api_key=None))
     with pytest.raises(GooglePlacesNotConfigured):
         resolve_cover_photo(_place_with_photos(), api_key=None)
 

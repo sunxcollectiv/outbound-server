@@ -86,6 +86,7 @@ class TokenRead(BaseModel):
 class AreaBase(BaseModel):
     kind: str | None = Field(default=None, max_length=60)
     level: int | None = None
+    parent_id: uuid.UUID | None = None
     photo_url: Url | None = None
 
 
@@ -102,6 +103,7 @@ class AreaRead(ReadModel):
     name: str
     kind: str | None
     level: int | None
+    parent_id: uuid.UUID | None
     photo_url: str | None
     created_at: datetime
     updated_at: datetime

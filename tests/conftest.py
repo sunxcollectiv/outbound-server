@@ -16,6 +16,7 @@ from app.services.google_places import (
     GooglePlacesClient,
     get_google_places_client,
 )
+from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_client
 
 TEST_DATABASE = "outbound_test"
 
@@ -72,10 +73,36 @@ def google_places() -> FakeGooglePlaces:
     return FakeGooglePlaces()
 
 
+class FakeUnsplash(UnsplashClient):
+    """Returns whatever photos the test puts in `results` for any query, and
+    records the queries/downloads it was asked for. Defaults to no results, so
+    on-demand area-photo fetching is a no-op unless a test opts in."""
+
+    def __init__(self) -> None:
+        self.results: list[UnsplashPhoto] = []
+        self.queries: list[str] = []
+        self.downloads: list[str | None] = []
+
+    def search(self, query: str, *, count: int = 3) -> list[UnsplashPhoto]:
+        self.queries.append(query)
+        return self.results[:count]
+
+    def trigger_download(self, download_location: str | None) -> None:
+        self.downloads.append(download_location)
+
+
 @pytest.fixture
-def client(session: Session, google_places: FakeGooglePlaces) -> Iterator[TestClient]:
+def unsplash() -> FakeUnsplash:
+    return FakeUnsplash()
+
+
+@pytest.fixture
+def client(
+    session: Session, google_places: FakeGooglePlaces, unsplash: FakeUnsplash
+) -> Iterator[TestClient]:
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_google_places_client] = lambda: google_places
+    app.dependency_overrides[get_unsplash_client] = lambda: unsplash
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

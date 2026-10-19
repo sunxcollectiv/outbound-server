@@ -1,5 +1,6 @@
 import uuid
 
+from app.services.unsplash import UnsplashPhoto
 from tests.conftest import JAPAN_TRIP
 
 
@@ -7,6 +8,19 @@ def _make_area(client, headers, name, **extra):
     resp = client.post("/areas", json={"name": name, **extra}, headers=headers)
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+def _photo(id_: str) -> UnsplashPhoto:
+    return UnsplashPhoto(
+        id=id_,
+        url=f"https://u/{id_}",
+        attribution="Jane Doe",
+        attribution_url="https://unsplash.com/@jane",
+        download_location=f"https://api.unsplash.com/photos/{id_}/download",
+        width=4000,
+        height=3000,
+        color="#262626",
+    )
 
 
 def test_trip_validation(client, make_user):
@@ -116,6 +130,48 @@ def test_trip_can_be_created_with_areas(client, make_user):
     assert by_name["Tokyo"]["parent"]["name"] == "Japan"
     listed = client.get("/trips", headers=sun).json()[0]
     assert {a["name"] for a in listed["areas"]} == {"Japan", "Tokyo"}
+
+
+def test_trip_info_populates_missing_area_photos_on_demand(client, make_user, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+    trip = client.post(
+        "/trips", json={**JAPAN_TRIP, "area_ids": [tokyo["id"], japan["id"]]}, headers=sun
+    ).json()
+
+    # Areas start photoless (nothing backfilled); Unsplash now has a match.
+    unsplash.results = [_photo("a"), _photo("b")]
+    unsplash.queries.clear()
+
+    fetched = client.get(f"/trips/{trip['id']}", headers=sun).json()
+    by_name = {a["name"]: a for a in fetched["areas"]}
+    assert by_name["Tokyo"]["default_photo_url"] == "https://u/a"
+    assert [p["url"] for p in by_name["Tokyo"]["photos"]] == ["https://u/a", "https://u/b"]
+    assert by_name["Japan"]["default_photo_url"] == "https://u/a"
+    # Cities search with their country for context; downloads are pinged.
+    assert "Tokyo Japan" in unsplash.queries
+    assert unsplash.downloads  # the guideline-required download pings fired
+
+    # Second read finds the stored photos and doesn't re-query Unsplash.
+    unsplash.queries.clear()
+    client.get(f"/trips/{trip['id']}", headers=sun)
+    assert unsplash.queries == []
+
+
+def test_trip_info_survives_unsplash_having_no_match(client, make_user, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    trip = client.post(
+        "/trips", json={**JAPAN_TRIP, "area_ids": [japan["id"]]}, headers=sun
+    ).json()
+
+    unsplash.results = []  # no match / rate-limited — trip info must still come back
+    fetched = client.get(f"/trips/{trip['id']}", headers=sun)
+    assert fetched.status_code == 200
+    area = fetched.json()["areas"][0]
+    assert area["photos"] == []
+    assert area["default_photo_url"] is None
 
 
 def test_trip_area_ids_must_exist(client, make_user):

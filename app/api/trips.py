@@ -1,7 +1,8 @@
 import uuid
 from datetime import date
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
@@ -38,8 +39,16 @@ from app.schemas import (
 )
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
+from app.services.unsplash import (
+    UnsplashClient,
+    UnsplashError,
+    apply_area_photos,
+    get_unsplash_client,
+)
 
 router = APIRouter(prefix="/trips", tags=["trips"])
+
+UnsplashDep = Annotated[UnsplashClient, Depends(get_unsplash_client)]
 
 NOT_NULLABLE = ("title", "start_date", "end_date")
 
@@ -57,18 +66,51 @@ def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid
     return unique
 
 
-def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
+def ensure_area_photos(
+    session: SessionDep, unsplash: UnsplashClient, areas: list[Area]
+) -> None:
+    """Best-effort: fill in photos for any area that has none yet, so trip info
+    comes back with cover images even for areas the backfill hasn't reached.
+
+    Fetched inline from Unsplash and stored, so the next read is free. Every
+    Unsplash failure is swallowed — a trip read never fails because of photos —
+    and the first failure (not configured, rate-limited, network) stops the rest
+    this request rather than hammering a source that won't recover mid-request."""
+    changed = False
+    for area in (a for a in areas if not a.photos):
+        query = (
+            f"{area.name} {area.parent.name}"
+            if area.kind == "city" and area.parent is not None
+            else area.name
+        )
+        try:
+            photos = unsplash.search(query, count=3)
+        except UnsplashError:
+            break
+        if photos:
+            apply_area_photos(session, area, photos)
+            for photo in photos:
+                unsplash.trigger_download(photo.download_location)
+            changed = True
+    if changed:
+        session.commit()
+
+
+def attach_areas(session: SessionDep, trips: list[Trip], unsplash: UnsplashClient) -> None:
     """Resolve each trip's area_ids into `Area` objects (in stored order) for
     the response, and drop any id that no longer matches an area — e.g. the
     area was deleted — so stale ids never surface as blanks. A prune is written
     back only when one actually happened, so an ordinary read stays read-only.
-    Batched into one lookup across all the trips given."""
+    Batched into one lookup across all the trips given. Areas that still lack a
+    photo get one fetched on the spot (best-effort) before they're returned."""
     wanted = {area_id for trip in trips for area_id in trip.area_ids}
     areas = (
         {
             area.id: area
             for area in session.scalars(
-                select(Area).options(selectinload(Area.parent)).where(Area.id.in_(wanted))
+                select(Area)
+                .options(selectinload(Area.parent), selectinload(Area.photos))
+                .where(Area.id.in_(wanted))
             )
         }
         if wanted
@@ -87,9 +129,13 @@ def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
     if pruned:
         session.commit()
 
+    ensure_area_photos(session, unsplash, list(areas.values()))
+
 
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
-def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
+def create_trip(
+    payload: TripCreate, user: CurrentUser, session: SessionDep, unsplash: UnsplashDep
+) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
     trip_members is the full headcount and roles live in one place. A day row
     is made for every date, seeded with the timezone if one was given."""
@@ -101,28 +147,30 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
     sync_trip_days(trip, seed_timezone)
     session.add(trip)
     session.commit()
-    attach_areas(session, [trip])
+    attach_areas(session, [trip], unsplash)
     return trip
 
 
 @router.get("", response_model=list[TripRead])
-def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
+def list_trips(user: CurrentUser, session: SessionDep, unsplash: UnsplashDep) -> list[Trip]:
     """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
     trips = list(session.scalars(query))
-    attach_areas(session, trips)
+    attach_areas(session, trips, unsplash)
     return trips
 
 
 @router.get("/{trip_id}", response_model=TripRead)
-def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
-    attach_areas(session, [trip])
+def read_trip(trip: ViewableTrip, session: SessionDep, unsplash: UnsplashDep) -> Trip:
+    attach_areas(session, [trip], unsplash)
     return trip
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
-def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
+def update_trip(
+    payload: TripUpdate, trip: OrganizerTrip, session: SessionDep, unsplash: UnsplashDep
+) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
     area_ids = changes.pop("area_ids", None)
     for field in NOT_NULLABLE:
@@ -141,7 +189,7 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
     session.commit()
-    attach_areas(session, [trip])
+    attach_areas(session, [trip], unsplash)
     return trip
 
 

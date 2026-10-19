@@ -359,26 +359,35 @@ class RsvpUpdate(BaseModel):
     status: RsvpStatus
 
 
-class TransitSegmentRead(ReadModel):
-    id: uuid.UUID
-    position: int
+class TimeSpanRead(ReadModel):
+    """The read side of a models.LocalTimeSpan: wall time at each end (no offset
+    in the JSON) with the zone it's read in when known — no zone means a floating
+    time, shown as written — plus the same moments as instants for the zoned
+    ends, null for floating ones."""
+
     starts_at: datetime
     start_timezone: str | None
     ends_at: datetime | None
     end_timezone: str | None
     starts_at_utc: datetime | None
     ends_at_utc: datetime | None
+
+    @field_serializer("starts_at_utc", "ends_at_utc")
+    def _in_utc(self, value: datetime | None) -> datetime | None:
+        # The driver hands back instants in the session's zone; always say Z.
+        return value.astimezone(UTC) if value is not None else None
+
+
+class TransitSegmentRead(TimeSpanRead):
+    id: uuid.UUID
+    position: int
     place: PlaceRead | None
     end_place: PlaceRead | None
     carrier: str | None
     flight_number: str | None
 
-    @field_serializer("starts_at_utc", "ends_at_utc")
-    def _in_utc(self, value: datetime | None) -> datetime | None:
-        return value.astimezone(UTC) if value is not None else None
 
-
-class TripItemRead(ReadModel):
+class TripItemRead(TimeSpanRead):
     id: uuid.UUID
     trip_id: uuid.UUID
     kind: TripItemKind
@@ -388,16 +397,6 @@ class TripItemRead(ReadModel):
     title: str
     notes: str | None
     tags: list[str]
-    # Wall time at each end (no offset in the JSON) and, when known, the zone
-    # it's read in. No zone means a floating time: show it as written and pick
-    # a zone (the trip day's, say) only when an instant is needed.
-    starts_at: datetime
-    start_timezone: str | None
-    ends_at: datetime | None
-    end_timezone: str | None
-    # The same moments as instants for the zoned ends; null for floating ones.
-    starts_at_utc: datetime | None
-    ends_at_utc: datetime | None
     image_url: str | None
     place: PlaceRead | None
     end_place: PlaceRead | None
@@ -412,11 +411,6 @@ class TripItemRead(ReadModel):
     participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime
-
-    @field_serializer("starts_at_utc", "ends_at_utc")
-    def _in_utc(self, value: datetime | None) -> datetime | None:
-        # The driver hands back instants in the session's zone; always say Z.
-        return value.astimezone(UTC) if value is not None else None
 
 
 # --- itinerary (the day-by-day view) ---

@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -85,6 +86,17 @@ def _place_timezone(session: Session, place_id: uuid.UUID | None) -> str | None:
     return place.timezone if place is not None else None
 
 
+def _in_chronological_order(
+    earlier: datetime, earlier_tz: str | None, later: datetime, later_tz: str | None
+) -> bool:
+    """Whether `later` falls at or after `earlier` — by instant when both ends
+    are zoned, by wall clock otherwise (a westbound hop can land at an earlier
+    local time than it left)."""
+    if earlier_tz is not None and later_tz is not None:
+        return to_utc(later, later_tz) >= to_utc(earlier, earlier_tz)
+    return later >= earlier
+
+
 def _resolve_times(
     session: Session, values: dict[str, Any], item: TripItem | None = None
 ) -> None:
@@ -137,13 +149,8 @@ def _resolve_times(
             values[field] = to_local(values[field], tz) if tz else values[field]
     starts_at, ends_at = effective("starts_at"), effective("ends_at")
 
-    if ends_at is not None:
-        if start_tz is not None:
-            in_order = to_utc(ends_at, end_tz) >= to_utc(starts_at, start_tz)
-        else:
-            in_order = ends_at >= starts_at
-        if not in_order:
-            raise _unprocessable("ends_at must be at or after starts_at")
+    if ends_at is not None and not _in_chronological_order(starts_at, start_tz, ends_at, end_tz):
+        raise _unprocessable("ends_at must be at or after starts_at")
 
 
 SPAN_FIELDS = ("starts_at", "ends_at", "start_timezone", "end_timezone", "place_id", "end_place_id")
@@ -170,15 +177,9 @@ def _build_segments(
         segments.append(TripItemTransitSegment(position=position, **leg))
 
     for arriving, departing in zip(segments, segments[1:]):
-        if arriving.ends_at is None:
-            continue
-        if arriving.end_timezone and departing.start_timezone:
-            in_order = to_utc(departing.starts_at, departing.start_timezone) >= to_utc(
-                arriving.ends_at, arriving.end_timezone
-            )
-        else:
-            in_order = departing.starts_at >= arriving.ends_at
-        if not in_order:
+        if arriving.ends_at is not None and not _in_chronological_order(
+            arriving.ends_at, arriving.end_timezone, departing.starts_at, departing.start_timezone
+        ):
             raise _unprocessable(
                 "each transit leg must depart at or after the previous leg arrives"
             )

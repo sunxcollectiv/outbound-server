@@ -98,12 +98,22 @@ class AreaUpdate(AreaBase):
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class AreaRef(ReadModel):
+    """A compact reference to an area, e.g. the country a city sits in, enough
+    to label a search result ("Paris · France") without a second request."""
+
+    id: uuid.UUID
+    name: str
+    kind: str | None
+
+
 class AreaRead(ReadModel):
     id: uuid.UUID
     name: str
     kind: str | None
     level: int | None
     parent_id: uuid.UUID | None
+    parent: AreaRef | None = None
     photo_url: str | None
     created_at: datetime
     updated_at: datetime

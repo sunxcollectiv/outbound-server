@@ -2,13 +2,22 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import case, func, select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area
 from app.schemas import AreaCreate, AreaRead, AreaUpdate
 
 router = APIRouter(prefix="/areas", tags=["areas"])
+
+# Broader areas rank above narrower ones when a query matches equally well.
+_KIND_RANK = case(
+    (Area.kind == "country", 0),
+    (Area.kind == "territory", 1),
+    (Area.kind == "city", 2),
+    else_=3,
+)
 
 
 def _get_area(session: SessionDep, area_id: uuid.UUID) -> Area:
@@ -33,14 +42,33 @@ def list_areas(
     _: CurrentUser,
     session: SessionDep,
     q: str | None = None,
+    kind: Annotated[str | None, Query(max_length=60)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[Area]:
-    query = (
-        select(Area).order_by(Area.name, Area.id).limit(limit).offset(offset)
-    )
+    """Text-search areas by name. Results are ranked best-match first: exact
+    name, then prefix, then substring; ties broken by shorter name, then
+    broader kind (country/territory before city), then alphabetically. Pass
+    ``kind`` to restrict to one kind (e.g. ``city``). Without ``q`` it's a
+    plain alphabetical listing."""
+    query = select(Area).options(selectinload(Area.parent)).limit(limit).offset(offset)
+
+    if kind:
+        query = query.where(Area.kind == kind)
+
     if q:
-        query = query.where(Area.name.icontains(q, autoescape=True))
+        term = q.strip()
+        match_rank = case(
+            (func.lower(Area.name) == term.lower(), 0),
+            (Area.name.istartswith(term, autoescape=True), 1),
+            else_=2,
+        )
+        query = query.where(Area.name.icontains(term, autoescape=True)).order_by(
+            match_rank, func.length(Area.name), _KIND_RANK, Area.name, Area.id
+        )
+    else:
+        query = query.order_by(Area.name, Area.id)
+
     return list(session.scalars(query))
 
 

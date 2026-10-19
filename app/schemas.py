@@ -358,12 +358,13 @@ class LodgingStay(BaseModel):
 
 
 class ItineraryEntry(BaseModel):
-    """A trip item at one spot in a day's timeline. A transit item is split into
-    two entries, one per end: `transit_phase` says which this stands for and the
-    client leans on that end's time and place. It's null for everything else."""
+    """A trip item at one spot in a day's timeline. An item with two distinct
+    ends is split into one entry per end: `phase` says which this stands for —
+    `departure`/`arrival` for transit, `check_in`/`check_out` for lodging — and
+    the client leans on that end's time and place. It's null for everything else."""
 
     item: TripItemRead
-    transit_phase: Literal["departure", "arrival"] | None = None
+    phase: Literal["departure", "arrival", "check_in", "check_out"] | None = None
 
 
 class ItineraryDay(BaseModel):

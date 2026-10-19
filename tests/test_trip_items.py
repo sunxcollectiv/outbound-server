@@ -388,9 +388,9 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
         "Sean Salim arrives",
         "Omoide Yokocho dinner",
     ]
-    # These transit items have no distinct arrival (same instant, or none at
-    # all), so each stays a single unphased entry.
-    assert [entry["transit_phase"] for entry in days[0]["items"]] == [None, None, None, None]
+    # The transit items have no distinct arrival (same instant, or none at all)
+    # so they stay unphased; the hotel splits, so day 1 carries its check-in.
+    assert [entry["phase"] for entry in days[0]["items"]] == [None, "check_in", None, None]
     arrival = days[0]["items"][2]["item"]
     assert arrival["created_by"]["email"] == "sean@example.com"
     assert arrival["visibility"] == "shared"
@@ -401,7 +401,10 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
 
     phases = [[stay["phase"] for stay in day["lodging"]] for day in days]
     assert phases == [["check_in"], ["staying"], ["check_out"], [], [], [], []]
-    assert days[2]["items"] == []
+    # The hotel's 11:00 check-out lands on day 3 as its own timeline entry.
+    assert [(e["item"]["title"], e["phase"]) for e in days[2]["items"]] == [
+        ("Hotel Kanade Shinjuku", "check_out")
+    ]
     assert days[0]["items"][0]["item"]["start_timezone"] == "Asia/Tokyo"
 
 
@@ -439,7 +442,7 @@ def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make
     add("Check in", "2026-04-11T15:00:00", "Asia/Tokyo")
 
     days = client.get(f"{url}/itinerary", headers=sun).json()["days"]
-    assert [(e["item"]["title"], e["transit_phase"]) for e in days[1]["items"]] == [
+    assert [(e["item"]["title"], e["phase"]) for e in days[1]["items"]] == [
         ("Packing", None),
         ("Tokyo breakfast", None),
         ("Call from LA", None),
@@ -448,7 +451,7 @@ def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make
         ("Overnight to Tokyo", "departure"),
     ]
     # ...and lands on day 3, sorted by its 16:00 arrival clock, after check-in.
-    assert [(e["item"]["title"], e["transit_phase"]) for e in days[2]["items"]] == [
+    assert [(e["item"]["title"], e["phase"]) for e in days[2]["items"]] == [
         ("Check in", None),
         ("Overnight to Tokyo", "arrival"),
     ]
@@ -499,13 +502,13 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
     days = client.get(f"{url}/itinerary", headers=sun).json()["days"]
     assert days[0]["date"] == "2026-04-08"
     assert days[0]["day_number"] == 0
-    assert [(e["item"]["title"], e["transit_phase"]) for e in days[0]["items"]] == [
+    assert [(e["item"]["title"], e["phase"]) for e in days[0]["items"]] == [
         ("Flight to Tokyo", "departure")
     ]
     # The same item shows again on its arrival day as a separate arrival entry,
     # in the destination's zone, sorted by when it lands rather than when it took off.
     assert days[1]["items"] == []
-    assert [(e["item"]["title"], e["transit_phase"]) for e in days[2]["items"]] == [
+    assert [(e["item"]["title"], e["phase"]) for e in days[2]["items"]] == [
         ("Breakfast", None),
         ("Flight to Tokyo", "arrival"),
     ]

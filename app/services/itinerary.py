@@ -20,14 +20,15 @@ def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     """Group a trip's items into calendar days by their wall times.
 
-    Most items appear once, on the day their start names. A transit item with a
-    distinct arrival is split into two entries instead — a `departure` on its
-    start day and an `arrival` on its arrival day (the same day when it lands
-    before midnight), each placed and sorted by the wall time of that end so a
-    flight sorts by when it leaves on one day and by when it lands on the other.
-    Lodging additionally shows up in each day's `lodging` list from check-in
-    through check-out. Zones are ignored throughout: a day reads like a diary
-    page, ordered by the clock, whichever zone each entry is in.
+    Most items appear once, on the day their start names. An item with a distinct
+    second end is split into two entries instead, one per end, each placed and
+    sorted by the wall time of that end: transit into a `departure` and an
+    `arrival`, lodging into a `check_in` and a `check_out`. So a flight sorts by
+    when it leaves on one day and by when it lands on the other, and a hotel sorts
+    by check-in on arrival day and by check-out on the last morning. Lodging also
+    still shows up in each day's `lodging` list from check-in through check-out.
+    Zones are ignored throughout: a day reads like a diary page, ordered by the
+    clock, whichever zone each entry is in.
     """
     # (sort key, entry) so a day's list is ordered by the wall time relevant to
     # that day: a flight arriving at 11:00 sorts by 11:00, not by when it left.
@@ -38,16 +39,20 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
         start_day = item.starts_at.date()
         read = TripItemRead.model_validate(item)
 
-        if (
-            item.kind is TripItemKind.TRANSIT
-            and item.ends_at is not None
-            and item.ends_at != item.starts_at
-        ):
+        splits_into_ends = item.ends_at is not None and item.ends_at != item.starts_at
+        if item.kind is TripItemKind.TRANSIT and splits_into_ends:
             items_by_day[start_day].append(
-                (item.starts_at, ItineraryEntry(item=read, transit_phase="departure"))
+                (item.starts_at, ItineraryEntry(item=read, phase="departure"))
             )
             items_by_day[item.ends_at.date()].append(
-                (item.ends_at, ItineraryEntry(item=read, transit_phase="arrival"))
+                (item.ends_at, ItineraryEntry(item=read, phase="arrival"))
+            )
+        elif item.kind is TripItemKind.LODGING and splits_into_ends:
+            items_by_day[start_day].append(
+                (item.starts_at, ItineraryEntry(item=read, phase="check_in"))
+            )
+            items_by_day[item.ends_at.date()].append(
+                (item.ends_at, ItineraryEntry(item=read, phase="check_out"))
             )
         else:
             items_by_day[start_day].append((item.starts_at, ItineraryEntry(item=read)))

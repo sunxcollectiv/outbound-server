@@ -8,6 +8,9 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://outbound:outbound@127.0.0.1:4930/outbound"
     google_maps_api_key: str | None = None
+    # Google forbids caching Place content beyond 30 days, so a cached photo
+    # reference older than this should be refreshed before it is trusted.
+    google_photo_max_age_days: int = 30
     access_token_ttl_days: int = 90
 
 

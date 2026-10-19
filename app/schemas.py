@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -129,6 +129,22 @@ class PlaceCreate(BaseModel):
     google_place_id: str = Field(min_length=1, max_length=255)
 
 
+class PhotoAttribution(ReadModel):
+    display_name: str | None
+    uri: str | None
+
+
+class CoverPhoto(ReadModel):
+    """A ready-to-load Google cover photo. `url` is good for an <img src> but is
+    ephemeral (embeds the key, redirects to a short-lived CDN URL) — never store
+    it. `attributions` must be shown with the image. `is_stale` flags a cache
+    past the 30-day cap that should be refreshed."""
+
+    url: str
+    attributions: list[PhotoAttribution]
+    is_stale: bool
+
+
 class PlaceRead(ReadModel):
     id: uuid.UUID
     name: str | None
@@ -142,7 +158,9 @@ class PlaceRead(ReadModel):
     area_id: uuid.UUID | None
     area: AreaRead | None
     google_place_id: str | None
-    google_data: dict[str, Any] | None
+    # The raw google_data blob is intentionally not exposed; cover_photo is the
+    # supported way to get a venue image (see services.google_places).
+    cover_photo: CoverPhoto | None
     google_fetched_at: datetime | None
     created_at: datetime
     updated_at: datetime

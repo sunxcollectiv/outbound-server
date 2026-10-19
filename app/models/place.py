@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Float, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -11,6 +11,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin
 from app.models.area import Area
+
+if TYPE_CHECKING:
+    from app.services.google_places import ResolvedPhoto
 
 
 class Place(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -47,3 +50,19 @@ class Place(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     area: Mapped[Area | None] = relationship()
+
+    @property
+    def cover_photo(self) -> ResolvedPhoto | None:
+        """A ready-to-load Google cover photo built from the cached google_data,
+        or None when the place has no usable photo (or Google isn't configured).
+
+        Derived, never stored: the resolved URL embeds the API key and points at
+        a short-lived CDN redirect, so it must be built fresh on each read.
+        """
+        # Imported lazily: the service layer imports this model.
+        from app.services.google_places import GooglePlacesNotConfigured, resolve_cover_photo
+
+        try:
+            return resolve_cover_photo(self)
+        except GooglePlacesNotConfigured:
+            return None

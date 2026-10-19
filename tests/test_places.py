@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from app.services.google_places import (
     GooglePlacesError,
     GooglePlacesNotConfigured,
     get_google_places_client,
+    resolve_cover_photo,
 )
 
 HOTEL_PLACE_ID = "ChIJ-test-hotel"
@@ -70,12 +72,13 @@ def test_refresh_google_enriches_a_stub(client, make_user, google_places):
     assert place["name"] == "Hotel Kanade Shinjuku"
     assert place["timezone"] == "Asia/Tokyo"
     assert (place["latitude"], place["longitude"]) == (35.6938, 139.7034)
-    assert place["google_data"] == HOTEL_PLACE
+    # The raw Google response is cached but not exposed on the API (see cover_photo).
+    assert place["cover_photo"] is None  # HOTEL_PLACE carries no photos
     assert place["google_fetched_at"] is not None
     assert google_places.calls == [HOTEL_PLACE_ID]
 
 
-def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places):
+def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places, session):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
     place = client.post(
@@ -95,7 +98,9 @@ def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, goo
     body = refreshed.json()
     assert body["name"] == "Our hotel"
     assert body["notes"] == "Ask for a high floor"
-    assert body["google_data"]["displayName"]["text"] == "Hotel Kanade (renamed)"
+    # The cache isn't on the API, so check the stored blob directly.
+    cached = session.get(Place, uuid.UUID(place["id"])).google_data
+    assert cached["displayName"]["text"] == "Hotel Kanade (renamed)"
 
 
 def test_create_place_is_a_get_or_create_stub(client, make_user):
@@ -116,7 +121,7 @@ def test_create_place_is_a_get_or_create_stub(client, make_user):
 
 
 def test_google_place_id_is_unique_and_relinking_clears_the_cache(
-    client, make_user, google_places
+    client, make_user, google_places, session
 ):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
@@ -134,8 +139,8 @@ def test_google_place_id_is_unique_and_relinking_clears_the_cache(
         f"/places/{linked['id']}", json={"google_place_id": "ChIJ-fresh"}, headers=sun
     )
     assert relinked.status_code == 200
-    assert relinked.json()["google_data"] is None
     assert relinked.json()["google_fetched_at"] is None
+    assert session.get(Place, uuid.UUID(linked["id"])).google_data is None
 
 
 def test_google_failures_map_to_http_errors(client, make_user, session):
@@ -242,6 +247,65 @@ def test_places_client_sends_key_and_field_mask():
         "key": "test-key",
         "mask": FIELD_MASK,
     }
+
+
+def _place_with_photos() -> Place:
+    place = Place()
+    place.google_fetched_at = datetime.now(UTC)
+    place.google_data = {
+        "photos": [
+            {
+                "name": "places/XYZ/photos/aaa",
+                "authorAttributions": [
+                    {"displayName": "Jane D", "uri": "https://maps.google.com/jane"}
+                ],
+            },
+            {"name": "places/XYZ/photos/bbb", "authorAttributions": []},
+        ]
+    }
+    return place
+
+
+def test_resolve_cover_photo_builds_a_media_url_with_attribution():
+    photo = resolve_cover_photo(_place_with_photos(), api_key="KEY", max_width_px=400)
+    assert photo is not None
+    # Defaults to the first photo, emits a loadable media URL and keeps the credit.
+    assert photo.name == "places/XYZ/photos/aaa"
+    assert photo.url == (
+        "https://places.googleapis.com/v1/places/XYZ/photos/aaa/media?maxWidthPx=400&key=KEY"
+    )
+    assert [(a.display_name, a.uri) for a in photo.attributions] == [
+        ("Jane D", "https://maps.google.com/jane")
+    ]
+    assert photo.is_stale is False
+
+
+def test_resolve_cover_photo_prefers_a_selection_and_falls_back_when_it_vanishes():
+    place = _place_with_photos()
+    assert resolve_cover_photo(place, prefer_name="places/XYZ/photos/bbb", api_key="KEY").name == (
+        "places/XYZ/photos/bbb"
+    )
+    # A selection that no longer exists after a refresh falls back to the first photo.
+    assert resolve_cover_photo(place, prefer_name="places/XYZ/photos/gone", api_key="KEY").name == (
+        "places/XYZ/photos/aaa"
+    )
+
+
+def test_resolve_cover_photo_flags_a_stale_cache():
+    place = _place_with_photos()
+    place.google_fetched_at = datetime.now(UTC) - timedelta(days=45)
+    assert resolve_cover_photo(place, api_key="KEY").is_stale is True
+
+
+def test_resolve_cover_photo_without_photos_needs_no_key():
+    place = Place()
+    place.google_data = {"id": "x"}  # enriched, but no photos
+    assert resolve_cover_photo(place, api_key=None) is None
+
+
+def test_resolve_cover_photo_raises_when_unconfigured_but_a_photo_exists():
+    with pytest.raises(GooglePlacesNotConfigured):
+        resolve_cover_photo(_place_with_photos(), api_key=None)
 
 
 def test_places_client_error_mapping():

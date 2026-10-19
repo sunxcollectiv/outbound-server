@@ -264,6 +264,31 @@ def test_refresh_places_refreshes_only_stale_ones(client, make_user, google_plac
     assert places[fresh_id]["name"] == "Kept"  # left alone
 
 
+def test_refresh_places_zero_days_forces_a_fresh_place(client, make_user, google_places, session):
+    sun = make_user("sun")
+    google_places.places["g-fresh"] = {"id": "g-fresh", "displayName": {"text": "Renamed"}}
+    fresh = Place(
+        google_place_id="g-fresh",
+        google_data={"displayName": {"text": "old"}},
+        google_fetched_at=datetime.now(UTC),
+    )
+    session.add(fresh)
+    session.commit()
+    fresh_id = str(fresh.id)
+
+    # Default threshold leaves a just-cached place alone.
+    client.post("/places/refresh", json={"place_ids": [fresh_id]}, headers=sun)
+    assert google_places.calls == []
+
+    # refresh_after_days=0 forces it regardless of age.
+    resp = client.post(
+        "/places/refresh", json={"place_ids": [fresh_id], "refresh_after_days": 0}, headers=sun
+    )
+    assert resp.status_code == 200, resp.text
+    assert google_places.calls == ["g-fresh"]
+    assert resp.json()["places"][fresh_id]["name"] == "Renamed"
+
+
 def test_refresh_places_is_best_effort(client, make_user, google_places, session):
     sun = make_user("sun")  # g-unknown deliberately absent from the fake
     orphan = Place(

@@ -170,6 +170,10 @@ class PlacesRefreshRequest(BaseModel):
     """The ids the itinerary flagged as stale (its `stale_place_ids`)."""
 
     place_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    # Override the staleness threshold for this request: refresh any place whose
+    # cache is older than this many days. 0 forces a refresh of every id given;
+    # omit to use the server default (google_cache_refresh_days).
+    refresh_after_days: int | None = Field(default=None, ge=0)
 
 
 class PlacesRefreshResponse(BaseModel):

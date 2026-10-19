@@ -118,11 +118,14 @@ def refresh_places(
     """Batch, TTL-gated refresh for the places the itinerary flagged stale. Only
     places still due a refresh are re-fetched from Google (best-effort — a
     failure leaves the cached data), so two clients opening the same trip don't
-    double-fetch. Returns the current state of every requested-and-known place,
+    double-fetch. `refresh_after_days` overrides the staleness threshold (0 forces
+    every id). Returns the current state of every requested-and-known place,
     keyed by id, for the client to patch its cards by."""
     found = session.scalars(select(Place).where(Place.id.in_(payload.place_ids))).all()
     for place in found:
-        if place.google_place_id is not None and place_needs_refresh(place):
+        if place.google_place_id is not None and place_needs_refresh(
+            place, after_days=payload.refresh_after_days
+        ):
             _try_enrich(session, places, place)
     return PlacesRefreshResponse(places={place.id: PlaceRead.model_validate(place) for place in found})
 

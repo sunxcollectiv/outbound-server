@@ -55,6 +55,12 @@ def test_item_round_trip_with_places(client, make_user, make_trip):
     assert item["visibility"] is None
     assert item["created_by"]["email"] == "sun@example.com"
     assert item["participants"] == []
+    # A plain hop is kept as its single leg, mirroring the item's own ends.
+    assert len(item["segments"]) == 1
+    leg = item["segments"][0]
+    assert leg["position"] == 0
+    assert (leg["place"]["name"], leg["end_place"]["name"]) == ("Kyoto Station", "Shin-Osaka Station")
+    assert (leg["starts_at"], leg["ends_at"]) == ("2026-04-14T09:00:00", "2026-04-14T09:30:00")
 
     # Changing the place id is reflected in the embedded place.
     patched = client.patch(
@@ -514,3 +520,116 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
     ]
     assert days[2]["items"][1]["item"]["id"] == flight["id"]
     assert len(days) == 8
+
+
+def test_multi_leg_transit_booking(client, make_user, make_trip):
+    """A flight with a stop is one booking of ordered legs. The itinerary shows a
+    departure and an arrival; the legs ride on `segments` for the client to lay
+    out the layovers between them."""
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}"
+    lax = _place(client, sun, name="LAX", timezone="America/Los_Angeles")
+    hnd = _place(client, sun, name="HND", timezone="Asia/Tokyo")
+    itm = _place(client, sun, name="ITM", timezone="Asia/Tokyo")
+
+    created = client.post(
+        f"{url}/items",
+        json={
+            "kind": "transit",
+            "scope": "group",
+            "title": "Home to Osaka",
+            "segments": [
+                {
+                    "starts_at": "2026-04-08T23:00:00",
+                    "place_id": lax["id"],
+                    "ends_at": "2026-04-10T05:00:00",
+                    "end_place_id": hnd["id"],
+                    "carrier": "ANA",
+                    "flight_number": "NH105",
+                },
+                {
+                    "starts_at": "2026-04-10T09:00:00",
+                    "place_id": hnd["id"],
+                    "ends_at": "2026-04-10T10:30:00",
+                    "end_place_id": itm["id"],
+                },
+            ],
+        },
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+    flight = created.json()
+
+    # Top-level fields can't be set alongside segments.
+    assert created.json()["segments"][0]["carrier"] == "ANA"
+    # The booking's own span is the first leg's departure and the last leg's arrival.
+    assert (flight["starts_at"], flight["start_timezone"]) == ("2026-04-08T23:00:00", "America/Los_Angeles")
+    assert (flight["ends_at"], flight["end_timezone"]) == ("2026-04-10T10:30:00", "Asia/Tokyo")
+    assert flight["place"]["name"] == "LAX"
+    assert flight["end_place"]["name"] == "ITM"
+    assert [leg["position"] for leg in flight["segments"]] == [0, 1]
+    # The HND stop lives in the legs (lands 05:00, leaves 09:00); the itinerary
+    # itself only marks the booking's own ends for now.
+    assert flight["segments"][0]["end_place"]["name"] == "HND"
+
+    days = {day["date"]: day for day in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
+    assert [e["phase"] for e in days["2026-04-08"]["items"]] == ["departure"]
+    assert [e["phase"] for e in days["2026-04-10"]["items"]] == ["arrival"]
+    assert days["2026-04-10"]["items"][0]["item"]["id"] == flight["id"]
+
+    # Replacing the legs re-derives the span.
+    patched = client.patch(
+        f"{url}/items/{flight['id']}",
+        json={
+            "segments": [
+                {"starts_at": "2026-04-08T22:00:00", "place_id": lax["id"],
+                 "ends_at": "2026-04-10T10:30:00", "end_place_id": itm["id"]},
+            ]
+        },
+        headers=sun,
+    )
+    assert patched.status_code == 200, patched.text
+    assert len(patched.json()["segments"]) == 1
+    assert patched.json()["starts_at"] == "2026-04-08T22:00:00"
+
+
+def test_transit_segment_validation(client, make_user, make_trip):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    leg = {"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo"}
+
+    def post(**item):
+        return client.post(url, json={"scope": "group", "title": "x", **item}, headers=sun)
+
+    # Only transit carries segments.
+    assert post(kind="activity", segments=[leg]).status_code == 422
+    # Transit needs at least one leg.
+    assert post(kind="transit", segments=[]).status_code == 422
+    # Can't set the span on both the item and its segments.
+    assert post(kind="transit", starts_at="2026-04-10T08:00:00", segments=[leg]).status_code == 422
+    # Legs must run forward: the second may not leave before the first lands.
+    backwards = post(
+        kind="transit",
+        segments=[
+            {"starts_at": "2026-04-10T09:00:00", "ends_at": "2026-04-10T15:00:00",
+             "start_timezone": "Asia/Tokyo", "end_timezone": "Asia/Tokyo"},
+            {"starts_at": "2026-04-10T12:00:00", "ends_at": "2026-04-10T13:00:00",
+             "start_timezone": "Asia/Tokyo", "end_timezone": "Asia/Tokyo"},
+        ],
+    )
+    assert backwards.status_code == 422
+
+    # A two-leg booking can't be reshaped through the item's own ends.
+    flight = post(
+        kind="transit",
+        segments=[
+            {"starts_at": "2026-04-10T09:00:00", "ends_at": "2026-04-10T11:00:00",
+             "start_timezone": "Asia/Tokyo", "end_timezone": "Asia/Tokyo"},
+            {"starts_at": "2026-04-10T13:00:00", "ends_at": "2026-04-10T15:00:00",
+             "start_timezone": "Asia/Tokyo", "end_timezone": "Asia/Tokyo"},
+        ],
+    ).json()
+    moved = client.patch(f"{url}/{flight['id']}", json={"starts_at": "2026-04-10T08:00:00"}, headers=sun)
+    assert moved.status_code == 422

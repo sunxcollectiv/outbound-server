@@ -9,8 +9,10 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     event,
     text,
 )
@@ -150,6 +152,18 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         order_by="TripItemParticipant.created_at",
     )
+    # A transit booking's legs, in order. Always at least one for transit (a
+    # plain hop is a single leg); empty for every other kind. The item's own
+    # span (starts_at/ends_at, place/end_place) is kept as the first leg's
+    # departure and the last leg's arrival, so the itinerary and every
+    # cross-kind sort keep reading one row; the per-leg detail and the layovers
+    # between legs live here.
+    transit_segments: Mapped[list[TripItemTransitSegment]] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TripItemTransitSegment.position",
+    )
 
     def sync_instants(self) -> None:
         """Recompute the UTC instants from the local time + zone pairs; a
@@ -173,6 +187,93 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 @event.listens_for(TripItem, "before_update")
 def _sync_instants(mapper: object, connection: object, item: TripItem) -> None:
     item.sync_instants()
+
+
+class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One leg of a transit booking: a single vehicle movement from one place to
+    another. Times follow the same convention as the item (naive wall time plus
+    the zone it's read in, one pair per end; floating when no zone), and the
+    `*_utc` instants are derived on flush just like the item's. A leg always has
+    a departure; its arrival may be unknown (`ends_at` null), same as an item.
+    The gap between one leg's arrival and the next leg's departure is a layover,
+    which the itinerary derives — it is never stored.
+    """
+
+    __tablename__ = "trip_item_transit_segments"
+    __table_args__ = (
+        CheckConstraint(
+            "ends_at_utc IS NULL OR ends_at_utc >= starts_at_utc", name="instants_ordered"
+        ),
+        CheckConstraint(
+            "start_timezone IS NOT NULL OR ends_at IS NULL OR ends_at >= starts_at",
+            name="floating_ordered",
+        ),
+        CheckConstraint(
+            "(start_timezone IS NOT NULL AND ends_at IS NOT NULL) = (end_timezone IS NOT NULL)"
+            " AND (start_timezone IS NULL) = (starts_at_utc IS NULL)"
+            " AND (end_timezone IS NULL) = (ends_at_utc IS NULL)",
+            name="zones_consistent",
+        ),
+        # Deferred so replacing a booking's legs (delete old, insert new at the
+        # same positions) doesn't trip the constraint mid-flush.
+        UniqueConstraint(
+            "trip_item_id",
+            "position",
+            name="uq_transit_segment_position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index("ix_transit_segments_item_position", "trip_item_id", "position"),
+    )
+
+    trip_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_items.id", ondelete="CASCADE")
+    )
+    # 0-based order of the leg within the booking.
+    position: Mapped[int] = mapped_column(SmallInteger)
+    starts_at: Mapped[datetime] = mapped_column(LocalDateTime)
+    start_timezone: Mapped[str | None] = mapped_column(String(64))
+    ends_at: Mapped[datetime | None] = mapped_column(LocalDateTime)
+    end_timezone: Mapped[str | None] = mapped_column(String(64))
+    starts_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ends_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    place_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL")
+    )
+    end_place_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("places.id", ondelete="SET NULL")
+    )
+    # Operator and service number for the leg, e.g. ("ANA", "NH7").
+    carrier: Mapped[str | None] = mapped_column(String(120))
+    flight_number: Mapped[str | None] = mapped_column(String(40))
+
+    item: Mapped[TripItem] = relationship(back_populates="transit_segments")
+    place: Mapped[Place | None] = relationship(foreign_keys=[place_id])
+    end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
+
+    def sync_instants(self) -> None:
+        """Recompute the UTC instants from the local time + zone pairs; see
+        TripItem.sync_instants."""
+        if self.starts_at.tzinfo is not None or (
+            self.ends_at is not None and self.ends_at.tzinfo is not None
+        ):
+            raise ValueError("transit segment times must be naive local wall times")
+        self.starts_at_utc = (
+            to_utc(self.starts_at, self.start_timezone) if self.start_timezone else None
+        )
+        self.ends_at_utc = (
+            to_utc(self.ends_at, self.end_timezone)
+            if self.ends_at is not None and self.end_timezone
+            else None
+        )
+
+
+@event.listens_for(TripItemTransitSegment, "before_insert")
+@event.listens_for(TripItemTransitSegment, "before_update")
+def _sync_segment_instants(
+    mapper: object, connection: object, segment: TripItemTransitSegment
+) -> None:
+    segment.sync_instants()
 
 
 class TripItemParticipant(TimestampMixin, Base):

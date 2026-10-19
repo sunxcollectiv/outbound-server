@@ -17,18 +17,39 @@ def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
     return moment, str(entry_read.item.id)
 
 
+def _transit_entries(
+    read: TripItemRead, item: TripItem
+) -> list[tuple[datetime, ItineraryEntry]]:
+    """A transit booking's timeline entries: a `departure` on its first leg and
+    an `arrival` on its last. A plain hop with no real arrival (a single leg that
+    lands at its departure time, or never) stays one unphased entry, the way any
+    other single-ended item does. The legs ride along on `item.segments`; the
+    client renders any layovers between them."""
+    legs = item.transit_segments
+    first, last = legs[0], legs[-1]
+    distinct = len(legs) > 1 or (first.ends_at is not None and first.ends_at != first.starts_at)
+    if not distinct:
+        return [(first.starts_at, ItineraryEntry(item=read))]
+
+    entries = [(first.starts_at, ItineraryEntry(item=read, phase="departure"))]
+    if last.ends_at is not None:
+        entries.append((last.ends_at, ItineraryEntry(item=read, phase="arrival")))
+    return entries
+
+
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     """Group a trip's items into calendar days by their wall times.
 
-    Most items appear once, on the day their start names. An item with a distinct
-    second end is split into two entries instead, one per end, each placed and
-    sorted by the wall time of that end: transit into a `departure` and an
-    `arrival`, lodging into a `check_in` and a `check_out`. So a flight sorts by
-    when it leaves on one day and by when it lands on the other, and a hotel sorts
-    by check-in on arrival day and by check-out on the last morning. Lodging also
-    still shows up in each day's `lodging` list from check-in through check-out.
-    Zones are ignored throughout: a day reads like a diary page, ordered by the
-    clock, whichever zone each entry is in.
+    Most items appear once, on the day their start names. An item with distinct
+    ends is split instead, each piece placed and sorted by the wall time of its
+    own end: transit into a `departure` and an `arrival`, lodging into a
+    `check_in` and a `check_out`. So a flight sorts by when it leaves on one day
+    and when it lands on the next, and a hotel by check-in and the last morning's
+    check-out. A multi-leg transit carries its legs on `item.segments` for the
+    client to lay out the layovers between them. Lodging also still shows up in
+    each day's `lodging` list from check-in through check-out. Zones are ignored
+    throughout: a day reads like a diary page, ordered by the clock, whichever
+    zone each entry is in.
     """
     # (sort key, entry) so a day's list is ordered by the wall time relevant to
     # that day: a flight arriving at 11:00 sorts by 11:00, not by when it left.
@@ -39,15 +60,12 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
         start_day = item.starts_at.date()
         read = TripItemRead.model_validate(item)
 
-        splits_into_ends = item.ends_at is not None and item.ends_at != item.starts_at
-        if item.kind is TripItemKind.TRANSIT and splits_into_ends:
-            items_by_day[start_day].append(
-                (item.starts_at, ItineraryEntry(item=read, phase="departure"))
-            )
-            items_by_day[item.ends_at.date()].append(
-                (item.ends_at, ItineraryEntry(item=read, phase="arrival"))
-            )
-        elif item.kind is TripItemKind.LODGING and splits_into_ends:
+        if item.kind is TripItemKind.TRANSIT:
+            for moment, entry in _transit_entries(read, item):
+                items_by_day[moment.date()].append((moment, entry))
+        elif item.kind is TripItemKind.LODGING and item.ends_at is not None and (
+            item.ends_at != item.starts_at
+        ):
             items_by_day[start_day].append(
                 (item.starts_at, ItineraryEntry(item=read, phase="check_in"))
             )

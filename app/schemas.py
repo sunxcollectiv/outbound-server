@@ -243,6 +243,26 @@ def resolve_scope_fields(
     return None, visibility or TripItemVisibility.SHARED
 
 
+class TransitSegmentCreate(BaseModel):
+    """One leg of a transit booking. Times follow the same rules as an item's
+    ends (see TripItemCreate); the server settles zones per leg."""
+
+    starts_at: datetime
+    start_timezone: TimezoneName | None = None
+    ends_at: datetime | None = None
+    end_timezone: TimezoneName | None = None
+    place_id: uuid.UUID | None = None
+    end_place_id: uuid.UUID | None = None
+    carrier: str | None = Field(default=None, max_length=120)
+    flight_number: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if self.ends_at is None and self.end_timezone is not None:
+            raise ValueError("end_timezone needs an ends_at")
+        return self
+
+
 class TripItemCreate(BaseModel):
     kind: TripItemKind
     scope: TripItemScope
@@ -258,22 +278,48 @@ class TripItemCreate(BaseModel):
     # departure's zone). With neither the time floats: kept as written, no
     # instant. A naive value is taken as is; an aware one is converted into the
     # zone, so it needs one. Ordering is checked in the route once zones are
-    # settled.
-    starts_at: datetime
+    # settled. A multi-leg transit sets these on its `segments` instead, and the
+    # item's own span is taken from the first and last leg.
+    starts_at: datetime | None = None
     start_timezone: TimezoneName | None = None
     ends_at: datetime | None = None
     end_timezone: TimezoneName | None = None
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
+    # Transit only. Omit for a plain hop (the item's own ends are the one leg);
+    # supply two or more to spell out layovers.
+    segments: list[TransitSegmentCreate] | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         self.requirement, self.visibility = resolve_scope_fields(
             self.scope, self.requirement, self.visibility
         )
-        if self.ends_at is None and self.end_timezone is not None:
-            raise ValueError("end_timezone needs an ends_at")
+        if self.segments is not None:
+            if self.kind is not TripItemKind.TRANSIT:
+                raise ValueError("only transit items have segments")
+            if not self.segments:
+                raise ValueError("a transit item needs at least one segment")
+            if any(
+                value is not None
+                for value in (
+                    self.starts_at,
+                    self.ends_at,
+                    self.start_timezone,
+                    self.end_timezone,
+                    self.place_id,
+                    self.end_place_id,
+                )
+            ):
+                raise ValueError(
+                    "set a segmented transit's times and places on its segments, not the item"
+                )
+        else:
+            if self.starts_at is None:
+                raise ValueError("starts_at is required")
+            if self.ends_at is None and self.end_timezone is not None:
+                raise ValueError("end_timezone needs an ends_at")
         return self
 
 
@@ -299,6 +345,8 @@ class TripItemUpdate(BaseModel):
     image_url: Url | None = None
     place_id: uuid.UUID | None = None
     end_place_id: uuid.UUID | None = None
+    # Replaces the whole leg list when present; only valid on a transit item.
+    segments: list[TransitSegmentCreate] | None = None
 
 
 class ParticipantRead(ReadModel):
@@ -309,6 +357,25 @@ class ParticipantRead(ReadModel):
 
 class RsvpUpdate(BaseModel):
     status: RsvpStatus
+
+
+class TransitSegmentRead(ReadModel):
+    id: uuid.UUID
+    position: int
+    starts_at: datetime
+    start_timezone: str | None
+    ends_at: datetime | None
+    end_timezone: str | None
+    starts_at_utc: datetime | None
+    ends_at_utc: datetime | None
+    place: PlaceRead | None
+    end_place: PlaceRead | None
+    carrier: str | None
+    flight_number: str | None
+
+    @field_serializer("starts_at_utc", "ends_at_utc")
+    def _in_utc(self, value: datetime | None) -> datetime | None:
+        return value.astimezone(UTC) if value is not None else None
 
 
 class TripItemRead(ReadModel):
@@ -334,6 +401,11 @@ class TripItemRead(ReadModel):
     image_url: str | None
     place: PlaceRead | None
     end_place: PlaceRead | None
+    # A transit booking's legs in order (the item's own ends are the first leg's
+    # departure and the last leg's arrival); empty for every other kind.
+    segments: list[TransitSegmentRead] = Field(
+        default_factory=list, validation_alias="transit_segments", serialization_alias="segments"
+    )
     created_by: UserRead | None
     # RSVPs on a group item; attendees on a personal one. Callers find their
     # own entry by user id.
@@ -358,10 +430,12 @@ class LodgingStay(BaseModel):
 
 
 class ItineraryEntry(BaseModel):
-    """A trip item at one spot in a day's timeline. An item with two distinct
-    ends is split into one entry per end: `phase` says which this stands for —
+    """A trip item at one spot in a day's timeline. An item with distinct ends is
+    split into one entry per end: `phase` says which this stands for —
     `departure`/`arrival` for transit, `check_in`/`check_out` for lodging — and
-    the client leans on that end's time and place. It's null for everything else."""
+    the client leans on that end's time and place. It's null for everything else.
+    A multi-leg transit's legs ride on `item.segments`; the client lays out the
+    layovers between them."""
 
     item: TripItemRead
     phase: Literal["departure", "arrival", "check_in", "check_out"] | None = None

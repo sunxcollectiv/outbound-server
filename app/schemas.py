@@ -433,12 +433,16 @@ class ItineraryEntry(BaseModel):
     """A trip item at one spot in a day's timeline. An item with distinct ends is
     split into one entry per end: `phase` says which this stands for —
     `departure`/`arrival` for transit, `check_in`/`check_out` for lodging — and
-    the client leans on that end's time and place. It's null for everything else.
-    A multi-leg transit's legs ride on `item.segments`; the client lays out the
-    layovers between them."""
+    the client leans on that end's time and place. A transit with layovers also
+    gets a server-made `layover` entry per stop between its legs, carrying the
+    airport it waits at and how long, the same way lodging gets a `check_out`
+    card. `phase` is null for everything else."""
 
     item: TripItemRead
-    phase: Literal["departure", "arrival", "check_in", "check_out"] | None = None
+    phase: Literal["departure", "arrival", "check_in", "check_out", "layover"] | None = None
+    # Set only on a `layover` entry: where you wait and for how many minutes.
+    layover_place: PlaceRead | None = None
+    layover_minutes: int | None = None
 
 
 class ItineraryDay(BaseModel):

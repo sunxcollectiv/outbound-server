@@ -1,12 +1,13 @@
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
-from app.models import Trip, TripItem, TripItemKind
+from app.models import Trip, TripItem, TripItemKind, TripItemTransitSegment
 from app.schemas import (
     Itinerary,
     ItineraryDay,
     ItineraryEntry,
     LodgingStay,
+    PlaceRead,
     TripItemRead,
     TripRead,
 )
@@ -17,14 +18,23 @@ def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
     return moment, str(entry_read.item.id)
 
 
+def _layover_minutes(arriving: TripItemTransitSegment, departing: TripItemTransitSegment) -> int:
+    """How long you wait between landing on one leg and leaving on the next —
+    by the instants when both legs are zoned, else by the wall clocks."""
+    if arriving.ends_at_utc is not None and departing.starts_at_utc is not None:
+        delta = departing.starts_at_utc - arriving.ends_at_utc
+    else:
+        delta = departing.starts_at - arriving.ends_at
+    return max(int(delta.total_seconds() // 60), 0)
+
+
 def _transit_entries(
     read: TripItemRead, item: TripItem
 ) -> list[tuple[datetime, ItineraryEntry]]:
-    """A transit booking's timeline entries: a `departure` on its first leg and
-    an `arrival` on its last. A plain hop with no real arrival (a single leg that
-    lands at its departure time, or never) stays one unphased entry, the way any
-    other single-ended item does. The legs ride along on `item.segments`; the
-    client renders any layovers between them."""
+    """A transit booking's timeline entries: its departure, a layover for each
+    stop between legs, and its arrival. A plain hop with no real arrival (a
+    single leg that lands at its departure time, or never) stays one unphased
+    entry, the way any other single-ended item does."""
     legs = item.transit_segments
     first, last = legs[0], legs[-1]
     distinct = len(legs) > 1 or (first.ends_at is not None and first.ends_at != first.starts_at)
@@ -32,6 +42,24 @@ def _transit_entries(
         return [(first.starts_at, ItineraryEntry(item=read))]
 
     entries = [(first.starts_at, ItineraryEntry(item=read, phase="departure"))]
+    for arriving, departing in zip(legs, legs[1:]):
+        if arriving.ends_at is None:  # unknown landing: no layover to show
+            continue
+        entries.append(
+            (
+                arriving.ends_at,
+                ItineraryEntry(
+                    item=read,
+                    phase="layover",
+                    layover_place=(
+                        PlaceRead.model_validate(arriving.end_place)
+                        if arriving.end_place is not None
+                        else None
+                    ),
+                    layover_minutes=_layover_minutes(arriving, departing),
+                ),
+            )
+        )
     if last.ends_at is not None:
         entries.append((last.ends_at, ItineraryEntry(item=read, phase="arrival")))
     return entries
@@ -42,14 +70,13 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
 
     Most items appear once, on the day their start names. An item with distinct
     ends is split instead, each piece placed and sorted by the wall time of its
-    own end: transit into a `departure` and an `arrival`, lodging into a
-    `check_in` and a `check_out`. So a flight sorts by when it leaves on one day
-    and when it lands on the next, and a hotel by check-in and the last morning's
-    check-out. A multi-leg transit carries its legs on `item.segments` for the
-    client to lay out the layovers between them. Lodging also still shows up in
-    each day's `lodging` list from check-in through check-out. Zones are ignored
-    throughout: a day reads like a diary page, ordered by the clock, whichever
-    zone each entry is in.
+    own end. Transit becomes a `departure`, a `layover` at each stop between its
+    legs, and an `arrival`; lodging becomes a `check_in` and a `check_out`. So a
+    flight sorts by when it leaves on one day and when it lands on the next, a
+    layover by when you touch down to wait, and a hotel by check-in and the last
+    morning's check-out. Lodging also still shows up in each day's `lodging` list
+    from check-in through check-out. Zones are ignored throughout: a day reads
+    like a diary page, ordered by the clock, whichever zone each entry is in.
     """
     # (sort key, entry) so a day's list is ordered by the wall time relevant to
     # that day: a flight arriving at 11:00 sorts by 11:00, not by when it left.

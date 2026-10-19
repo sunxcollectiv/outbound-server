@@ -522,10 +522,9 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
     assert len(days) == 8
 
 
-def test_multi_leg_transit_booking(client, make_user, make_trip):
-    """A flight with a stop is one booking of ordered legs. The itinerary shows a
-    departure and an arrival; the legs ride on `segments` for the client to lay
-    out the layovers between them."""
+def test_multi_leg_transit_shows_layovers(client, make_user, make_trip):
+    """A flight with a stop is one booking of ordered legs; the itinerary shows
+    a departure, a server-made layover at the airport in between, and an arrival."""
     sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
@@ -569,16 +568,20 @@ def test_multi_leg_transit_booking(client, make_user, make_trip):
     assert flight["place"]["name"] == "LAX"
     assert flight["end_place"]["name"] == "ITM"
     assert [leg["position"] for leg in flight["segments"]] == [0, 1]
-    # The HND stop lives in the legs (lands 05:00, leaves 09:00); the itinerary
-    # itself only marks the booking's own ends for now.
-    assert flight["segments"][0]["end_place"]["name"] == "HND"
 
     days = {day["date"]: day for day in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
-    assert [e["phase"] for e in days["2026-04-08"]["items"]] == ["departure"]
-    assert [e["phase"] for e in days["2026-04-10"]["items"]] == ["arrival"]
-    assert days["2026-04-10"]["items"][0]["item"]["id"] == flight["id"]
+    assert [(e["phase"], e.get("layover_place")) for e in days["2026-04-08"]["items"]] == [
+        ("departure", None)
+    ]
+    # Lands at HND 05:00, leaves 09:00: a 4-hour layover, then arrives at 10:30.
+    layover, arrival = days["2026-04-10"]["items"]
+    assert layover["phase"] == "layover"
+    assert layover["layover_place"]["name"] == "HND"
+    assert layover["layover_minutes"] == 240
+    assert arrival["phase"] == "arrival"
+    assert layover["item"]["id"] == arrival["item"]["id"] == flight["id"]
 
-    # Replacing the legs re-derives the span.
+    # Replacing the legs re-derives the span and the layovers.
     patched = client.patch(
         f"{url}/items/{flight['id']}",
         json={
@@ -592,6 +595,8 @@ def test_multi_leg_transit_booking(client, make_user, make_trip):
     assert patched.status_code == 200, patched.text
     assert len(patched.json()["segments"]) == 1
     assert patched.json()["starts_at"] == "2026-04-08T22:00:00"
+    again = {d["date"]: d for d in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
+    assert [e["phase"] for e in again["2026-04-10"]["items"]] == ["arrival"]  # no layover now
 
 
 def test_transit_segment_validation(client, make_user, make_trip):

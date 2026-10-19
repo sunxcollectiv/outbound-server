@@ -9,6 +9,7 @@ from app.api.deps import CurrentUser, SessionDep
 from app.models import Area
 from app.schemas import (
     AreaCreate,
+    AreaDetailRead,
     AreaPhotosRefreshRequest,
     AreaPhotosRefreshResponse,
     AreaRead,
@@ -65,12 +66,7 @@ def list_areas(
     broader kind (country/territory before city), then alphabetically. Pass
     ``kind`` to restrict to one kind (e.g. ``city``). Without ``q`` it's a
     plain alphabetical listing."""
-    query = (
-        select(Area)
-        .options(selectinload(Area.parent), selectinload(Area.photos))
-        .limit(limit)
-        .offset(offset)
-    )
+    query = select(Area).options(selectinload(Area.parent)).limit(limit).offset(offset)
 
     if kind:
         query = query.where(Area.kind == kind)
@@ -125,9 +121,17 @@ def refresh_area_photos(
     return AreaPhotosRefreshResponse(areas={area.id: area for area in areas})
 
 
-@router.get("/{area_id}", response_model=AreaRead)
+@router.get("/{area_id}", response_model=AreaDetailRead)
 def read_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Area:
-    return _get_area(session, area_id)
+    """A single area with its candidate photos loaded (the detail/admin view)."""
+    area = session.scalar(
+        select(Area)
+        .options(selectinload(Area.parent), selectinload(Area.photos))
+        .where(Area.id == area_id)
+    )
+    if area is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Area not found")
+    return area
 
 
 @router.patch("/{area_id}", response_model=AreaRead)

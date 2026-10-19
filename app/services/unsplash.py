@@ -141,7 +141,7 @@ def ensure_area_photos(session: Session, client: "UnsplashClient", areas: list[A
     not a transient miss, so it propagates for the caller to surface (e.g. 503).
     """
     changed = False
-    for area in (a for a in areas if not a.photos):
+    for area in (a for a in areas if not a.default_photo_url):
         try:
             photos = client.search(search_query_for(area), count=DEFAULT_PHOTO_COUNT)
         except UnsplashNotConfigured:
@@ -158,9 +158,10 @@ def ensure_area_photos(session: Session, client: "UnsplashClient", areas: list[A
 
 
 def apply_area_photos(session: Session, area: Area, photos: list[UnsplashPhoto]) -> None:
-    """Replace `area`'s photos with `photos` (ordered), and set the area's
-    `default_photo_url` to the first one when it isn't set by hand already
-    (fill-only-empty, like the Google place enrichment)."""
+    """Replace `area`'s candidate photos with `photos` (ordered), and promote the
+    first one — url plus its attribution — into the area's denormalized cover
+    fields when no cover is set yet (fill-only-empty, so a hand-picked or
+    admin-chosen cover is never clobbered)."""
     area.photos[:] = [
         AreaPhoto(
             url=photo.url,
@@ -176,5 +177,8 @@ def apply_area_photos(session: Session, area: Area, photos: list[UnsplashPhoto])
         for position, photo in enumerate(photos)
     ]
     if photos and not area.default_photo_url:
-        area.default_photo_url = photos[0].url
+        cover = photos[0]
+        area.default_photo_url = cover.url
+        area.default_photo_attribution = cover.attribution
+        area.default_photo_attribution_url = cover.attribution_url
     session.add(area)

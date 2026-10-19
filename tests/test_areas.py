@@ -20,7 +20,8 @@ def test_area_crud(client, make_user):
     assert area["kind"] == "city"
     assert area["level"] == 3
     assert area["default_photo_url"] == "https://x/p.jpg"
-    assert area["photos"] == []
+    assert area["default_photo_attribution"] is None
+    assert "photos" not in area  # candidate photos aren't on the ordinary read
 
     url = f"/areas/{area['id']}"
     patched = client.patch(url, json={"name": "Paris, FR", "level": 4}, headers=sun)

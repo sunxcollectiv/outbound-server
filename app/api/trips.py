@@ -64,17 +64,16 @@ def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
     back only when one actually happened, so an ordinary read stays read-only.
     Batched into one lookup across all the trips given.
 
-    This never fetches photos — that's the second step. Each trip reports the
-    ids of its areas that still have none (`areas_missing_photos`) so the client
-    can render now and call POST /areas/refresh-photos to fill the covers."""
+    This never loads or fetches photos — that's the second step. Each trip
+    reports the ids of its areas with no cover yet (`areas_missing_photos`, i.e.
+    no default_photo_url) so the client can render now and call
+    POST /areas/refresh-photos to fill the covers."""
     wanted = {area_id for trip in trips for area_id in trip.area_ids}
     areas = (
         {
             area.id: area
             for area in session.scalars(
-                select(Area)
-                .options(selectinload(Area.parent), selectinload(Area.photos))
-                .where(Area.id.in_(wanted))
+                select(Area).options(selectinload(Area.parent)).where(Area.id.in_(wanted))
             )
         }
         if wanted
@@ -89,7 +88,9 @@ def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
             trip.area_ids = kept
             pruned = True
         trip.areas = resolved  # transient attribute read by TripRead
-        trip.areas_missing_photos = [area.id for area in resolved if not area.photos]
+        trip.areas_missing_photos = [
+            area.id for area in resolved if area.default_photo_url is None
+        ]
 
     if pruned:
         session.commit()

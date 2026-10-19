@@ -87,7 +87,11 @@ class AreaBase(BaseModel):
     kind: str | None = Field(default=None, max_length=60)
     level: int | None = None
     parent_id: uuid.UUID | None = None
+    # The cover image and the attribution that must be shown with it. Denormalized
+    # onto the area so ordinary reads never touch area_photos. Settable by hand.
     default_photo_url: Url | None = None
+    default_photo_attribution: str | None = Field(default=None, max_length=500)
+    default_photo_attribution_url: Url | None = None
 
 
 class AreaCreate(AreaBase):
@@ -129,10 +133,20 @@ class AreaRead(ReadModel):
     level: int | None
     parent_id: uuid.UUID | None
     parent: AreaRef | None = None
+    # Just the cover (from the area row); the candidate photos are not loaded on
+    # ordinary reads — see AreaDetailRead for those.
     default_photo_url: str | None
-    photos: list[AreaPhotoRead] = []
+    default_photo_attribution: str | None
+    default_photo_attribution_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class AreaDetailRead(AreaRead):
+    """A single area plus its candidate photos — the admin/detail view. Loading
+    `photos` here keeps area_photos off the hot read paths (trip lists, search)."""
+
+    photos: list[AreaPhotoRead] = []
 
 
 class AreaPhotosRefreshRequest(BaseModel):

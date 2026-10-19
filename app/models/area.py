@@ -45,11 +45,18 @@ class Area(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("areas.id", ondelete="SET NULL"), index=True
     )
     level: Mapped[int | None] = mapped_column(Integer)
-    # The area's cover image URL. Usually the first of `photos` (set when they're
-    # backfilled) but settable by hand as an override.
+    # The area's cover image, denormalized onto the row so a normal read (a trip
+    # with its areas, a search) never has to touch area_photos. Promoted from the
+    # first of `photos` when they're backfilled; later an admin UI will choose
+    # which candidate photo fills these. The attribution must be shown with the
+    # image (Unsplash's terms), so it rides along with the url.
     default_photo_url: Mapped[str | None] = mapped_column(String(2048))
+    default_photo_attribution: Mapped[str | None] = mapped_column(String(500))
+    default_photo_attribution_url: Mapped[str | None] = mapped_column(String(2048))
 
     parent: Mapped["Area | None"] = relationship(remote_side="Area.id")
+    # Candidate photos for this area (an admin picks one for the default above).
+    # Deliberately NOT loaded on ordinary reads — only the admin/detail path.
     photos: Mapped[list["AreaPhoto"]] = relationship(
         back_populates="area",
         order_by="AreaPhoto.position",

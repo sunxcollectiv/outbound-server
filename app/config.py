@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     # above so references are renewed before they actually expire. Drives which
     # places the itinerary flags for refresh and what the re-enrich script picks.
     google_cache_refresh_days: int = 25
+    # Unsplash gives us curated area photos. We hotlink the image URLs (their
+    # terms expect it), so no key is needed to serve them — only to fetch new
+    # ones (the backfill script). The app name tags attribution links per
+    # Unsplash's guidelines (utm_source).
+    unsplash_access_key: str | None = None
+    unsplash_app_name: str = "outbound"
     access_token_ttl_days: int = 90
 
 

@@ -51,7 +51,12 @@ def list_areas(
     broader kind (country/territory before city), then alphabetically. Pass
     ``kind`` to restrict to one kind (e.g. ``city``). Without ``q`` it's a
     plain alphabetical listing."""
-    query = select(Area).options(selectinload(Area.parent)).limit(limit).offset(offset)
+    query = (
+        select(Area)
+        .options(selectinload(Area.parent), selectinload(Area.photos))
+        .limit(limit)
+        .offset(offset)
+    )
 
     if kind:
         query = query.where(Area.kind == kind)

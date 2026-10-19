@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin
+
+if TYPE_CHECKING:
+    from app.models.area_photo import AreaPhoto
 
 
 class Area(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -39,6 +45,13 @@ class Area(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("areas.id", ondelete="SET NULL"), index=True
     )
     level: Mapped[int | None] = mapped_column(Integer)
-    photo_url: Mapped[str | None] = mapped_column(String(2048))
+    # The area's cover image URL. Usually the first of `photos` (set when they're
+    # backfilled) but settable by hand as an override.
+    default_photo_url: Mapped[str | None] = mapped_column(String(2048))
 
     parent: Mapped["Area | None"] = relationship(remote_side="Area.id")
+    photos: Mapped[list["AreaPhoto"]] = relationship(
+        back_populates="area",
+        order_by="AreaPhoto.position",
+        cascade="all, delete-orphan",
+    )

@@ -87,7 +87,7 @@ class AreaBase(BaseModel):
     kind: str | None = Field(default=None, max_length=60)
     level: int | None = None
     parent_id: uuid.UUID | None = None
-    photo_url: Url | None = None
+    default_photo_url: Url | None = None
 
 
 class AreaCreate(AreaBase):
@@ -107,6 +107,21 @@ class AreaRef(ReadModel):
     kind: str | None
 
 
+class AreaPhotoRead(ReadModel):
+    """A curated area photo. `url` is a hotlink to the provider's CDN (Unsplash);
+    `attribution`/`attribution_url` must be shown with the image."""
+
+    id: uuid.UUID
+    url: str
+    source: str
+    attribution: str | None
+    attribution_url: str | None
+    position: int
+    width: int | None
+    height: int | None
+    color: str | None
+
+
 class AreaRead(ReadModel):
     id: uuid.UUID
     name: str
@@ -114,7 +129,8 @@ class AreaRead(ReadModel):
     level: int | None
     parent_id: uuid.UUID | None
     parent: AreaRef | None = None
-    photo_url: str | None
+    default_photo_url: str | None
+    photos: list[AreaPhotoRead] = []
     created_at: datetime
     updated_at: datetime
 

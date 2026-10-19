@@ -6,7 +6,12 @@ def test_area_crud(client, make_user):
 
     created = client.post(
         "/areas",
-        json={"name": "Paris", "kind": "city", "level": 3, "photo_url": "https://x/p.jpg"},
+        json={
+            "name": "Paris",
+            "kind": "city",
+            "level": 3,
+            "default_photo_url": "https://x/p.jpg",
+        },
         headers=sun,
     )
     assert created.status_code == 201, created.text
@@ -14,7 +19,8 @@ def test_area_crud(client, make_user):
     assert area["name"] == "Paris"
     assert area["kind"] == "city"
     assert area["level"] == 3
-    assert area["photo_url"] == "https://x/p.jpg"
+    assert area["default_photo_url"] == "https://x/p.jpg"
+    assert area["photos"] == []
 
     url = f"/areas/{area['id']}"
     patched = client.patch(url, json={"name": "Paris, FR", "level": 4}, headers=sun)

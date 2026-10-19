@@ -1,4 +1,5 @@
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from app.services.google_places import (
     GooglePlacesError,
     GooglePlacesNotConfigured,
     get_google_places_client,
+    resolve_cover_photo,
 )
 
 HOTEL_PLACE_ID = "ChIJ-test-hotel"
@@ -56,26 +58,38 @@ def _enrich(client, headers, google_place_id):
     return refreshed.json()
 
 
-def test_refresh_google_enriches_a_stub(client, make_user, google_places):
+def test_create_auto_enriches_a_known_place(client, make_user, google_places):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
 
-    stub = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun).json()
-    assert stub["name"] is None
-
-    refreshed = client.post(f"/places/{stub['id']}/refresh-google", headers=sun)
-    assert refreshed.status_code == 200, refreshed.text
-    place = refreshed.json()
-    assert place["id"] == stub["id"]
+    created = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun)
+    assert created.status_code == 201, created.text
+    place = created.json()
+    # Enriched in the create request, not left as a bare stub.
     assert place["name"] == "Hotel Kanade Shinjuku"
     assert place["timezone"] == "Asia/Tokyo"
     assert (place["latitude"], place["longitude"]) == (35.6938, 139.7034)
-    assert place["google_data"] == HOTEL_PLACE
+    # The raw Google response is cached but not exposed on the API (see cover_photo).
+    assert place["cover_photo"] is None  # HOTEL_PLACE carries no photos
     assert place["google_fetched_at"] is not None
-    assert google_places.calls == [HOTEL_PLACE_ID]
+    assert google_places.calls == [HOTEL_PLACE_ID]  # enriched exactly once, at creation
 
 
-def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places):
+def test_create_leaves_a_stub_when_google_cant_answer(client, make_user, google_places):
+    sun = make_user("sun")  # HOTEL_PLACE_ID deliberately not registered in the fake
+
+    created = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun)
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] is None  # a bare stub, to be refreshed later
+
+    # Once Google knows it, refresh-google enriches the existing stub.
+    google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
+    refreshed = client.post(f"/places/{created.json()['id']}/refresh-google", headers=sun)
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["name"] == "Hotel Kanade Shinjuku"
+
+
+def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places, session):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
     place = client.post(
@@ -95,7 +109,9 @@ def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, goo
     body = refreshed.json()
     assert body["name"] == "Our hotel"
     assert body["notes"] == "Ask for a high floor"
-    assert body["google_data"]["displayName"]["text"] == "Hotel Kanade (renamed)"
+    # The cache isn't on the API, so check the stored blob directly.
+    cached = session.get(Place, uuid.UUID(place["id"])).google_data
+    assert cached["displayName"]["text"] == "Hotel Kanade (renamed)"
 
 
 def test_create_place_is_a_get_or_create_stub(client, make_user):
@@ -116,7 +132,7 @@ def test_create_place_is_a_get_or_create_stub(client, make_user):
 
 
 def test_google_place_id_is_unique_and_relinking_clears_the_cache(
-    client, make_user, google_places
+    client, make_user, google_places, session
 ):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
@@ -134,8 +150,8 @@ def test_google_place_id_is_unique_and_relinking_clears_the_cache(
         f"/places/{linked['id']}", json={"google_place_id": "ChIJ-fresh"}, headers=sun
     )
     assert relinked.status_code == 200
-    assert relinked.json()["google_data"] is None
     assert relinked.json()["google_fetched_at"] is None
+    assert session.get(Place, uuid.UUID(linked["id"])).google_data is None
 
 
 def test_google_failures_map_to_http_errors(client, make_user, session):
@@ -220,6 +236,78 @@ def test_manual_area_link(client, make_user):
     assert unknown.status_code == 422
 
 
+def test_refresh_places_refreshes_only_stale_ones(client, make_user, google_places, session):
+    sun = make_user("sun")
+    now = datetime.now(UTC)
+    google_places.places["g-stale"] = {"id": "g-stale", "displayName": {"text": "Fresh Name"}}
+    stale = Place(
+        google_place_id="g-stale",
+        google_data={"displayName": {"text": "Old"}},
+        google_fetched_at=now - timedelta(days=40),
+    )
+    fresh = Place(
+        google_place_id="g-fresh",
+        name="Kept",
+        google_data={"photos": []},
+        google_fetched_at=now,
+    )
+    session.add_all([stale, fresh])
+    session.commit()
+    stale_id, fresh_id = str(stale.id), str(fresh.id)
+
+    resp = client.post("/places/refresh", json={"place_ids": [stale_id, fresh_id]}, headers=sun)
+    assert resp.status_code == 200, resp.text
+    places = resp.json()["places"]
+    assert set(places) == {stale_id, fresh_id}
+    assert google_places.calls == ["g-stale"]  # only the stale one hit Google
+    assert places[stale_id]["name"] == "Fresh Name"  # refreshed
+    assert places[fresh_id]["name"] == "Kept"  # left alone
+
+
+def test_refresh_places_zero_days_forces_a_fresh_place(client, make_user, google_places, session):
+    sun = make_user("sun")
+    google_places.places["g-fresh"] = {"id": "g-fresh", "displayName": {"text": "Renamed"}}
+    fresh = Place(
+        google_place_id="g-fresh",
+        google_data={"displayName": {"text": "old"}},
+        google_fetched_at=datetime.now(UTC),
+    )
+    session.add(fresh)
+    session.commit()
+    fresh_id = str(fresh.id)
+
+    # Default threshold leaves a just-cached place alone.
+    client.post("/places/refresh", json={"place_ids": [fresh_id]}, headers=sun)
+    assert google_places.calls == []
+
+    # refresh_after_days=0 forces it regardless of age.
+    resp = client.post(
+        "/places/refresh", json={"place_ids": [fresh_id], "refresh_after_days": 0}, headers=sun
+    )
+    assert resp.status_code == 200, resp.text
+    assert google_places.calls == ["g-fresh"]
+    assert resp.json()["places"][fresh_id]["name"] == "Renamed"
+
+
+def test_refresh_places_is_best_effort(client, make_user, google_places, session):
+    sun = make_user("sun")  # g-unknown deliberately absent from the fake
+    orphan = Place(
+        google_place_id="g-unknown",
+        name="Cached name",
+        google_data={"displayName": {"text": "x"}},
+        google_fetched_at=datetime.now(UTC) - timedelta(days=40),
+    )
+    session.add(orphan)
+    session.commit()
+    orphan_id = str(orphan.id)
+
+    resp = client.post("/places/refresh", json={"place_ids": [orphan_id]}, headers=sun)
+    assert resp.status_code == 200, resp.text
+    # Google 404 is swallowed; the cached data is returned unchanged.
+    assert resp.json()["places"][orphan_id]["name"] == "Cached name"
+    assert google_places.calls == ["g-unknown"]
+
+
 # --- the real client, against a stubbed transport ---
 
 
@@ -242,6 +330,70 @@ def test_places_client_sends_key_and_field_mask():
         "key": "test-key",
         "mask": FIELD_MASK,
     }
+
+
+def _place_with_photos() -> Place:
+    place = Place()
+    place.google_fetched_at = datetime.now(UTC)
+    place.google_data = {
+        "photos": [
+            {
+                "name": "places/XYZ/photos/aaa",
+                "authorAttributions": [
+                    {"displayName": "Jane D", "uri": "https://maps.google.com/jane"}
+                ],
+            },
+            {"name": "places/XYZ/photos/bbb", "authorAttributions": []},
+        ]
+    }
+    return place
+
+
+def test_resolve_cover_photo_builds_a_media_url_with_attribution():
+    photo = resolve_cover_photo(_place_with_photos(), api_key="KEY", max_width_px=400)
+    assert photo is not None
+    # Defaults to the first photo, emits a loadable media URL and keeps the credit.
+    assert photo.name == "places/XYZ/photos/aaa"
+    assert photo.url == (
+        "https://places.googleapis.com/v1/places/XYZ/photos/aaa/media?maxWidthPx=400&key=KEY"
+    )
+    assert [(a.display_name, a.uri) for a in photo.attributions] == [
+        ("Jane D", "https://maps.google.com/jane")
+    ]
+    assert photo.is_stale is False
+
+
+def test_resolve_cover_photo_prefers_a_selection_and_falls_back_when_it_vanishes():
+    place = _place_with_photos()
+    assert resolve_cover_photo(place, prefer_name="places/XYZ/photos/bbb", api_key="KEY").name == (
+        "places/XYZ/photos/bbb"
+    )
+    # A selection that no longer exists after a refresh falls back to the first photo.
+    assert resolve_cover_photo(place, prefer_name="places/XYZ/photos/gone", api_key="KEY").name == (
+        "places/XYZ/photos/aaa"
+    )
+
+
+def test_resolve_cover_photo_flags_a_stale_cache():
+    place = _place_with_photos()
+    place.google_fetched_at = datetime.now(UTC) - timedelta(days=45)
+    assert resolve_cover_photo(place, api_key="KEY").is_stale is True
+
+
+def test_resolve_cover_photo_without_photos_needs_no_key():
+    place = Place()
+    place.google_data = {"id": "x"}  # enriched, but no photos
+    assert resolve_cover_photo(place, api_key=None) is None
+
+
+def test_resolve_cover_photo_raises_when_unconfigured_but_a_photo_exists(monkeypatch):
+    # Force "no key configured" regardless of the developer's .env.
+    from app.config import Settings
+    from app.services import google_places as gp
+
+    monkeypatch.setattr(gp, "get_settings", lambda: Settings(google_maps_api_key=None))
+    with pytest.raises(GooglePlacesNotConfigured):
+        resolve_cover_photo(_place_with_photos(), api_key=None)
 
 
 def test_places_client_error_mapping():

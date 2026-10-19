@@ -8,7 +8,13 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area, Place
-from app.schemas import PlaceCreate, PlaceRead, PlaceUpdate
+from app.schemas import (
+    PlaceCreate,
+    PlaceRead,
+    PlacesRefreshRequest,
+    PlacesRefreshResponse,
+    PlaceUpdate,
+)
 from app.services.google_places import (
     GooglePlaceNotFound,
     GooglePlacesClient,
@@ -17,6 +23,7 @@ from app.services.google_places import (
     apply_area_from_google,
     apply_google_place,
     get_google_places_client,
+    place_needs_refresh,
 )
 
 router = APIRouter(prefix="/places", tags=["places"])
@@ -62,14 +69,34 @@ def _commit_unique_place(session: SessionDep) -> None:
         ) from None
 
 
+def _try_enrich(session: SessionDep, places: GooglePlacesClient, place: Place) -> None:
+    """Best-effort enrichment for a freshly created place. A bare stub is an
+    acceptable outcome when Google can't answer (unknown id, not configured,
+    network), so any failure is swallowed and the place is left to be refreshed
+    later rather than failing the create."""
+    try:
+        details = places.fetch_place(place.google_place_id)
+    except GooglePlacesError:
+        session.rollback()  # nothing applied yet; just drop the empty transaction
+        return
+    apply_google_place(place, details)
+    apply_area_from_google(session, place, details)
+    session.commit()
+
+
 @router.post("", response_model=PlaceRead, status_code=status.HTTP_201_CREATED)
 def create_place(
-    payload: PlaceCreate, response: Response, user: CurrentUser, session: SessionDep
+    payload: PlaceCreate,
+    response: Response,
+    user: CurrentUser,
+    session: SessionDep,
+    places: PlacesDep,
 ) -> Place:
-    """Register a Google place as an un-enriched stub: we store only the
-    google_place_id and hand back the generated id (name, address, area and the
-    rest are filled in by a later enrichment/review step). Get-or-create on the
-    unique google_place_id: 200 if we already have it, 201 if new."""
+    """Register a Google place and enrich it from Google Place Details in the
+    same request. Get-or-create on the unique google_place_id: 200 if we already
+    have it (returned as-is, no re-fetch), 201 if new. A new place is enriched
+    best-effort — if Google can't answer it is left as a bare stub for a later
+    refresh, rather than failing the create."""
     existing = session.scalar(
         select(Place).where(Place.google_place_id == payload.google_place_id)
     )
@@ -80,7 +107,27 @@ def create_place(
     place = Place(google_place_id=payload.google_place_id, created_by_id=user.id)
     session.add(place)
     _commit_unique_place(session)
+    _try_enrich(session, places, place)
     return place
+
+
+@router.post("/refresh", response_model=PlacesRefreshResponse)
+def refresh_places(
+    payload: PlacesRefreshRequest, _: CurrentUser, session: SessionDep, places: PlacesDep
+) -> PlacesRefreshResponse:
+    """Batch, TTL-gated refresh for the places the itinerary flagged stale. Only
+    places still due a refresh are re-fetched from Google (best-effort — a
+    failure leaves the cached data), so two clients opening the same trip don't
+    double-fetch. `refresh_after_days` overrides the staleness threshold (0 forces
+    every id). Returns the current state of every requested-and-known place,
+    keyed by id, for the client to patch its cards by."""
+    found = session.scalars(select(Place).where(Place.id.in_(payload.place_ids))).all()
+    for place in found:
+        if place.google_place_id is not None and place_needs_refresh(
+            place, after_days=payload.refresh_after_days
+        ):
+            _try_enrich(session, places, place)
+    return PlacesRefreshResponse(places={place.id: PlaceRead.model_validate(place) for place in found})
 
 
 @router.get("", response_model=list[PlaceRead])

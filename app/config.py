@@ -8,6 +8,13 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://outbound:outbound@127.0.0.1:4930/outbound"
     google_maps_api_key: str | None = None
+    # Google forbids caching Place content beyond 30 days, so a cached photo
+    # reference older than this is treated as expired (cover_photo.is_stale).
+    google_photo_max_age_days: int = 30
+    # Refresh proactively once a cache is older than this — kept under the cap
+    # above so references are renewed before they actually expire. Drives which
+    # places the itinerary flags for refresh and what the re-enrich script picks.
+    google_cache_refresh_days: int = 25
     access_token_ttl_days: int = 90
 
 

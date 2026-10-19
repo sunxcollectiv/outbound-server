@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -129,6 +129,22 @@ class PlaceCreate(BaseModel):
     google_place_id: str = Field(min_length=1, max_length=255)
 
 
+class PhotoAttribution(ReadModel):
+    display_name: str | None
+    uri: str | None
+
+
+class CoverPhoto(ReadModel):
+    """A ready-to-load Google cover photo. `url` is good for an <img src> but is
+    ephemeral (embeds the key, redirects to a short-lived CDN URL) — never store
+    it. `attributions` must be shown with the image. `is_stale` flags a cache
+    past the 30-day cap that should be refreshed."""
+
+    url: str
+    attributions: list[PhotoAttribution]
+    is_stale: bool
+
+
 class PlaceRead(ReadModel):
     id: uuid.UUID
     name: str | None
@@ -142,10 +158,29 @@ class PlaceRead(ReadModel):
     area_id: uuid.UUID | None
     area: AreaRead | None
     google_place_id: str | None
-    google_data: dict[str, Any] | None
+    # The raw google_data blob is intentionally not exposed; cover_photo is the
+    # supported way to get a venue image (see services.google_places).
+    cover_photo: CoverPhoto | None
     google_fetched_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class PlacesRefreshRequest(BaseModel):
+    """The ids the itinerary flagged as stale (its `stale_place_ids`)."""
+
+    place_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    # Override the staleness threshold for this request: refresh any place whose
+    # cache is older than this many days. 0 forces a refresh of every id given;
+    # omit to use the server default (google_cache_refresh_days).
+    refresh_after_days: int | None = Field(default=None, ge=0)
+
+
+class PlacesRefreshResponse(BaseModel):
+    """Current state of the requested places, keyed by id, after a best-effort
+    refresh — the client patches its cards (and their cover photos) by id."""
+
+    places: dict[uuid.UUID, PlaceRead]
 
 
 # --- trips ---
@@ -449,3 +484,8 @@ class ItineraryDay(BaseModel):
 class Itinerary(BaseModel):
     trip: TripRead
     days: list[ItineraryDay]
+    # Deduped ids of places in this trip whose cached Google data is missing or
+    # due a refresh. The client renders the itinerary immediately, then (only if
+    # this is non-empty) calls POST /places/refresh with these ids to fill in
+    # fresh data and cover photos. Empty when everything is current.
+    stale_place_ids: list[uuid.UUID]

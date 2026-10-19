@@ -1,4 +1,12 @@
+import uuid
+
 from tests.conftest import JAPAN_TRIP
+
+
+def _make_area(client, headers, name, **extra):
+    resp = client.post("/areas", json={"name": name, **extra}, headers=headers)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
 
 
 def test_trip_validation(client, make_user):
@@ -85,6 +93,56 @@ def test_update_cannot_put_end_before_start(client, make_user, make_trip):
         f"/trips/{trip['id']}", json={"end_date": "2026-04-01"}, headers=sun
     )
     assert response.status_code == 422
+
+
+def test_trip_can_be_created_with_areas(client, make_user):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+
+    created = client.post(
+        "/trips",
+        json={**JAPAN_TRIP, "area_ids": [tokyo["id"], japan["id"], tokyo["id"]]},  # dupe
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+    # Deduped, order preserved.
+    assert created.json()["area_ids"] == [tokyo["id"], japan["id"]]
+
+    # Returned on both single and list reads.
+    fetched = client.get(f"/trips/{created.json()['id']}", headers=sun).json()
+    assert fetched["area_ids"] == [tokyo["id"], japan["id"]]
+    listed = client.get("/trips", headers=sun).json()[0]
+    assert set(listed["area_ids"]) == {japan["id"], tokyo["id"]}
+
+
+def test_trip_area_ids_must_exist(client, make_user):
+    sun = make_user("sun")
+    resp = client.post(
+        "/trips", json={**JAPAN_TRIP, "area_ids": [str(uuid.uuid4())]}, headers=sun
+    )
+    assert resp.status_code == 404
+
+
+def test_patch_replaces_trip_areas(client, make_user, make_trip):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    korea = _make_area(client, sun, "South Korea", kind="country")
+    trip = make_trip(sun, area_ids=[japan["id"]])
+    url = f"/trips/{trip['id']}"
+    assert trip["area_ids"] == [japan["id"]]
+
+    # Omitting area_ids leaves them untouched.
+    patched = client.patch(url, json={"title": "Trip"}, headers=sun).json()
+    assert patched["area_ids"] == [japan["id"]]
+
+    # A list replaces the whole set.
+    patched = client.patch(url, json={"area_ids": [korea["id"]]}, headers=sun).json()
+    assert patched["area_ids"] == [korea["id"]]
+
+    # An empty list clears them.
+    patched = client.patch(url, json={"area_ids": []}, headers=sun).json()
+    assert patched["area_ids"] == []
 
 
 def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_trip):

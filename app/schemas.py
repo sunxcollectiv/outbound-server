@@ -210,6 +210,8 @@ class TripCreate(BaseModel):
     cover_image_url: Url | None = None
     # Seeds every day of the trip with this zone; each day can be edited after.
     timezone: TimezoneName | None = None
+    # Areas (countries/cities) this trip covers. Deduped; unknown ids 404.
+    area_ids: list[uuid.UUID] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -224,6 +226,8 @@ class TripUpdate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     cover_image_url: Url | None = None
+    # Omit to leave areas untouched; a list (even empty) replaces the whole set.
+    area_ids: list[uuid.UUID] | None = None
 
 
 class TripRead(ReadModel):
@@ -234,6 +238,7 @@ class TripRead(ReadModel):
     start_date: date
     end_date: date
     cover_image_url: str | None
+    area_ids: list[uuid.UUID]
     created_at: datetime
     updated_at: datetime
 

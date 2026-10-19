@@ -15,6 +15,7 @@ from app.api.deps import (
 )
 from app.api.trip_items import check_places, visible_items, with_item_details
 from app.models import (
+    Area,
     Place,
     Trip,
     TripDay,
@@ -43,6 +44,19 @@ router = APIRouter(prefix="/trips", tags=["trips"])
 NOT_NULLABLE = ("title", "start_date", "end_date")
 
 
+def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """Dedupe (keeping order) and check every id names a real area. 404s on any
+    unknown id rather than silently storing a dangling reference."""
+    unique = list(dict.fromkeys(area_ids))
+    if not unique:
+        return []
+    found = set(session.scalars(select(Area.id).where(Area.id.in_(unique))))
+    missing = [str(i) for i in unique if i not in found]
+    if missing:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Area(s) not found: {', '.join(missing)}")
+    return unique
+
+
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
@@ -50,6 +64,7 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
     is made for every date, seeded with the timezone if one was given."""
     values = payload.model_dump()
     seed_timezone = values.pop("timezone")
+    values["area_ids"] = _clean_area_ids(session, values["area_ids"])
     trip = Trip(**values, owner_id=user.id)
     trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
     sync_trip_days(trip, seed_timezone)
@@ -74,6 +89,7 @@ def read_trip(trip: ViewableTrip) -> Trip:
 @router.patch("/{trip_id}", response_model=TripRead)
 def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
+    area_ids = changes.pop("area_ids", None)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} cannot be null")
@@ -85,6 +101,8 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
         )
     for field, value in changes.items():
         setattr(trip, field, value)
+    if area_ids is not None:
+        trip.area_ids = _clean_area_ids(session, area_ids)
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
     session.commit()

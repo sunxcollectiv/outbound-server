@@ -238,7 +238,9 @@ class TripRead(ReadModel):
     start_date: date
     end_date: date
     cover_image_url: str | None
-    area_ids: list[uuid.UUID]
+    # Resolved from the stored area_ids, in order; ids that no longer match an
+    # area are dropped (and pruned from storage) so none surface as blanks.
+    areas: list[AreaRead] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

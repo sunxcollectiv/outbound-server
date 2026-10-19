@@ -57,6 +57,37 @@ def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid
     return unique
 
 
+def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
+    """Resolve each trip's area_ids into `Area` objects (in stored order) for
+    the response, and drop any id that no longer matches an area — e.g. the
+    area was deleted — so stale ids never surface as blanks. A prune is written
+    back only when one actually happened, so an ordinary read stays read-only.
+    Batched into one lookup across all the trips given."""
+    wanted = {area_id for trip in trips for area_id in trip.area_ids}
+    areas = (
+        {
+            area.id: area
+            for area in session.scalars(
+                select(Area).options(selectinload(Area.parent)).where(Area.id.in_(wanted))
+            )
+        }
+        if wanted
+        else {}
+    )
+
+    pruned = False
+    for trip in trips:
+        resolved = [areas[area_id] for area_id in trip.area_ids if area_id in areas]
+        kept = [area.id for area in resolved]
+        if kept != trip.area_ids:
+            trip.area_ids = kept
+            pruned = True
+        trip.areas = resolved  # transient attribute read by TripRead
+
+    if pruned:
+        session.commit()
+
+
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
@@ -70,6 +101,7 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
     sync_trip_days(trip, seed_timezone)
     session.add(trip)
     session.commit()
+    attach_areas(session, [trip])
     return trip
 
 
@@ -78,11 +110,14 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
     """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
-    return list(session.scalars(query))
+    trips = list(session.scalars(query))
+    attach_areas(session, trips)
+    return trips
 
 
 @router.get("/{trip_id}", response_model=TripRead)
-def read_trip(trip: ViewableTrip) -> Trip:
+def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
+    attach_areas(session, [trip])
     return trip
 
 
@@ -106,6 +141,7 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
     session.commit()
+    attach_areas(session, [trip])
     return trip
 
 

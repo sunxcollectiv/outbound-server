@@ -106,14 +106,16 @@ def test_trip_can_be_created_with_areas(client, make_user):
         headers=sun,
     )
     assert created.status_code == 201, created.text
-    # Deduped, order preserved.
-    assert created.json()["area_ids"] == [tokyo["id"], japan["id"]]
+    # Resolved to full area objects, deduped, order preserved.
+    assert [a["id"] for a in created.json()["areas"]] == [tokyo["id"], japan["id"]]
 
-    # Returned on both single and list reads.
+    # Resolved on both single and list reads, with parent context.
     fetched = client.get(f"/trips/{created.json()['id']}", headers=sun).json()
-    assert fetched["area_ids"] == [tokyo["id"], japan["id"]]
+    assert [a["id"] for a in fetched["areas"]] == [tokyo["id"], japan["id"]]
+    by_name = {a["name"]: a for a in fetched["areas"]}
+    assert by_name["Tokyo"]["parent"]["name"] == "Japan"
     listed = client.get("/trips", headers=sun).json()[0]
-    assert set(listed["area_ids"]) == {japan["id"], tokyo["id"]}
+    assert {a["name"] for a in listed["areas"]} == {"Japan", "Tokyo"}
 
 
 def test_trip_area_ids_must_exist(client, make_user):
@@ -130,19 +132,34 @@ def test_patch_replaces_trip_areas(client, make_user, make_trip):
     korea = _make_area(client, sun, "South Korea", kind="country")
     trip = make_trip(sun, area_ids=[japan["id"]])
     url = f"/trips/{trip['id']}"
-    assert trip["area_ids"] == [japan["id"]]
+    assert [a["id"] for a in trip["areas"]] == [japan["id"]]
 
     # Omitting area_ids leaves them untouched.
     patched = client.patch(url, json={"title": "Trip"}, headers=sun).json()
-    assert patched["area_ids"] == [japan["id"]]
+    assert [a["id"] for a in patched["areas"]] == [japan["id"]]
 
     # A list replaces the whole set.
     patched = client.patch(url, json={"area_ids": [korea["id"]]}, headers=sun).json()
-    assert patched["area_ids"] == [korea["id"]]
+    assert [a["id"] for a in patched["areas"]] == [korea["id"]]
 
     # An empty list clears them.
     patched = client.patch(url, json={"area_ids": []}, headers=sun).json()
-    assert patched["area_ids"] == []
+    assert patched["areas"] == []
+
+
+def test_trip_get_prunes_deleted_area_ids(client, make_user, make_trip):
+    sun = make_user("sun")
+    japan = _make_area(client, sun, "Japan", kind="country")
+    tokyo = _make_area(client, sun, "Tokyo", kind="city")
+    trip = make_trip(sun, area_ids=[japan["id"], tokyo["id"]])
+
+    # Delete an area out from under the trip; the stale id must not surface.
+    assert client.delete(f"/areas/{japan['id']}", headers=sun).status_code == 204
+    fetched = client.get(f"/trips/{trip['id']}", headers=sun).json()
+    assert [a["id"] for a in fetched["areas"]] == [tokyo["id"]]  # japan dropped, order kept
+    # Pruned from storage, so a repeat read is consistent.
+    again = client.get(f"/trips/{trip['id']}", headers=sun).json()
+    assert [a["id"] for a in again["areas"]] == [tokyo["id"]]
 
 
 def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_trip):

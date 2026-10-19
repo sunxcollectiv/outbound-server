@@ -71,6 +71,22 @@ def get_google_places_client() -> GooglePlacesClient:
     return GooglePlacesClient(get_settings().google_maps_api_key)
 
 
+def _refresh_cutoff(now: datetime | None, after_days: int | None) -> datetime:
+    after_days = after_days if after_days is not None else get_settings().google_cache_refresh_days
+    return (now or datetime.now(UTC)) - timedelta(days=after_days)
+
+
+def place_needs_refresh(
+    place: Place, *, now: datetime | None = None, after_days: int | None = None
+) -> bool:
+    """True when a place has never been enriched or its cache is old enough to
+    renew proactively (before the hard 30-day cap). The single definition of
+    "stale" shared by the itinerary flag, the refresh endpoint, and the script."""
+    if place.google_data is None or place.google_fetched_at is None:
+        return True
+    return place.google_fetched_at < _refresh_cutoff(now, after_days)
+
+
 def apply_google_place(place: Place, details: dict[str, Any]) -> None:
     """Refresh the Google cache on a place and fill in anything we don't have.
 

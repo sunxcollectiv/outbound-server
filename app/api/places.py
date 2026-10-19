@@ -8,7 +8,13 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area, Place
-from app.schemas import PlaceCreate, PlaceRead, PlaceUpdate
+from app.schemas import (
+    PlaceCreate,
+    PlaceRead,
+    PlacesRefreshRequest,
+    PlacesRefreshResponse,
+    PlaceUpdate,
+)
 from app.services.google_places import (
     GooglePlaceNotFound,
     GooglePlacesClient,
@@ -17,6 +23,7 @@ from app.services.google_places import (
     apply_area_from_google,
     apply_google_place,
     get_google_places_client,
+    place_needs_refresh,
 )
 
 router = APIRouter(prefix="/places", tags=["places"])
@@ -102,6 +109,22 @@ def create_place(
     _commit_unique_place(session)
     _try_enrich(session, places, place)
     return place
+
+
+@router.post("/refresh", response_model=PlacesRefreshResponse)
+def refresh_places(
+    payload: PlacesRefreshRequest, _: CurrentUser, session: SessionDep, places: PlacesDep
+) -> PlacesRefreshResponse:
+    """Batch, TTL-gated refresh for the places the itinerary flagged stale. Only
+    places still due a refresh are re-fetched from Google (best-effort — a
+    failure leaves the cached data), so two clients opening the same trip don't
+    double-fetch. Returns the current state of every requested-and-known place,
+    keyed by id, for the client to patch its cards by."""
+    found = session.scalars(select(Place).where(Place.id.in_(payload.place_ids))).all()
+    for place in found:
+        if place.google_place_id is not None and place_needs_refresh(place):
+            _try_enrich(session, places, place)
+    return PlacesRefreshResponse(places={place.id: PlaceRead.model_validate(place) for place in found})
 
 
 @router.get("", response_model=list[PlaceRead])

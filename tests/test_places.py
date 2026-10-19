@@ -236,6 +236,53 @@ def test_manual_area_link(client, make_user):
     assert unknown.status_code == 422
 
 
+def test_refresh_places_refreshes_only_stale_ones(client, make_user, google_places, session):
+    sun = make_user("sun")
+    now = datetime.now(UTC)
+    google_places.places["g-stale"] = {"id": "g-stale", "displayName": {"text": "Fresh Name"}}
+    stale = Place(
+        google_place_id="g-stale",
+        google_data={"displayName": {"text": "Old"}},
+        google_fetched_at=now - timedelta(days=40),
+    )
+    fresh = Place(
+        google_place_id="g-fresh",
+        name="Kept",
+        google_data={"photos": []},
+        google_fetched_at=now,
+    )
+    session.add_all([stale, fresh])
+    session.commit()
+    stale_id, fresh_id = str(stale.id), str(fresh.id)
+
+    resp = client.post("/places/refresh", json={"place_ids": [stale_id, fresh_id]}, headers=sun)
+    assert resp.status_code == 200, resp.text
+    places = resp.json()["places"]
+    assert set(places) == {stale_id, fresh_id}
+    assert google_places.calls == ["g-stale"]  # only the stale one hit Google
+    assert places[stale_id]["name"] == "Fresh Name"  # refreshed
+    assert places[fresh_id]["name"] == "Kept"  # left alone
+
+
+def test_refresh_places_is_best_effort(client, make_user, google_places, session):
+    sun = make_user("sun")  # g-unknown deliberately absent from the fake
+    orphan = Place(
+        google_place_id="g-unknown",
+        name="Cached name",
+        google_data={"displayName": {"text": "x"}},
+        google_fetched_at=datetime.now(UTC) - timedelta(days=40),
+    )
+    session.add(orphan)
+    session.commit()
+    orphan_id = str(orphan.id)
+
+    resp = client.post("/places/refresh", json={"place_ids": [orphan_id]}, headers=sun)
+    assert resp.status_code == 200, resp.text
+    # Google 404 is swallowed; the cached data is returned unchanged.
+    assert resp.json()["places"][orphan_id]["name"] == "Cached name"
+    assert google_places.calls == ["g-unknown"]
+
+
 # --- the real client, against a stubbed transport ---
 
 

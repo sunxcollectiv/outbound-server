@@ -1,7 +1,7 @@
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from app.models import Trip, TripItem, TripItemKind, TripItemTransitSegment
+from app.models import Place, Trip, TripItem, TripItemKind, TripItemTransitSegment
 from app.schemas import (
     Itinerary,
     ItineraryDay,
@@ -11,6 +11,7 @@ from app.schemas import (
     TripItemRead,
     TripRead,
 )
+from app.services.google_places import place_needs_refresh
 
 
 def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
@@ -63,6 +64,30 @@ def _transit_entries(
     if last.ends_at is not None:
         entries.append((last.ends_at, ItineraryEntry(item=read, phase="arrival")))
     return entries
+
+
+def _trip_places(items: list[TripItem]) -> dict[object, Place]:
+    """Every distinct place reachable from a trip's items — an item's own two
+    ends plus each transit leg's two ends — keyed by id to dedupe. All are
+    eager-loaded by with_item_details, so this adds no queries."""
+    places: dict[object, Place] = {}
+    for item in items:
+        candidates = [item.place, item.end_place]
+        for segment in item.transit_segments:
+            candidates += [segment.place, segment.end_place]
+        for place in candidates:
+            if place is not None:
+                places[place.id] = place
+    return places
+
+
+def _stale_place_ids(items: list[TripItem], now: datetime) -> list[object]:
+    """Ids of the trip's places whose Google cache is missing or due a refresh."""
+    return [
+        place.id
+        for place in _trip_places(items).values()
+        if place_needs_refresh(place, now=now)
+    ]
 
 
 def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
@@ -134,4 +159,8 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
         )
         day += timedelta(days=1)
 
-    return Itinerary(trip=TripRead.model_validate(trip), days=days)
+    return Itinerary(
+        trip=TripRead.model_validate(trip),
+        days=days,
+        stale_place_ids=_stale_place_ids(items, datetime.now(UTC)),
+    )

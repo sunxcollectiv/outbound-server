@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from app.models import TripItem
+from app.models import Place, TripItem
 
 
 def _place(client, headers, **fields):
@@ -16,6 +16,41 @@ def _place(client, headers, **fields):
     enriched = client.patch(f"/places/{stub.json()['id']}", json=fields, headers=headers)
     assert enriched.status_code == 200, enriched.text
     return enriched.json()
+
+
+def test_itinerary_flags_stale_places_for_followup_refresh(client, make_user, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+
+    spot = _place(client, sun, name="Blue Bottle", timezone="America/Los_Angeles")
+    created = client.post(
+        url,
+        json={
+            "kind": "activity",
+            "scope": "group",
+            "title": "Coffee",
+            "starts_at": "2026-04-10T09:00:00",
+            "start_timezone": "America/Los_Angeles",
+            "place_id": spot["id"],
+        },
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+
+    # The stub was never Google-enriched, so the itinerary flags it for a
+    # follow-up POST /places/refresh.
+    itinerary_url = f"/trips/{trip['id']}/itinerary"
+    itinerary = client.get(itinerary_url, headers=sun).json()
+    assert spot["id"] in itinerary["stale_place_ids"]
+
+    # Once its cache is fresh, it drops out of the flag list.
+    place = session.get(Place, uuid.UUID(spot["id"]))
+    place.google_data = {"photos": []}
+    place.google_fetched_at = datetime.now(UTC)
+    session.commit()
+    itinerary = client.get(itinerary_url, headers=sun).json()
+    assert itinerary["stale_place_ids"] == []
 
 
 def test_item_round_trip_with_places(client, make_user, make_trip):

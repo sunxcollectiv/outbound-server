@@ -166,6 +166,19 @@ class PlaceRead(ReadModel):
     updated_at: datetime
 
 
+class PlacesRefreshRequest(BaseModel):
+    """The ids the itinerary flagged as stale (its `stale_place_ids`)."""
+
+    place_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class PlacesRefreshResponse(BaseModel):
+    """Current state of the requested places, keyed by id, after a best-effort
+    refresh — the client patches its cards (and their cover photos) by id."""
+
+    places: dict[uuid.UUID, PlaceRead]
+
+
 # --- trips ---
 
 
@@ -467,3 +480,8 @@ class ItineraryDay(BaseModel):
 class Itinerary(BaseModel):
     trip: TripRead
     days: list[ItineraryDay]
+    # Deduped ids of places in this trip whose cached Google data is missing or
+    # due a refresh. The client renders the itinerary immediately, then (only if
+    # this is non-empty) calls POST /places/refresh with these ids to fill in
+    # fresh data and cover photos. Empty when everything is current.
+    stale_place_ids: list[uuid.UUID]

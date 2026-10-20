@@ -84,7 +84,14 @@ class TokenRead(BaseModel):
 
 
 class AreaBase(BaseModel):
-    photo_url: Url | None = None
+    kind: str | None = Field(default=None, max_length=60)
+    level: int | None = None
+    parent_id: uuid.UUID | None = None
+    # The cover image and the attribution that must be shown with it. Denormalized
+    # onto the area so ordinary reads never touch area_photos. Settable by hand.
+    default_photo_url: Url | None = None
+    default_photo_attribution: str | None = Field(default=None, max_length=500)
+    default_photo_attribution_url: Url | None = None
 
 
 class AreaCreate(AreaBase):
@@ -95,12 +102,65 @@ class AreaUpdate(AreaBase):
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class AreaRef(ReadModel):
+    """A compact reference to an area, e.g. the country a city sits in, enough
+    to label a search result ("Paris · France") without a second request."""
+
+    id: uuid.UUID
+    name: str
+    kind: str | None
+
+
+class AreaPhotoRead(ReadModel):
+    """A curated area photo. `url` is a hotlink to the provider's CDN (Unsplash);
+    `attribution`/`attribution_url` must be shown with the image."""
+
+    id: uuid.UUID
+    url: str
+    source: str
+    attribution: str | None
+    attribution_url: str | None
+    position: int
+    width: int | None
+    height: int | None
+    color: str | None
+
+
 class AreaRead(ReadModel):
     id: uuid.UUID
     name: str
-    photo_url: str | None
+    kind: str | None
+    level: int | None
+    parent_id: uuid.UUID | None
+    parent: AreaRef | None = None
+    # Just the cover (from the area row); the candidate photos are not loaded on
+    # ordinary reads — see AreaDetailRead for those.
+    default_photo_url: str | None
+    default_photo_attribution: str | None
+    default_photo_attribution_url: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class AreaDetailRead(AreaRead):
+    """A single area plus its candidate photos — the admin/detail view. Loading
+    `photos` here keeps area_photos off the hot read paths (trip lists, search)."""
+
+    photos: list[AreaPhotoRead] = []
+
+
+class AreaPhotosRefreshRequest(BaseModel):
+    """The area ids a trip flagged as missing photos (its areas_missing_photos)."""
+
+    area_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+
+
+class AreaPhotosRefreshResponse(BaseModel):
+    """Current state of the requested areas, keyed by id, after a best-effort
+    fetch — the client patches its cover images by id. Ids that don't match an
+    area are omitted."""
+
+    areas: dict[uuid.UUID, AreaRead]
 
 
 # --- places (specific spots in our catalogue) ---
@@ -194,6 +254,8 @@ class TripCreate(BaseModel):
     cover_image_url: Url | None = None
     # Seeds every day of the trip with this zone; each day can be edited after.
     timezone: TimezoneName | None = None
+    # Areas (countries/cities) this trip covers. Deduped; unknown ids 404.
+    area_ids: list[uuid.UUID] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -208,6 +270,8 @@ class TripUpdate(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     cover_image_url: Url | None = None
+    # Omit to leave areas untouched; a list (even empty) replaces the whole set.
+    area_ids: list[uuid.UUID] | None = None
 
 
 class TripRead(ReadModel):
@@ -218,6 +282,13 @@ class TripRead(ReadModel):
     start_date: date
     end_date: date
     cover_image_url: str | None
+    # Resolved from the stored area_ids, in order; ids that no longer match an
+    # area are dropped (and pruned from storage) so none surface as blanks.
+    areas: list[AreaRead] = Field(default_factory=list)
+    # The subset of `areas` that have no photo yet. Render the trip now, then —
+    # if this is non-empty — call POST /areas/refresh-photos with these ids to
+    # fetch covers and patch them in. (Two-step, like places' stale_place_ids.)
+    areas_missing_photos: list[uuid.UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

@@ -5,7 +5,17 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, Date, DateTime, ForeignKey, String, Text, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -37,6 +47,11 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # No timezone here: a trip can cross zones, so each item carries its own
     # (see TripItem.start_timezone / end_timezone).
     cover_image_url: Mapped[str | None] = mapped_column(String(2048))
+    # Areas (countries/cities) this trip covers, in order. No FK: ids are
+    # validated in the API, not the database.
+    area_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(Uuid), default=list, server_default=text("'{}'")
+    )
 
     owner: Mapped[User] = relationship()
     members: Mapped[list[TripMember]] = relationship(

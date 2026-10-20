@@ -15,6 +15,7 @@ from app.api.deps import (
 )
 from app.api.trip_items import check_places, visible_items, with_item_details
 from app.models import (
+    Area,
     Place,
     Trip,
     TripDay,
@@ -43,6 +44,58 @@ router = APIRouter(prefix="/trips", tags=["trips"])
 NOT_NULLABLE = ("title", "start_date", "end_date")
 
 
+def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """Dedupe (keeping order) and check every id names a real area. 404s on any
+    unknown id rather than silently storing a dangling reference."""
+    unique = list(dict.fromkeys(area_ids))
+    if not unique:
+        return []
+    found = set(session.scalars(select(Area.id).where(Area.id.in_(unique))))
+    missing = [str(i) for i in unique if i not in found]
+    if missing:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Area(s) not found: {', '.join(missing)}")
+    return unique
+
+
+def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
+    """Resolve each trip's area_ids into `Area` objects (in stored order) for
+    the response, and drop any id that no longer matches an area — e.g. the
+    area was deleted — so stale ids never surface as blanks. A prune is written
+    back only when one actually happened, so an ordinary read stays read-only.
+    Batched into one lookup across all the trips given.
+
+    This never loads or fetches photos — that's the second step. Each trip
+    reports the ids of its areas with no cover yet (`areas_missing_photos`, i.e.
+    no default_photo_url) so the client can render now and call
+    POST /areas/refresh-photos to fill the covers."""
+    wanted = {area_id for trip in trips for area_id in trip.area_ids}
+    areas = (
+        {
+            area.id: area
+            for area in session.scalars(
+                select(Area).options(selectinload(Area.parent)).where(Area.id.in_(wanted))
+            )
+        }
+        if wanted
+        else {}
+    )
+
+    pruned = False
+    for trip in trips:
+        resolved = [areas[area_id] for area_id in trip.area_ids if area_id in areas]
+        kept = [area.id for area in resolved]
+        if kept != trip.area_ids:
+            trip.area_ids = kept
+            pruned = True
+        trip.areas = resolved  # transient attribute read by TripRead
+        trip.areas_missing_photos = [
+            area.id for area in resolved if area.default_photo_url is None
+        ]
+
+    if pruned:
+        session.commit()
+
+
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
@@ -50,11 +103,13 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
     is made for every date, seeded with the timezone if one was given."""
     values = payload.model_dump()
     seed_timezone = values.pop("timezone")
+    values["area_ids"] = _clean_area_ids(session, values["area_ids"])
     trip = Trip(**values, owner_id=user.id)
     trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
     sync_trip_days(trip, seed_timezone)
     session.add(trip)
     session.commit()
+    attach_areas(session, [trip])
     return trip
 
 
@@ -63,17 +118,21 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
     """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
-    return list(session.scalars(query))
+    trips = list(session.scalars(query))
+    attach_areas(session, trips)
+    return trips
 
 
 @router.get("/{trip_id}", response_model=TripRead)
-def read_trip(trip: ViewableTrip) -> Trip:
+def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
+    attach_areas(session, [trip])
     return trip
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
 def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
+    area_ids = changes.pop("area_ids", None)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} cannot be null")
@@ -85,9 +144,12 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
         )
     for field, value in changes.items():
         setattr(trip, field, value)
+    if area_ids is not None:
+        trip.area_ids = _clean_area_ids(session, area_ids)
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
     session.commit()
+    attach_areas(session, [trip])
     return trip
 
 

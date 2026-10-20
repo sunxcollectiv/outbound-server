@@ -16,6 +16,7 @@ from app.services.google_places import (
     GooglePlacesClient,
     get_google_places_client,
 )
+from app.services.resend import ResendClient, ResendError, get_resend_client
 from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_client
 
 TEST_DATABASE = "outbound_test"
@@ -96,13 +97,37 @@ def unsplash() -> FakeUnsplash:
     return FakeUnsplash()
 
 
+class FakeResend(ResendClient):
+    """Serves whatever the test loads into `received` (a list of email dicts,
+    newest first). Defaults to an empty inbox. Set `error` to make the call
+    raise, standing in for an upstream failure."""
+
+    def __init__(self) -> None:
+        self.received: list[dict[str, Any]] = []
+        self.error: ResendError | None = None
+
+    def list_received_emails(self) -> dict[str, Any]:
+        if self.error:
+            raise self.error
+        return {"object": "list", "has_more": False, "data": self.received}
+
+
+@pytest.fixture
+def resend() -> FakeResend:
+    return FakeResend()
+
+
 @pytest.fixture
 def client(
-    session: Session, google_places: FakeGooglePlaces, unsplash: FakeUnsplash
+    session: Session,
+    google_places: FakeGooglePlaces,
+    unsplash: FakeUnsplash,
+    resend: FakeResend,
 ) -> Iterator[TestClient]:
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_google_places_client] = lambda: google_places
     app.dependency_overrides[get_unsplash_client] = lambda: unsplash
+    app.dependency_overrides[get_resend_client] = lambda: resend
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

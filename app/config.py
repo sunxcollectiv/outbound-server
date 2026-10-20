@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Unsplash's guidelines (utm_source).
     unsplash_access_key: str | None = None
     unsplash_app_name: str = "outbound"
+    # Resend's inbound email API. Travel confirmations forwarded to a Resend
+    # inbound address are pulled from here and parsed into trip items.
+    resend_api_key: str | None = None
     access_token_ttl_days: int = 90
 
 

@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from app.models import (
+    EmailReceiptStatus,
     RsvpStatus,
     TripItemKind,
     TripItemRequirement,
@@ -560,3 +561,22 @@ class Itinerary(BaseModel):
     # this is non-empty) calls POST /places/refresh with these ids to fill in
     # fresh data and cover photos. Empty when everything is current.
     stale_place_ids: list[uuid.UUID]
+
+
+# --- mail processing (received email -> trip items) ---
+
+
+class ReceiptInfo(BaseModel):
+    """What we know about one pulled email's processing history: its current
+    status in the receipts ledger, and whether this pull is what first recorded
+    it (so the caller can tell a brand-new email from one seen before)."""
+
+    status: EmailReceiptStatus
+    newly_recorded: bool
+
+
+class ProcessMailResponse(BaseModel):
+    # Resend's received-email objects, exactly as returned (newest first).
+    emails: list[Any]
+    # Dedup signal, keyed by Resend email id, one entry per email above.
+    receipts: dict[str, ReceiptInfo]

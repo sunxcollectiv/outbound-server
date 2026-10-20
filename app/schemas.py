@@ -567,11 +567,13 @@ class Itinerary(BaseModel):
 
 
 class ReceiptInfo(BaseModel):
-    """What we know about one pulled email's processing history: its current
-    status in the receipts ledger, and whether this pull is what first recorded
-    it (so the caller can tell a brand-new email from one seen before)."""
+    """One pulled email's processing result: its status in the receipts ledger
+    (`pending`/`ignored`/…), the account it was matched to (`user_id`, null when
+    ignored), and whether this call is what first recorded it (so the caller can
+    tell a brand-new email from one seen before)."""
 
     status: EmailReceiptStatus
+    user_id: uuid.UUID | None = None
     newly_recorded: bool
 
 

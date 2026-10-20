@@ -29,9 +29,10 @@ def upgrade() -> None:
         sa.Column('resend_email_id', sa.String(length=255), nullable=False),
         sa.Column(
             'status',
-            sa.Enum('seen', 'processed', 'failed', name='email_receipt_status', native_enum=False, length=32),
+            sa.Enum('pending', 'ignored', 'processed', 'failed', name='email_receipt_status', native_enum=False, length=32),
             nullable=False,
         ),
+        sa.Column('user_id', sa.Uuid(), nullable=True),
         sa.Column('from_address', sa.String(length=320), nullable=True),
         sa.Column('subject', sa.String(length=1024), nullable=True),
         sa.Column('message_id', sa.String(length=998), nullable=True),
@@ -40,13 +41,19 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.CheckConstraint(
-            "status IN ('seen', 'processed', 'failed')",
+            "status IN ('pending', 'ignored', 'processed', 'failed')",
             name=op.f('ck_r_email_receipts_email_receipt_status'),
+        ),
+        sa.ForeignKeyConstraint(
+            ['user_id'], ['users.id'],
+            name=op.f('fk_r_email_receipts_user_id_users'), ondelete='SET NULL',
         ),
         sa.PrimaryKeyConstraint('id', name=op.f('pk_r_email_receipts')),
         sa.UniqueConstraint('resend_email_id', name=op.f('uq_r_email_receipts_resend_email_id')),
     )
+    op.create_index(op.f('ix_r_email_receipts_user_id'), 'r_email_receipts', ['user_id'], unique=False)
 
 
 def downgrade() -> None:
+    op.drop_index(op.f('ix_r_email_receipts_user_id'), table_name='r_email_receipts')
     op.drop_table('r_email_receipts')

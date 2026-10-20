@@ -1,95 +1,105 @@
 from sqlalchemy import func, select
 
 from app.models import EmailReceipt, EmailReceiptStatus
+from app.services.mail_processing import (
+    InboundEmail,
+    extract_sender_email,
+    record_inbound_emails,
+)
 from app.services.resend import ResendError
 
-FLIGHT_EMAIL = {
-    "id": "re_inbound_1",
-    "from": "confirmations@airline.example",
-    "to": ["trips@inbound.outbound.example"],
-    "subject": "Your flight to Tokyo is booked",
-    "message_id": "<abc@airline.example>",
-    "created_at": "2026-10-19T12:00:00.000Z",
-    "attachments": [
-        {"id": "att_1", "filename": "ticket.pdf", "content_type": "application/pdf", "size": 2048}
-    ],
-}
 
-HOTEL_EMAIL = {
-    "id": "re_inbound_2",
-    "from": "stay@hotel.example",
-    "to": ["trips@inbound.outbound.example"],
-    "subject": "Reservation confirmed",
-    "created_at": "2026-10-18T09:30:00.000Z",
-}
+def _email(email_id: str, sender: str, **extra) -> dict:
+    return {
+        "id": email_id,
+        "from": sender,
+        "to": ["trips@inbound.outbound.example"],
+        "subject": "Your flight to Tokyo is booked",
+        "message_id": f"<{email_id}@airline.example>",
+        "created_at": "2026-10-19T12:00:00.000Z",
+        **extra,
+    }
 
 
 def _receipt_count(session) -> int:
     return session.scalar(select(func.count()).select_from(EmailReceipt))
 
 
+def _receipt(session, email_id: str) -> EmailReceipt:
+    return session.scalar(
+        select(EmailReceipt).where(EmailReceipt.resend_email_id == email_id)
+    )
+
+
 def test_process_mail_requires_auth(client):
     assert client.post("/trips/process-mail").status_code == 401
 
 
-def test_first_pull_records_receipts_and_returns_resend_data(client, make_user, resend, session):
-    sun = make_user("sun")
-    resend.received = [FLIGHT_EMAIL, HOTEL_EMAIL]
+def test_matched_sender_is_pending_and_linked_to_account(client, make_user, resend, session):
+    sun = make_user("sun")  # registered as sun@example.com
+    resend.received = [_email("re_1", "sun@example.com")]
 
-    response = client.post("/trips/process-mail", headers=sun)
-    assert response.status_code == 200, response.text
-    body = response.json()
-
-    # Resend's objects come back untouched (newest first).
-    assert body["emails"] == [FLIGHT_EMAIL, HOTEL_EMAIL]
-
-    # Every email is freshly recorded as seen.
-    assert body["receipts"] == {
-        "re_inbound_1": {"status": "seen", "newly_recorded": True},
-        "re_inbound_2": {"status": "seen", "newly_recorded": True},
-    }
-
-    # A row per email, with the metadata snapshot filled from the list response.
-    assert _receipt_count(session) == 2
-    flight = session.scalar(
-        select(EmailReceipt).where(EmailReceipt.resend_email_id == "re_inbound_1")
-    )
-    assert flight.status is EmailReceiptStatus.SEEN
-    assert flight.from_address == "confirmations@airline.example"
-    assert flight.subject == "Your flight to Tokyo is booked"
-    assert flight.message_id == "<abc@airline.example>"
-    assert flight.received_at is not None
-    assert flight.processed_at is None
-
-
-def test_second_pull_dedupes_without_new_rows(client, make_user, resend, session):
-    sun = make_user("sun")
-    resend.received = [FLIGHT_EMAIL, HOTEL_EMAIL]
-
-    client.post("/trips/process-mail", headers=sun)
-    second = client.post("/trips/process-mail", headers=sun)
-    assert second.status_code == 200, second.text
-
-    # Same emails, now reported as already seen — and no duplicate rows.
-    assert second.json()["receipts"] == {
-        "re_inbound_1": {"status": "seen", "newly_recorded": False},
-        "re_inbound_2": {"status": "seen", "newly_recorded": False},
-    }
-    assert _receipt_count(session) == 2
-
-
-def test_new_email_among_seen_ones_is_the_only_newly_recorded(client, make_user, resend, session):
-    sun = make_user("sun")
-    resend.received = [FLIGHT_EMAIL]
-    client.post("/trips/process-mail", headers=sun)
-
-    # A newer email arrives alongside the already-seen one.
-    resend.received = [HOTEL_EMAIL, FLIGHT_EMAIL]
     body = client.post("/trips/process-mail", headers=sun).json()
 
-    assert body["receipts"]["re_inbound_2"]["newly_recorded"] is True
-    assert body["receipts"]["re_inbound_1"]["newly_recorded"] is False
-    assert _receipt_count(session) == 2
+    # Resend data returned untouched, plus the receipt.
+    assert body["emails"] == resend.received
+    info = body["receipts"]["re_1"]
+    assert info["status"] == "pending"
+    assert info["user_id"] == sun.user_id
+    assert info["newly_recorded"] is True
+
+    row = _receipt(session, "re_1")
+    assert row.status is EmailReceiptStatus.PENDING
+    assert str(row.user_id) == sun.user_id
+    assert row.from_address == "sun@example.com"
+    assert row.received_at is not None
+    assert row.processed_at is None
+
+
+def test_unmatched_sender_is_ignored(client, make_user, resend, session):
+    sun = make_user("sun")
+    resend.received = [_email("re_2", "stranger@nowhere.example")]
+
+    info = client.post("/trips/process-mail", headers=sun).json()["receipts"]["re_2"]
+    assert info["status"] == "ignored"
+    assert info["user_id"] is None
+
+    # Still recorded (audit + dedup), just not tied to an account.
+    assert _receipt(session, "re_2").user_id is None
+
+
+def test_sender_match_handles_display_name_and_casing(client, make_user, resend):
+    sun = make_user("sun")
+    resend.received = [_email("re_3", "Sun Chen <SUN@EXAMPLE.COM>")]
+
+    info = client.post("/trips/process-mail", headers=sun).json()["receipts"]["re_3"]
+    assert info["status"] == "pending"
+    assert info["user_id"] == sun.user_id
+
+
+def test_mixed_batch_matches_only_the_known_sender(client, make_user, resend):
+    sun = make_user("sun")
+    resend.received = [
+        _email("re_known", "sun@example.com"),
+        _email("re_unknown", "someone@elsewhere.example"),
+    ]
+
+    receipts = client.post("/trips/process-mail", headers=sun).json()["receipts"]
+    assert receipts["re_known"]["status"] == "pending"
+    assert receipts["re_unknown"]["status"] == "ignored"
+
+
+def test_second_pull_dedupes_without_reprocessing(client, make_user, resend, session):
+    sun = make_user("sun")
+    resend.received = [_email("re_1", "sun@example.com")]
+
+    client.post("/trips/process-mail", headers=sun)
+    body = client.post("/trips/process-mail", headers=sun).json()
+
+    info = body["receipts"]["re_1"]
+    assert info["newly_recorded"] is False
+    assert info["status"] == "pending"  # unchanged, pipeline not re-run
+    assert _receipt_count(session) == 1
 
 
 def test_empty_inbox_records_nothing(client, make_user, resend, session):
@@ -101,9 +111,35 @@ def test_empty_inbox_records_nothing(client, make_user, resend, session):
     assert _receipt_count(session) == 0
 
 
-def test_process_mail_surfaces_upstream_failure(client, make_user, resend):
+def test_process_mail_upstream_failure_is_502(client, make_user, resend):
     sun = make_user("sun")
     resend.error = ResendError("Resend returned 500: boom")
+    assert client.post("/trips/process-mail", headers=sun).status_code == 502
 
-    response = client.post("/trips/process-mail", headers=sun)
-    assert response.status_code == 502, response.text
+
+def test_extract_sender_email_variants():
+    assert extract_sender_email("Sun Chen <Sun@Example.com>") == "sun@example.com"
+    assert extract_sender_email("PLAIN@Example.COM") == "plain@example.com"
+    assert extract_sender_email(None) is None
+    assert extract_sender_email("not-an-address") is None
+
+
+def test_webhook_shape_reuses_the_same_processing(client, make_user, session):
+    """An email.received payload normalizes to the same InboundEmail and runs the
+    same record path — proving the pull and the future webhook share code."""
+    sun = make_user("sun")
+    data = {
+        "email_id": "re_wh_1",
+        "from": "sun@example.com",
+        "subject": "Forwarded confirmation",
+        "message_id": "<wh@airline.example>",
+        "created_at": "2026-10-20T00:00:00.000Z",
+    }
+    inbound = InboundEmail.from_webhook(data)
+    recorded = record_inbound_emails(session, [inbound])
+    session.commit()
+
+    result = recorded["re_wh_1"]
+    assert result.newly_recorded is True
+    assert result.receipt.status is EmailReceiptStatus.PENDING
+    assert str(result.receipt.user_id) == sun.user_id

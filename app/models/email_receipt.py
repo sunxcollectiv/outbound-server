@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -16,10 +17,18 @@ if TYPE_CHECKING:
 
 
 class EmailReceiptStatus(StrEnum):
-    PENDING = "pending"  # sender matched; awaiting later steps (categorize/extract)
-    IGNORED = "ignored"  # sender has no account — not processed
-    PROCESSED = "processed"  # parsed into trip item(s) — set by a later step
-    FAILED = "failed"  # processing was attempted and errored — later step
+    PENDING = "pending"  # matched; queued for processing / awaiting a retry (the worklist)
+    PROCESSING = "processing"  # picked up by a worker, in-flight (guards double-pickup)
+    PROCESSED = "processed"  # extracted into trip item(s) — terminal success
+    REJECTED = "rejected"  # terminal failure: retry cap hit, or a permanent reason
+    IGNORED = "ignored"  # sender has no account — terminal, never processed
+
+    # NOTE — stuck-process cleanup (don't forget): a row can be left in
+    # `processing` if a worker dies mid-flight. Once processing is async/queued,
+    # add a reaper that reclaims rows sitting in `processing` past a timeout back
+    # to `pending` (so they re-enter the worklist). Today's processing runs
+    # inline within one request, so it can't actually get stuck — this is a
+    # when-we-go-async item.
 
 
 class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -32,11 +41,13 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     list/retrieve ``id``), so one ledger dedupes across both; the unique
     constraint on it is the dedup guard.
 
-    ``status`` reflects where the email got to in the pipeline: ``ignored`` when
-    its sender isn't a registered user (``user_id`` null), otherwise ``pending``
-    until the later categorize/extract steps advance it to
-    ``processed``/``failed``. ``user_id`` is the account the email belongs to —
-    the forwarder, matched on their own address (aliases come later).
+    ``status`` tracks where the email got to in the pipeline (see
+    ``EmailReceiptStatus``): ``ignored`` when its sender isn't a registered user
+    (``user_id`` null), otherwise ``pending`` until the later categorize/extract
+    steps run — ``processing`` while in-flight, then ``processed`` on success, or
+    back to ``pending`` on a transient error (each logged to ``failures``) until
+    the 3rd failure tips it to ``rejected``. ``user_id`` is the account the email
+    belongs to — the forwarder, matched on their own address (aliases come later).
 
     The ``from_address``/``subject``/``message_id``/``received_at`` snapshot comes
     free from the list response — enough to audit without a re-fetch. Full
@@ -64,5 +75,11 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set when a later step marks the email processed; null until then.
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # One entry per failed processing attempt, e.g.
+    # {"at": "<iso>", "step": "categorize", "reason": "..."}. The retry cap reads
+    # off its length: 3 failures → status flips to `rejected`.
+    failures: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
 
     user: Mapped[User | None] = relationship()

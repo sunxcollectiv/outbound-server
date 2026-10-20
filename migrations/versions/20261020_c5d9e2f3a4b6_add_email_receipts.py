@@ -14,6 +14,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c5d9e2f3a4b6'
@@ -29,7 +30,7 @@ def upgrade() -> None:
         sa.Column('resend_email_id', sa.String(length=255), nullable=False),
         sa.Column(
             'status',
-            sa.Enum('pending', 'ignored', 'processed', 'failed', name='email_receipt_status', native_enum=False, length=32),
+            sa.Enum('pending', 'processing', 'processed', 'rejected', 'ignored', name='email_receipt_status', native_enum=False, length=32),
             nullable=False,
         ),
         sa.Column('user_id', sa.Uuid(), nullable=True),
@@ -38,10 +39,11 @@ def upgrade() -> None:
         sa.Column('message_id', sa.String(length=998), nullable=True),
         sa.Column('received_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('failures', postgresql.JSONB(astext_type=sa.Text()), server_default=sa.text("'[]'::jsonb"), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.CheckConstraint(
-            "status IN ('pending', 'ignored', 'processed', 'failed')",
+            "status IN ('pending', 'processing', 'processed', 'rejected', 'ignored')",
             name=op.f('ck_r_email_receipts_email_receipt_status'),
         ),
         sa.ForeignKeyConstraint(

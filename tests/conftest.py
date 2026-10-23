@@ -143,7 +143,7 @@ class FakeMailExtractor(MailExtractor):
             category="flight",
             confidence=0.95,
             summary="Flight to Tokyo",
-            items=[ExtractedItem(kind="transit", title="Flight to Tokyo")],
+            items=[ExtractedItem(kind="transit", transit_mode="flight", title="Flight to Tokyo")],
         )
         self.error: Exception | None = None
         self.calls: list[tuple[str | None, str | None]] = []

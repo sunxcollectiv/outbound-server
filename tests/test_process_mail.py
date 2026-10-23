@@ -53,6 +53,7 @@ def test_matched_booking_is_processed_and_extraction_stored(
     assert row.processed_at is not None
     assert row.extracted["category"] == "flight"
     assert row.extracted["items"][0]["title"] == "Flight to Tokyo"
+    assert row.extracted["items"][0]["transit_mode"] == "flight"
     assert row.failures == []
     # The body was fetched to feed the extractor.
     assert resend.fetched == ["re_1"]

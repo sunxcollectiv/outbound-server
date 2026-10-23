@@ -35,6 +35,21 @@ class TripItemKind(StrEnum):
     TRANSIT = "transit"
 
 
+class TransitMode(StrEnum):
+    """How a transit leg moves. Lives on each segment (a booking can mix modes,
+    e.g. a ferry + connecting bus); the item carries the overall mode, which is
+    the shared value when every leg agrees or `mixed` when they differ. `mixed`
+    is item-level only and is never stored on a segment."""
+
+    FLIGHT = "flight"
+    TRAIN = "train"
+    BUS = "bus"
+    FERRY = "ferry"
+    CAR_RENTAL = "car_rental"
+    OTHER = "other"
+    MIXED = "mixed"
+
+
 class TripItemScope(StrEnum):
     GROUP = "group"  # posted by an organizer, for everyone on the trip
     PERSONAL = "personal"  # posted by a member, for themself (and whoever they let in)
@@ -146,6 +161,9 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         CheckConstraint(
             "(scope = 'personal') = (visibility IS NOT NULL)", name="personal_has_visibility"
         ),
+        CheckConstraint(
+            "transit_mode IS NULL OR kind = 'transit'", name="transit_mode_only_transit"
+        ),
         Index("ix_trip_items_trip_id_starts_at", "trip_id", "starts_at"),
     )
 
@@ -165,6 +183,12 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     # Booking reference / record locator for the whole item — a flight PNR, a
     # hotel confirmation number, etc. Null for items that aren't a booking.
     confirmation_number: Mapped[str | None] = mapped_column(String(120))
+    # The booking's overall transport mode, carried down from its legs (the
+    # shared value, or `mixed`). Only set for transit items. Clients read this
+    # for a one-glance type instead of inspecting the legs.
+    transit_mode: Mapped[TransitMode | None] = mapped_column(
+        str_enum(TransitMode, "transit_mode")
+    )
     tags: Mapped[list[str]] = mapped_column(
         ARRAY(String(60)), default=list, server_default=text("'{}'")
     )
@@ -245,6 +269,14 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
     # Operator and service number for the leg, e.g. ("ANA", "NH7").
     carrier: Mapped[str | None] = mapped_column(String(120))
     flight_number: Mapped[str | None] = mapped_column(String(40))
+    # This leg's transport mode (never `mixed` — that's an item-level summary).
+    transit_mode: Mapped[TransitMode | None] = mapped_column(
+        str_enum(TransitMode, "transit_mode")
+    )
+    # A reference for this leg specifically, when it's ticketed separately from
+    # the booking-level confirmation on the item (e.g. a codeshare or a
+    # multimodal leg). Usually null — the booking reference lives on the item.
+    confirmation_number: Mapped[str | None] = mapped_column(String(120))
 
     item: Mapped[TripItem] = relationship(back_populates="transit_segments")
     place: Mapped[Place | None] = relationship(foreign_keys=[place_id])

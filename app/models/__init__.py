@@ -6,6 +6,7 @@ from app.models.place import Place
 from app.models.trip import Trip, TripDay, TripMember, TripRole
 from app.models.trip_item import (
     RsvpStatus,
+    TransitMode,
     TripItem,
     TripItemKind,
     TripItemParticipant,
@@ -24,6 +25,7 @@ __all__ = [
     "EmailReceiptStatus",
     "Place",
     "RsvpStatus",
+    "TransitMode",
     "Trip",
     "TripDay",
     "TripItem",

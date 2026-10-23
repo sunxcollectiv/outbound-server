@@ -10,6 +10,7 @@ from app.api.deps import CurrentUser, SessionDep, ViewableTrip, is_organizer
 from app.models import (
     Place,
     RsvpStatus,
+    TransitMode,
     Trip,
     TripItem,
     TripItemKind,
@@ -157,9 +158,12 @@ SPAN_FIELDS = ("starts_at", "ends_at", "start_timezone", "end_timezone", "place_
 
 
 def _leg_from_span(values: dict[str, Any]) -> dict[str, Any]:
-    """The lone leg of a plain point-to-point transit: its ends are the item's."""
+    """The lone leg of a plain point-to-point transit: its ends are the item's,
+    and it inherits the item's mode. The booking reference stays on the item."""
     leg = {field: values.get(field) for field in SPAN_FIELDS}
     leg["carrier"] = leg["flight_number"] = None
+    leg["transit_mode"] = values.get("transit_mode")
+    leg["confirmation_number"] = None
     return leg
 
 
@@ -188,12 +192,16 @@ def _build_segments(
 
 def _apply_span(values: dict[str, Any], segments: list[TripItemTransitSegment]) -> None:
     """Carry the booking's own span down from its legs: it departs when the
-    first leg departs and arrives when the last leg arrives."""
+    first leg departs and arrives when the last leg arrives. The overall mode is
+    the shared leg mode when they all agree, `mixed` when they differ (null when
+    no leg names one)."""
     first, last = segments[0], segments[-1]
     values["starts_at"], values["start_timezone"] = first.starts_at, first.start_timezone
     values["place_id"] = first.place_id
     values["ends_at"], values["end_timezone"] = last.ends_at, last.end_timezone
     values["end_place_id"] = last.end_place_id
+    modes = {s.transit_mode for s in segments if s.transit_mode is not None}
+    values["transit_mode"] = modes.pop() if len(modes) == 1 else (TransitMode.MIXED if modes else None)
 
 
 def _get_item(session: Session, trip: Trip, user: User, item_id: uuid.UUID) -> TripItem:

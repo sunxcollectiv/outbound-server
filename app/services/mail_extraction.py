@@ -40,6 +40,7 @@ exactly this shape:
   "items": [
     {
       "kind": "lodging" | "activity" | "transit",
+      "transit_mode": "flight" | "train" | "bus" | "ferry" | "car_rental" | "other" (transit only, else null),
       "title": "short title",
       "confirmation_number": string or null,
       "start_local": "YYYY-MM-DDTHH:MM" or null,
@@ -49,7 +50,9 @@ exactly this shape:
       "place": {"name": str|null, "address": str|null, "city": str|null, "iata_code": str|null} or null,
       "end_place": same shape or null,
       "segments": [
-        {"carrier": str|null, "flight_number": str|null, "start_local": str|null, "start_timezone": str|null,
+        {"transit_mode": "flight"|"train"|"bus"|"ferry"|"car_rental"|"other"|null,
+         "carrier": str|null, "flight_number": str|null, "confirmation_number": str|null,
+         "start_local": str|null, "start_timezone": str|null,
          "end_local": str|null, "end_timezone": str|null, "origin": place|null, "destination": place|null}
       ]
     }
@@ -61,9 +64,14 @@ Rules:
 newsletter, a receipt with no booking, a reply, etc.).
 - confidence: be conservative — a vague or ambiguous email scores low.
 - kind "lodging" for stays (start = check-in, end = check-out), "transit" for \
-flights/trains/car pickups (start = departure, end = arrival; one entry per leg \
-of a multi-leg flight in "segments" with its carrier and flight number), \
-"activity" for anything else. Use "segments": [] for non-transit items.
+flights/trains/ferries/buses/car rentals (start = departure, end = arrival; one \
+entry per leg in "segments" with its mode, carrier and number), "activity" for \
+anything else. Use "segments": [] for non-transit items.
+- transit_mode: set each leg's mode, and the item's overall mode (the shared \
+value when every leg is the same). Most bookings are one mode (a flight's legs \
+are all flights); only a genuinely mixed booking (e.g. ferry + connecting bus) \
+has differing leg modes. A leg's confirmation_number is only for a leg ticketed \
+separately from the booking-level one; usually null.
 - Times are naive local wall-clock with NO offset. Give the IANA timezone per \
 end when you can tell it from the airport/city; null if unsure rather than \
 guessing. Use null for any field the email doesn't state."""
@@ -88,8 +96,10 @@ class ExtractedSegment(BaseModel):
     """One leg of a multi-leg transit booking. Field names mirror
     `TripItemTransitSegment` so the later trip-item step maps 1:1."""
 
+    transit_mode: str | None = None  # flight|train|bus|ferry|car_rental|other
     carrier: str | None = None
     flight_number: str | None = None  # flight/train number, e.g. "NH7"
+    confirmation_number: str | None = None  # per-leg reference, if separate
     start_local: str | None = None
     start_timezone: str | None = None
     end_local: str | None = None
@@ -100,6 +110,9 @@ class ExtractedSegment(BaseModel):
 
 class ExtractedItem(BaseModel):
     kind: Literal["lodging", "activity", "transit"]
+    # Overall transport mode for a transit item (flight|train|bus|ferry|
+    # car_rental|other). Null for non-transit.
+    transit_mode: str | None = None
     title: str
     confirmation_number: str | None = None
     start_local: str | None = None

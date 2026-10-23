@@ -16,6 +16,7 @@ from pydantic import (
 from app.models import (
     EmailReceiptStatus,
     RsvpStatus,
+    TransitMode,
     TripItemKind,
     TripItemRequirement,
     TripItemScope,
@@ -362,11 +363,15 @@ class TransitSegmentCreate(BaseModel):
     end_place_id: uuid.UUID | None = None
     carrier: str | None = Field(default=None, max_length=120)
     flight_number: str | None = Field(default=None, max_length=40)
+    transit_mode: TransitMode | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         if self.ends_at is None and self.end_timezone is not None:
             raise ValueError("end_timezone needs an ends_at")
+        if self.transit_mode is TransitMode.MIXED:
+            raise ValueError("'mixed' is an item-level summary, not a leg mode")
         return self
 
 
@@ -380,6 +385,9 @@ class TripItemCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
+    # Transit only, and only for a plain hop — a segmented transit's mode is
+    # derived from its legs (see the validator). `mixed` is derived, never sent.
+    transit_mode: TransitMode | None = None
     tags: list[Tag] = Field(default_factory=list)
     # Local wall time at each end, with the zone it's read in when known: from
     # the request, else the place at that end (the arrival falls back to the
@@ -404,6 +412,10 @@ class TripItemCreate(BaseModel):
         self.requirement, self.visibility = resolve_scope_fields(
             self.scope, self.requirement, self.visibility
         )
+        if self.transit_mode is TransitMode.MIXED:
+            raise ValueError("'mixed' is derived from the legs, not set directly")
+        if self.transit_mode is not None and self.kind is not TripItemKind.TRANSIT:
+            raise ValueError("only transit items have a transit_mode")
         if self.segments is not None:
             if self.kind is not TripItemKind.TRANSIT:
                 raise ValueError("only transit items have segments")
@@ -418,10 +430,11 @@ class TripItemCreate(BaseModel):
                     self.end_timezone,
                     self.place_id,
                     self.end_place_id,
+                    self.transit_mode,
                 )
             ):
                 raise ValueError(
-                    "set a segmented transit's times and places on its segments, not the item"
+                    "set a segmented transit's times, places, and mode on its segments, not the item"
                 )
         else:
             if self.starts_at is None:
@@ -446,6 +459,7 @@ class TripItemUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
+    transit_mode: TransitMode | None = None
     tags: list[Tag] | None = None
     starts_at: datetime | None = None
     start_timezone: TimezoneName | None = None
@@ -494,6 +508,8 @@ class TransitSegmentRead(TimeSpanRead):
     end_place: PlaceRead | None
     carrier: str | None
     flight_number: str | None
+    transit_mode: TransitMode | None
+    confirmation_number: str | None
 
 
 class TripItemRead(TimeSpanRead):
@@ -506,6 +522,7 @@ class TripItemRead(TimeSpanRead):
     title: str
     notes: str | None
     confirmation_number: str | None
+    transit_mode: TransitMode | None
     tags: list[str]
     image_url: str | None
     place: PlaceRead | None

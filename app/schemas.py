@@ -586,21 +586,17 @@ class Itinerary(BaseModel):
 # --- mail processing (received email -> trip items) ---
 
 
-class ReceiptInfo(BaseModel):
-    """One pulled email's processing result: its status in the receipts ledger
-    (`pending`/`processed`/`rejected`/`ignored`), the account it was matched to
-    (`user_id`, null when ignored), the classification Claude gave it
-    (`category`, null until extracted), and whether this call is what first
-    recorded it (so the caller can tell a brand-new email from one seen before)."""
+class ReceivedMailRead(ReadModel):
+    """A stored received-email receipt, as the retrieve stage returns it. `raw`
+    holds the full Resend body for one fetched by id; it's null for ones only
+    seen via the list."""
 
+    id: uuid.UUID
+    resend_email_id: str
     status: EmailReceiptStatus
-    user_id: uuid.UUID | None = None
-    category: str | None = None
-    newly_recorded: bool
-
-
-class ProcessMailResponse(BaseModel):
-    # Resend's received-email objects, exactly as returned (newest first).
-    emails: list[Any]
-    # Dedup signal, keyed by Resend email id, one entry per email above.
-    receipts: dict[str, ReceiptInfo]
+    from_address: str | None
+    subject: str | None
+    message_id: str | None
+    received_at: datetime | None
+    created_at: datetime
+    raw: dict[str, Any] | None = None

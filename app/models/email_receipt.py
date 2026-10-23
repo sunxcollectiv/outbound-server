@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 
 class EmailReceiptStatus(StrEnum):
+    RECEIVED = "received"  # retrieved from Resend and stored; not yet processed
     PENDING = "pending"  # matched; queued for processing / awaiting a retry (the worklist)
     PROCESSING = "processing"  # picked up by a worker, in-flight (guards double-pickup)
     PROCESSED = "processed"  # extracted into trip item(s) — terminal success
@@ -35,23 +36,24 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """One row per inbound email we've seen, keyed by its Resend id, so the same
     email is never processed twice.
 
-    Recorded while processing an email — pulled via ``/trips/process-mail``
-    today, or delivered by an ``email.received`` webhook later. Both paths carry
-    the same ``resend_email_id`` (the webhook's ``data.email_id`` equals the
-    list/retrieve ``id``), so one ledger dedupes across both; the unique
-    constraint on it is the dedup guard.
+    Created by the retrieve stage (``/received/mail``), which only fetches from
+    Resend and stores — no sender check, no extraction. A later extract stage
+    advances it. An ``email.received`` webhook will share the ledger too: both it
+    and the retrieve path carry the same ``resend_email_id`` (the webhook's
+    ``data.email_id`` equals the list/retrieve ``id``), so the unique constraint
+    on it is the one dedup guard.
 
-    ``status`` tracks where the email got to in the pipeline (see
-    ``EmailReceiptStatus``): ``ignored`` when its sender isn't a registered user
-    (``user_id`` null), otherwise ``pending`` until the later categorize/extract
-    steps run — ``processing`` while in-flight, then ``processed`` on success, or
-    back to ``pending`` on a transient error (each logged to ``failures``) until
-    the 3rd failure tips it to ``rejected``. ``user_id`` is the account the email
-    belongs to — the forwarder, matched on their own address (aliases come later).
+    ``status`` tracks where the email got to (see ``EmailReceiptStatus``):
+    ``received`` on retrieval; then the extract stage sets ``ignored`` (sender
+    isn't a registered user, ``user_id`` null) or runs the pipeline —
+    ``processing`` while in-flight, ``processed`` on success, or back to
+    ``pending`` on a transient error (each logged to ``failures``) until the 3rd
+    failure tips it to ``rejected``. ``user_id`` is the account the email belongs
+    to — the forwarder, matched on their own address (aliases come later).
 
     The ``from_address``/``subject``/``message_id``/``received_at`` snapshot comes
-    free from the list response — enough to audit without a re-fetch. Full
-    bodies/attachments are deliberately not stored here.
+    from the list response; ``raw`` holds the full body once the single-email
+    retrieve has fetched it.
     """
 
     # "r_" groups the received-mail tables (receipts, and later screenshots/
@@ -81,6 +83,11 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     failures: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
+    # The full received email as Resend returned it from the retrieve endpoint
+    # (text/html body, headers, attachment metadata). Filled by the single-email
+    # retrieve; null for ones only seen in the list. The extract stage reads the
+    # body from here rather than re-calling Resend.
+    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # The AI classify+extract result (an app.services.mail_extraction.Extraction
     # as a dict: category, confidence, summary, items). Null until extracted; the
     # input to the later trip-item-creation step. Not the trip items themselves.

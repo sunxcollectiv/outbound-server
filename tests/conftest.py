@@ -114,10 +114,11 @@ class FakeResend(ResendClient):
         self.error: ResendError | None = None
         self.fetched: list[str] = []
 
-    def list_received_emails(self) -> dict[str, Any]:
+    def list_received_emails(self, *, limit=None, before=None, after=None) -> dict[str, Any]:
         if self.error:
             raise self.error
-        return {"object": "list", "has_more": False, "data": self.received}
+        data = self.received if limit is None else self.received[:limit]
+        return {"object": "list", "has_more": False, "data": data}
 
     def get_received_email(self, email_id: str, *, html_format=None) -> dict[str, Any]:
         self.fetched.append(email_id)

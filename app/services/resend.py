@@ -43,10 +43,24 @@ class ResendClient:
             raise ResendError(f"Resend returned {response.status_code}: {response.text}")
         return response.json()
 
-    def list_received_emails(self) -> dict[str, Any]:
+    def list_received_emails(
+        self,
+        *,
+        limit: int | None = None,
+        before: str | None = None,
+        after: str | None = None,
+    ) -> dict[str, Any]:
         """Resend's received-email list response, returned as-is. Newest first;
-        metadata only (no body)."""
-        return self._get(RECEIVING_PATH)
+        metadata only (no body). `limit` (1-100) bounds the page; `before`/`after`
+        are email-id cursors for paging further back (Resend has no time filter)."""
+        params: dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = limit
+        if before:
+            params["before"] = before
+        if after:
+            params["after"] = after
+        return self._get(RECEIVING_PATH, params or None)
 
     def get_received_email(self, email_id: str, *, html_format: str | None = None) -> dict[str, Any]:
         """One received email with its body (`text`/`html`), headers, and

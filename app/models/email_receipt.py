@@ -81,5 +81,9 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     failures: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
+    # The AI classify+extract result (an app.services.mail_extraction.Extraction
+    # as a dict: category, confidence, summary, items). Null until extracted; the
+    # input to the later trip-item-creation step. Not the trip items themselves.
+    extracted: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
     user: Mapped[User | None] = relationship()

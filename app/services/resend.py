@@ -48,6 +48,13 @@ class ResendClient:
         metadata only (no body)."""
         return self._get(RECEIVING_PATH)
 
+    def get_received_email(self, email_id: str, *, html_format: str | None = None) -> dict[str, Any]:
+        """One received email with its body (`text`/`html`), headers, and
+        attachment metadata — the list endpoint omits all of that. Processing
+        fetches this per email to feed the extractor."""
+        params = {"html_format": html_format} if html_format else None
+        return self._get(f"{RECEIVING_PATH}/{email_id}", params)
+
 
 def get_resend_client() -> ResendClient:
     return ResendClient(get_settings().resend_api_key)

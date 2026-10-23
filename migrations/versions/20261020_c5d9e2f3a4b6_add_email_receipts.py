@@ -40,6 +40,7 @@ def upgrade() -> None:
         sa.Column('received_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('processed_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('failures', postgresql.JSONB(astext_type=sa.Text()), server_default=sa.text("'[]'::jsonb"), nullable=False),
+        sa.Column('extracted', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
         sa.CheckConstraint(

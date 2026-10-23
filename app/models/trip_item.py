@@ -162,6 +162,9 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     )
     title: Mapped[str] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(Text)
+    # Booking reference / record locator for the whole item — a flight PNR, a
+    # hotel confirmation number, etc. Null for items that aren't a booking.
+    confirmation_number: Mapped[str | None] = mapped_column(String(120))
     tags: Mapped[list[str]] = mapped_column(
         ARRAY(String(60)), default=list, server_default=text("'{}'")
     )

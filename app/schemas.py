@@ -379,6 +379,7 @@ class TripItemCreate(BaseModel):
     visibility: TripItemVisibility | None = None
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
     tags: list[Tag] = Field(default_factory=list)
     # Local wall time at each end, with the zone it's read in when known: from
     # the request, else the place at that end (the arrival falls back to the
@@ -444,6 +445,7 @@ class TripItemUpdate(BaseModel):
     visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
     tags: list[Tag] | None = None
     starts_at: datetime | None = None
     start_timezone: TimezoneName | None = None
@@ -503,6 +505,7 @@ class TripItemRead(TimeSpanRead):
     visibility: TripItemVisibility | None
     title: str
     notes: str | None
+    confirmation_number: str | None
     tags: list[str]
     image_url: str | None
     place: PlaceRead | None
@@ -568,12 +571,14 @@ class Itinerary(BaseModel):
 
 class ReceiptInfo(BaseModel):
     """One pulled email's processing result: its status in the receipts ledger
-    (`pending`/`ignored`/…), the account it was matched to (`user_id`, null when
-    ignored), and whether this call is what first recorded it (so the caller can
-    tell a brand-new email from one seen before)."""
+    (`pending`/`processed`/`rejected`/`ignored`), the account it was matched to
+    (`user_id`, null when ignored), the classification Claude gave it
+    (`category`, null until extracted), and whether this call is what first
+    recorded it (so the caller can tell a brand-new email from one seen before)."""
 
     status: EmailReceiptStatus
     user_id: uuid.UUID | None = None
+    category: str | None = None
     newly_recorded: bool
 
 

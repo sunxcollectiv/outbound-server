@@ -1,18 +1,18 @@
-"""Processing for inbound (received) email — the step that turns a raw Resend
-email into an EmailReceipt, running the pipeline and deduping on the email id.
+"""Processing for inbound (received) email — turns a raw Resend email into an
+EmailReceipt, running the pipeline and deduping on the email id.
 
-Everything here is deliberately framework-free and reusable across delivery
-paths: the manual pull (`POST /trips/process-mail`) normalizes each listed email
-to `InboundEmail` and calls `record_inbound_emails`; a future `email.received`
-webhook will build the same `InboundEmail` from its payload and call the same
-function. The pipeline itself (`_run_pipeline`) is where the ordered steps live,
-so adding categorize/extract later touches one place, both paths get it.
+Framework-free and reusable across delivery paths: the manual pull
+(`POST /trips/process-mail`) normalizes each listed email to `InboundEmail` and
+calls `record_inbound_emails`; a future `email.received` webhook will build the
+same `InboundEmail` from its payload and call the same function. The ordered
+steps live in `_run_pipeline`, so adding later steps touches one place and both
+paths get them.
 """
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from email.utils import parseaddr
 from typing import Any
 
@@ -21,6 +21,18 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models import EmailReceipt, EmailReceiptStatus, User
+from app.services.mail_extraction import (
+    MailExtractionError,
+    MailExtractionNotConfigured,
+    MailExtractor,
+)
+from app.services.resend import ResendClient, ResendError, ResendNotConfigured
+
+# A matched email below this extraction confidence is rejected rather than
+# trusted — bad trip data costs more than asking the user to resend.
+CONFIDENCE_THRESHOLD = 0.6
+# After this many failed attempts an email is rejected instead of retried.
+MAX_ATTEMPTS = 3
 
 
 def extract_sender_email(raw_from: str | None) -> str | None:
@@ -100,24 +112,75 @@ class RecordedEmail:
     newly_recorded: bool  # False when this email had already been recorded
 
 
-def _run_pipeline(session: Session, inbound: InboundEmail) -> dict[str, Any]:
-    """Run the processing steps for one not-yet-seen email and return the
-    receipt fields they decide. Ordered; later steps appended here.
+def _failure(step: str, reason: object) -> dict[str, Any]:
+    return {"at": datetime.now(UTC).isoformat(), "step": step, "reason": str(reason)[:500]}
 
-      1. Sender account check — the email must come from a registered user's own
-         address, else it's ignored (no user). A matched email is left pending
-         for the later steps.
-      (future) 2. categorize   3. extract into trip items → processed/failed
+
+def _body_text(email: dict[str, Any]) -> str | None:
+    """Prefer the plaintext body (cheaper tokens); fall back to HTML only when a
+    text part is absent."""
+    return email.get("text") or email.get("html")
+
+
+def _run_pipeline(
+    session: Session,
+    inbound: InboundEmail,
+    *,
+    resend: ResendClient,
+    extractor: MailExtractor,
+) -> dict[str, Any]:
+    """Run the ordered processing steps for one not-yet-seen email and return the
+    receipt fields they decide.
+
+      1. Sender account check — must come from a registered user's own address,
+         else `ignored` (and we stop here, so unmatched mail never hits Claude).
+      2. Classify + extract — fetch the body and run one Claude pass. A booking
+         we're confident in → `processed` with the extraction stored; a
+         non-booking or low-confidence result → `rejected`; a transient
+         Resend/Claude error is logged to `failures` and the email stays
+         `pending` (or `rejected` once it has failed MAX_ATTEMPTS times), for a
+         later retry pass to pick up.
+      (future) 3. turn the extraction into trip items.
+
+    A missing API key is a misconfiguration, not a per-email failure, so it
+    propagates (the endpoint turns it into a 503).
     """
     user = resolve_sender(session, inbound.from_address)
+    if user is None:
+        return {"status": EmailReceiptStatus.IGNORED, "user_id": None}
+
+    base: dict[str, Any] = {"user_id": user.id}
+
+    try:
+        email = resend.get_received_email(inbound.email_id)
+        extraction = extractor.extract(subject=inbound.subject, text_body=_body_text(email))
+    except (ResendNotConfigured, MailExtractionNotConfigured):
+        raise
+    except (ResendError, MailExtractionError) as exc:
+        failures = [_failure("extract", exc)]
+        status = (
+            EmailReceiptStatus.REJECTED
+            if len(failures) >= MAX_ATTEMPTS
+            else EmailReceiptStatus.PENDING
+        )
+        return {**base, "status": status, "failures": failures}
+
+    now = datetime.now(UTC)
+    rejected = extraction.category == "not_a_booking" or extraction.confidence < CONFIDENCE_THRESHOLD
     return {
-        "status": EmailReceiptStatus.PENDING if user is not None else EmailReceiptStatus.IGNORED,
-        "user_id": user.id if user is not None else None,
+        **base,
+        "status": EmailReceiptStatus.REJECTED if rejected else EmailReceiptStatus.PROCESSED,
+        "extracted": extraction.model_dump(),
+        "processed_at": now,
     }
 
 
 def record_inbound_emails(
-    session: Session, inbounds: list[InboundEmail]
+    session: Session,
+    inbounds: list[InboundEmail],
+    *,
+    resend: ResendClient,
+    extractor: MailExtractor,
 ) -> dict[str, RecordedEmail]:
     """Process and record a batch of inbound emails, keyed by Resend email id.
 
@@ -143,19 +206,26 @@ def record_inbound_emails(
             select(EmailReceipt.resend_email_id).where(EmailReceipt.resend_email_id.in_(ids))
         )
     )
-    rows = [
-        {
-            "id": uuid.uuid4(),
-            "resend_email_id": inbound.email_id,
-            "from_address": inbound.from_address,
-            "subject": inbound.subject,
-            "message_id": inbound.message_id,
-            "received_at": inbound.received_at,
-            **_run_pipeline(session, inbound),
-        }
-        for email_id, inbound in by_id.items()
-        if email_id not in seen
-    ]
+    rows = []
+    for email_id, inbound in by_id.items():
+        if email_id in seen:
+            continue
+        decided = _run_pipeline(session, inbound, resend=resend, extractor=extractor)
+        rows.append(
+            {
+                "id": uuid.uuid4(),
+                "resend_email_id": email_id,
+                "from_address": inbound.from_address,
+                "subject": inbound.subject,
+                "message_id": inbound.message_id,
+                "received_at": inbound.received_at,
+                "status": decided["status"],
+                "user_id": decided.get("user_id"),
+                "failures": decided.get("failures", []),
+                "extracted": decided.get("extracted"),
+                "processed_at": decided.get("processed_at"),
+            }
+        )
 
     inserted: set[str] = set()
     if rows:

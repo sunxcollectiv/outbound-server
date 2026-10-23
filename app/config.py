@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Anthropic's Claude API. Used to parse forwarded travel confirmation
     # emails into structured trip items.
     anthropic_api_key: str | None = None
+    # An org-level Anthropic key must name a workspace on every request; set this
+    # when using one (or use a workspace-scoped key and leave it unset).
+    anthropic_workspace_id: str | None = None
     access_token_ttl_days: int = 90
 
 

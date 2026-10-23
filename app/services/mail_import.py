@@ -19,6 +19,9 @@ from sqlalchemy.orm import Session
 from app.api.trip_items import build_trip_item
 from app.models import EmailReceipt, EmailReceiptStatus, Trip, TripMember, User
 from app.schemas import TripItemCreate
+from app.services.place_resolver import resolve_place
+
+PlaceCache = dict  # (norm_name, norm_address) -> place id, per import call
 
 Outcome = Literal["placed", "no_match", "ambiguous", "skipped"]
 
@@ -80,35 +83,6 @@ def _match_trip(
     return (candidates[0] if len(candidates) == 1 else None), candidates
 
 
-def _place_label(place: dict[str, Any] | None) -> str | None:
-    if not place:
-        return None
-    name, iata, city = place.get("name"), place.get("iata_code"), place.get("city")
-    label = name or city
-    if iata and iata != name:
-        label = f"{label} ({iata})" if label else iata
-    return label
-
-
-def _notes(item: dict[str, Any]) -> str | None:
-    """Preserve the places we aren't resolving yet (no place_id) as text."""
-    segments = item.get("segments") or []
-    if segments:
-        lines = []
-        for seg in segments:
-            route = " → ".join(
-                x for x in (_place_label(seg.get("origin")), _place_label(seg.get("destination"))) if x
-            )
-            svc = " ".join(x for x in (seg.get("carrier"), seg.get("flight_number")) if x)
-            lines.append(f"{svc}: {route}".strip(": ").strip() or route)
-        text = "\n".join(line for line in lines if line)
-    else:
-        text = " → ".join(
-            x for x in (_place_label(item.get("place")), _place_label(item.get("end_place"))) if x
-        )
-    return text or None
-
-
 def _ends(part: dict[str, Any]) -> dict[str, Any]:
     return {
         "starts_at": _as_datetime(part.get("start_local")),
@@ -118,13 +92,20 @@ def _ends(part: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _item_payload(item: dict[str, Any]) -> TripItemCreate:
+def _item_payload(
+    session: Session, item: dict[str, Any], *, user_id: Any, cache: PlaceCache
+) -> TripItemCreate:
+    """Map one extracted item to a create payload, resolving its places (airports/
+    hotels) to Place ids via the shared resolver as we go."""
     kind = item.get("kind") or "activity"
+
+    def place_id(descriptor: dict[str, Any] | None, tz: str | None) -> Any:
+        return resolve_place(session, descriptor, timezone=tz, created_by_id=user_id, cache=cache)
+
     values: dict[str, Any] = {
         "kind": kind,
         "scope": "personal",
         "title": (item.get("title") or "Booking")[:200],
-        "notes": _notes(item),
         "confirmation_number": item.get("confirmation_number"),
     }
     segments = item.get("segments") or []
@@ -136,11 +117,15 @@ def _item_payload(item: dict[str, Any]) -> TripItemCreate:
                 "flight_number": seg.get("flight_number"),
                 "transit_mode": seg.get("transit_mode"),
                 "confirmation_number": seg.get("confirmation_number"),
+                "place_id": place_id(seg.get("origin"), seg.get("start_timezone")),
+                "end_place_id": place_id(seg.get("destination"), seg.get("end_timezone")),
             }
             for seg in segments
         ]
     else:
         values.update(_ends(item))
+        values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
+        values["end_place_id"] = place_id(item.get("end_place"), item.get("end_timezone"))
         if kind == "transit":
             values["transit_mode"] = item.get("transit_mode")
     return TripItemCreate(**values)
@@ -161,9 +146,11 @@ def import_receipt(session: Session, receipt: EmailReceipt) -> ImportOutcome:
     # TODO(monetization): refuse placing into a locked/unpaid trip here — a trip
     # the user hasn't paid for should block this step. See [[monetization-model]].
     user = session.get(User, receipt.user_id)
+    cache: PlaceCache = {}  # one place per booking (a layover airport resolves once)
     count = 0
     for item in extraction.get("items") or []:
-        build_trip_item(session, trip, user, _item_payload(item))
+        payload = _item_payload(session, item, user_id=receipt.user_id, cache=cache)
+        build_trip_item(session, trip, user, payload)
         count += 1
 
     receipt.status = EmailReceiptStatus.PROCESSED

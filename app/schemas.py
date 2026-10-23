@@ -1,6 +1,6 @@
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -14,7 +14,9 @@ from pydantic import (
 )
 
 from app.models import (
+    EmailReceiptStatus,
     RsvpStatus,
+    TransitMode,
     TripItemKind,
     TripItemRequirement,
     TripItemScope,
@@ -361,11 +363,15 @@ class TransitSegmentCreate(BaseModel):
     end_place_id: uuid.UUID | None = None
     carrier: str | None = Field(default=None, max_length=120)
     flight_number: str | None = Field(default=None, max_length=40)
+    transit_mode: TransitMode | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
         if self.ends_at is None and self.end_timezone is not None:
             raise ValueError("end_timezone needs an ends_at")
+        if self.transit_mode is TransitMode.MIXED:
+            raise ValueError("'mixed' is an item-level summary, not a leg mode")
         return self
 
 
@@ -378,6 +384,10 @@ class TripItemCreate(BaseModel):
     visibility: TripItemVisibility | None = None
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
+    # Transit only, and only for a plain hop — a segmented transit's mode is
+    # derived from its legs (see the validator). `mixed` is derived, never sent.
+    transit_mode: TransitMode | None = None
     tags: list[Tag] = Field(default_factory=list)
     # Local wall time at each end, with the zone it's read in when known: from
     # the request, else the place at that end (the arrival falls back to the
@@ -402,6 +412,10 @@ class TripItemCreate(BaseModel):
         self.requirement, self.visibility = resolve_scope_fields(
             self.scope, self.requirement, self.visibility
         )
+        if self.transit_mode is TransitMode.MIXED:
+            raise ValueError("'mixed' is derived from the legs, not set directly")
+        if self.transit_mode is not None and self.kind is not TripItemKind.TRANSIT:
+            raise ValueError("only transit items have a transit_mode")
         if self.segments is not None:
             if self.kind is not TripItemKind.TRANSIT:
                 raise ValueError("only transit items have segments")
@@ -416,10 +430,11 @@ class TripItemCreate(BaseModel):
                     self.end_timezone,
                     self.place_id,
                     self.end_place_id,
+                    self.transit_mode,
                 )
             ):
                 raise ValueError(
-                    "set a segmented transit's times and places on its segments, not the item"
+                    "set a segmented transit's times, places, and mode on its segments, not the item"
                 )
         else:
             if self.starts_at is None:
@@ -443,6 +458,8 @@ class TripItemUpdate(BaseModel):
     visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
+    confirmation_number: str | None = Field(default=None, max_length=120)
+    transit_mode: TransitMode | None = None
     tags: list[Tag] | None = None
     starts_at: datetime | None = None
     start_timezone: TimezoneName | None = None
@@ -491,6 +508,8 @@ class TransitSegmentRead(TimeSpanRead):
     end_place: PlaceRead | None
     carrier: str | None
     flight_number: str | None
+    transit_mode: TransitMode | None
+    confirmation_number: str | None
 
 
 class TripItemRead(TimeSpanRead):
@@ -502,6 +521,8 @@ class TripItemRead(TimeSpanRead):
     visibility: TripItemVisibility | None
     title: str
     notes: str | None
+    confirmation_number: str | None
+    transit_mode: TransitMode | None
     tags: list[str]
     image_url: str | None
     place: PlaceRead | None
@@ -560,3 +581,40 @@ class Itinerary(BaseModel):
     # this is non-empty) calls POST /places/refresh with these ids to fill in
     # fresh data and cover photos. Empty when everything is current.
     stale_place_ids: list[uuid.UUID]
+
+
+# --- mail processing (received email -> trip items) ---
+
+
+class ReceivedMailRead(ReadModel):
+    """A stored received-email receipt. `raw` holds the full Resend body once
+    fetched by id (null for list-only rows); `user_id`/`extracted`/`extracted_at`
+    are filled by the extract stage (null until then)."""
+
+    id: uuid.UUID
+    resend_email_id: str
+    status: EmailReceiptStatus
+    from_address: str | None
+    subject: str | None
+    message_id: str | None
+    received_at: datetime | None
+    created_at: datetime
+    user_id: uuid.UUID | None = None
+    trip_id: uuid.UUID | None = None
+    extracted_at: datetime | None = None
+    raw: dict[str, Any] | None = None
+    extracted: dict[str, Any] | None = None
+    failures: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ImportResult(ReadModel):
+    """The outcome of importing one receipt: `placed` (into `trip_id`,
+    `item_count` items created), `no_match`/`ambiguous` (left `extracted`; for
+    ambiguous, `candidate_trip_ids` lists the overlapping trips), or `skipped`
+    (the receipt wasn't in an importable state)."""
+
+    receipt: ReceivedMailRead
+    outcome: Literal["placed", "no_match", "ambiguous", "skipped"]
+    trip_id: uuid.UUID | None = None
+    item_count: int = 0
+    candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)

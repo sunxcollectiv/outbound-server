@@ -2,8 +2,14 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import func, select
 
-from app.models import Place, TripItem
+from app.models import (
+    Place,
+    TripItem,
+    TripItemParticipant,
+    TripItemTransitSegment,
+)
 
 
 def _place(client, headers, **fields):
@@ -673,3 +679,116 @@ def test_transit_segment_validation(client, make_user, make_trip):
     ).json()
     moved = client.patch(f"{url}/{flight['id']}", json={"starts_at": "2026-04-10T08:00:00"}, headers=sun)
     assert moved.status_code == 422
+
+
+def test_transit_mode_rolls_up_from_legs(client, make_user, make_trip):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+
+    # Uniform-mode multi-leg booking: the item summarizes to that mode; legs carry
+    # their own mode, and a separately-ticketed leg keeps its own confirmation.
+    flight = client.post(url, json={
+        "kind": "transit", "scope": "group", "title": "JFK to MEL",
+        "confirmation_number": "HPY28W",
+        "segments": [
+            {"starts_at": "2026-11-10T16:25:00", "start_timezone": "America/New_York",
+             "ends_at": "2026-11-10T19:41:00", "end_timezone": "America/Los_Angeles",
+             "transit_mode": "flight", "carrier": "Delta", "flight_number": "DL771"},
+            {"starts_at": "2026-11-10T20:55:00", "start_timezone": "America/Los_Angeles",
+             "ends_at": "2026-11-12T08:00:00", "end_timezone": "Australia/Melbourne",
+             "transit_mode": "flight", "carrier": "Delta", "flight_number": "DL11",
+             "confirmation_number": "LEG2REF"},
+        ],
+    }, headers=sun)
+    assert flight.status_code == 201, flight.text
+    flight = flight.json()
+    assert flight["transit_mode"] == "flight"            # rolled up from the legs
+    assert flight["confirmation_number"] == "HPY28W"      # booking-level stays on the item
+    assert [leg["transit_mode"] for leg in flight["segments"]] == ["flight", "flight"]
+    assert flight["segments"][0]["confirmation_number"] is None
+    assert flight["segments"][1]["confirmation_number"] == "LEG2REF"
+
+    # Genuinely mixed booking → the item summarizes as "mixed".
+    mixed = client.post(url, json={
+        "kind": "transit", "scope": "group", "title": "Ferry then bus",
+        "segments": [
+            {"starts_at": "2026-05-01T09:00:00", "start_timezone": "Europe/Athens",
+             "ends_at": "2026-05-01T11:00:00", "end_timezone": "Europe/Athens", "transit_mode": "ferry"},
+            {"starts_at": "2026-05-01T11:30:00", "start_timezone": "Europe/Athens",
+             "ends_at": "2026-05-01T12:30:00", "end_timezone": "Europe/Athens", "transit_mode": "bus"},
+        ],
+    }, headers=sun).json()
+    assert mixed["transit_mode"] == "mixed"
+    assert [leg["transit_mode"] for leg in mixed["segments"]] == ["ferry", "bus"]
+
+    # Plain hop: item-level mode is allowed and is copied onto the lone leg.
+    hop = client.post(url, json={
+        "kind": "transit", "scope": "group", "title": "Train to Kyoto", "transit_mode": "train",
+        "starts_at": "2026-04-12T10:00:00", "start_timezone": "Asia/Tokyo",
+        "ends_at": "2026-04-12T12:30:00", "end_timezone": "Asia/Tokyo",
+    }, headers=sun).json()
+    assert hop["transit_mode"] == "train"
+    assert hop["segments"][0]["transit_mode"] == "train"
+
+
+def test_transit_mode_validation(client, make_user, make_trip):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+
+    def post(**item):
+        return client.post(url, json={"scope": "group", "title": "x", **item}, headers=sun)
+
+    # Mode only on transit items.
+    assert post(kind="activity", starts_at="2026-04-10T09:00:00",
+                start_timezone="Asia/Tokyo", transit_mode="flight").status_code == 422
+    # 'mixed' is derived from the legs, never sent directly.
+    assert post(kind="transit", starts_at="2026-04-10T09:00:00",
+                start_timezone="Asia/Tokyo", transit_mode="mixed").status_code == 422
+    # Item-level mode can't be set alongside segments (it's derived from them).
+    assert post(kind="transit", transit_mode="flight",
+                segments=[{"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo"}]
+                ).status_code == 422
+    # A leg can't be 'mixed'.
+    assert post(kind="transit",
+                segments=[{"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo",
+                           "transit_mode": "mixed"}]).status_code == 422
+
+
+def test_deleting_an_item_cascades_its_segments_and_rsvps(client, make_user, make_trip, session):
+    """Deleting an item must take its child rows with it — the transit legs and
+    the RSVPs — not just the item row. Guards the ON DELETE CASCADE / delete-orphan
+    on trip_item_transit_segments and trip_item_participants."""
+    sun, sean = make_user("sun"), make_user("sean")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    client.post(f"/trips/{trip['id']}/members", json={"user_id": sean.user_id}, headers=sun)
+
+    # A plain transit hop auto-builds a single leg from its own ends, and a
+    # member's RSVP adds a participant row — one of each child table.
+    item = client.post(
+        url,
+        json={
+            "kind": "transit",
+            "scope": "group",
+            "title": "Airport shuttle",
+            "starts_at": "2026-04-10T09:00:00",
+            "start_timezone": "Asia/Tokyo",
+        },
+        headers=sun,
+    ).json()
+    item_id = uuid.UUID(item["id"])
+    client.put(f"{url}/{item['id']}/rsvp", json={"status": "going"}, headers=sean)
+
+    def _count(model, column) -> int:
+        session.expire_all()  # see the app's committed rows, not a stale identity map
+        return session.scalar(select(func.count()).select_from(model).where(column == item_id))
+
+    assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 1
+    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 1
+
+    assert client.delete(f"{url}/{item['id']}", headers=sun).status_code == 204
+
+    assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 0
+    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 0

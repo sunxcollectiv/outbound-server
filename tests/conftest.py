@@ -16,6 +16,13 @@ from app.services.google_places import (
     GooglePlacesClient,
     get_google_places_client,
 )
+from app.services.mail_extraction import (
+    ExtractedItem,
+    Extraction,
+    MailExtractor,
+    get_mail_extractor,
+)
+from app.services.resend import ResendClient, ResendError, get_resend_client
 from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_client
 
 TEST_DATABASE = "outbound_test"
@@ -96,13 +103,77 @@ def unsplash() -> FakeUnsplash:
     return FakeUnsplash()
 
 
+class FakeResend(ResendClient):
+    """Serves whatever the test loads into `received` (a list of email dicts,
+    newest first) for both list and single-email fetch. Defaults to an empty
+    inbox. Set `error` to make the list call raise, standing in for an upstream
+    failure. `fetched` records which ids had their body retrieved."""
+
+    def __init__(self) -> None:
+        self.received: list[dict[str, Any]] = []
+        self.error: ResendError | None = None
+        self.fetched: list[str] = []
+
+    def list_received_emails(self, *, limit=None, before=None, after=None) -> dict[str, Any]:
+        if self.error:
+            raise self.error
+        data = self.received if limit is None else self.received[:limit]
+        return {"object": "list", "has_more": False, "data": data}
+
+    def get_received_email(self, email_id: str, *, html_format=None) -> dict[str, Any]:
+        self.fetched.append(email_id)
+        for email in self.received:
+            if email.get("id") == email_id:
+                return email
+        raise ResendError(f"Resend returned 404: {email_id} not found")
+
+
+@pytest.fixture
+def resend() -> FakeResend:
+    return FakeResend()
+
+
+class FakeMailExtractor(MailExtractor):
+    """Returns a canned Extraction (a confident flight by default) and records
+    its calls. Set `result` to change what it returns or `error` to make it
+    raise, so tests drive the processed/rejected/failure branches without the
+    real Claude call."""
+
+    def __init__(self) -> None:
+        self.result = Extraction(
+            category="flight",
+            confidence=0.95,
+            summary="Flight to Tokyo",
+            items=[ExtractedItem(kind="transit", transit_mode="flight", title="Flight to Tokyo")],
+        )
+        self.error: Exception | None = None
+        self.calls: list[tuple[str | None, str | None]] = []
+
+    def extract(self, *, subject=None, text_body=None) -> Extraction:
+        self.calls.append((subject, text_body))
+        if self.error:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture
+def mail_extractor() -> FakeMailExtractor:
+    return FakeMailExtractor()
+
+
 @pytest.fixture
 def client(
-    session: Session, google_places: FakeGooglePlaces, unsplash: FakeUnsplash
+    session: Session,
+    google_places: FakeGooglePlaces,
+    unsplash: FakeUnsplash,
+    resend: FakeResend,
+    mail_extractor: FakeMailExtractor,
 ) -> Iterator[TestClient]:
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_google_places_client] = lambda: google_places
     app.dependency_overrides[get_unsplash_client] = lambda: unsplash
+    app.dependency_overrides[get_resend_client] = lambda: resend
+    app.dependency_overrides[get_mail_extractor] = lambda: mail_extractor
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

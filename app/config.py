@@ -21,6 +21,15 @@ class Settings(BaseSettings):
     # Unsplash's guidelines (utm_source).
     unsplash_access_key: str | None = None
     unsplash_app_name: str = "outbound"
+    # Resend's inbound email API. Travel confirmations forwarded to a Resend
+    # inbound address are pulled from here and parsed into trip items.
+    resend_api_key: str | None = None
+    # Anthropic's Claude API. Used to parse forwarded travel confirmation
+    # emails into structured trip items.
+    anthropic_api_key: str | None = None
+    # An org-level Anthropic key must name a workspace on every request; set this
+    # when using one (or use a workspace-scoped key and leave it unset).
+    anthropic_workspace_id: str | None = None
     access_token_ttl_days: int = 90
 
 

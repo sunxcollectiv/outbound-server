@@ -587,9 +587,9 @@ class Itinerary(BaseModel):
 
 
 class ReceivedMailRead(ReadModel):
-    """A stored received-email receipt, as the retrieve stage returns it. `raw`
-    holds the full Resend body for one fetched by id; it's null for ones only
-    seen via the list."""
+    """A stored received-email receipt. `raw` holds the full Resend body once
+    fetched by id (null for list-only rows); `user_id`/`extracted`/`extracted_at`
+    are filled by the extract stage (null until then)."""
 
     id: uuid.UUID
     resend_email_id: str
@@ -599,4 +599,8 @@ class ReceivedMailRead(ReadModel):
     message_id: str | None
     received_at: datetime | None
     created_at: datetime
+    user_id: uuid.UUID | None = None
+    extracted_at: datetime | None = None
     raw: dict[str, Any] | None = None
+    extracted: dict[str, Any] | None = None
+    failures: list[dict[str, Any]] = Field(default_factory=list)

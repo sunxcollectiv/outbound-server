@@ -17,10 +17,11 @@ if TYPE_CHECKING:
 
 
 class EmailReceiptStatus(StrEnum):
-    RECEIVED = "received"  # retrieved from Resend and stored; not yet processed
-    PENDING = "pending"  # matched; queued for processing / awaiting a retry (the worklist)
+    RECEIVED = "received"  # retrieved from Resend and stored; not yet extracted
+    PENDING = "pending"  # matched; queued for extraction / awaiting a retry (the worklist)
     PROCESSING = "processing"  # picked up by a worker, in-flight (guards double-pickup)
-    PROCESSED = "processed"  # extracted into trip item(s) — terminal success
+    EXTRACTED = "extracted"  # structured data pulled & stored; awaiting trip-item creation
+    PROCESSED = "processed"  # turned into trip item(s) — terminal, nothing left to do
     REJECTED = "rejected"  # terminal failure: retry cap hit, or a permanent reason
     IGNORED = "ignored"  # sender has no account — terminal, never processed
 
@@ -46,10 +47,12 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     ``status`` tracks where the email got to (see ``EmailReceiptStatus``):
     ``received`` on retrieval; then the extract stage sets ``ignored`` (sender
     isn't a registered user, ``user_id`` null) or runs the pipeline —
-    ``processing`` while in-flight, ``processed`` on success, or back to
+    ``extracted`` once the structured data is pulled and stored, or back to
     ``pending`` on a transient error (each logged to ``failures``) until the 3rd
-    failure tips it to ``rejected``. ``user_id`` is the account the email belongs
-    to — the forwarder, matched on their own address (aliases come later).
+    failure tips it to ``rejected``. ``processed`` is reserved for the final step
+    that turns an ``extracted`` email into trip item(s). ``user_id`` is the
+    account the email belongs to — the forwarder, matched on their own address
+    (aliases come later).
 
     The ``from_address``/``subject``/``message_id``/``received_at`` snapshot comes
     from the list response; ``raw`` holds the full body once the single-email
@@ -75,8 +78,10 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # When Resend received the email (its own created_at), distinct from this
     # row's created_at (when we first saw it).
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Set when a later step marks the email processed; null until then.
-    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the extract stage finished pulling structured data (status became
+    # `extracted`); null until then. A later step will add its own timestamp for
+    # when the email actually becomes trip item(s) (`processed`).
+    extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # One entry per failed processing attempt, e.g.
     # {"at": "<iso>", "step": "categorize", "reason": "..."}. The retry cap reads
     # off its length: 3 failures → status flips to `rejected`.

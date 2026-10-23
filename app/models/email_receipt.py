@@ -72,6 +72,11 @@ class EmailReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
+    # The trip this email was imported into (set when status reaches `processed`);
+    # null until then. The link from a received email to what it produced.
+    trip_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trips.id", ondelete="SET NULL"), index=True
+    )
     from_address: Mapped[str | None] = mapped_column(String(320))
     subject: Mapped[str | None] = mapped_column(String(1024))
     message_id: Mapped[str | None] = mapped_column(String(998))

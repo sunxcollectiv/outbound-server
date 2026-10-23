@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
-from app.models import EmailReceipt
-from app.schemas import ReceivedMailRead
+from app.models import EmailReceipt, EmailReceiptStatus
+from app.schemas import ImportResult, ReceivedMailRead
 from app.services.mail_extraction import (
     MailExtractionNotConfigured,
     MailExtractor,
     get_mail_extractor,
 )
+from app.services.mail_import import import_receipt
 from app.services.mail_processing import EXTRACTABLE_STATUSES, extract_receipt
 from app.services.received_mail import store_received_email, store_received_list
 from app.services.resend import (
@@ -125,6 +126,43 @@ def extract_one(
         _extract(session, receipt, resend, extractor)
         session.commit()
     return receipt
+
+
+# --- import (declared before /{email_id}) ---
+
+
+@router.post("/import", response_model=list[ImportResult])
+def import_recent(
+    _: CurrentUser,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> list[ImportResult]:
+    """Import the backlog: every `extracted` receipt, oldest first, up to `limit`.
+    Places the ones that uniquely match a trip; the rest come back `no_match`/
+    `ambiguous` and stay `extracted` (safe to re-run once more trips exist)."""
+    receipts = session.scalars(
+        select(EmailReceipt)
+        .where(EmailReceipt.status == EmailReceiptStatus.EXTRACTED)
+        .order_by(EmailReceipt.created_at)
+        .limit(limit)
+    )
+    results = [import_receipt(session, r) for r in receipts]
+    session.commit()
+    return results
+
+
+@router.post("/import/{email_id}", response_model=ImportResult)
+def import_one(email_id: str, _: CurrentUser, session: SessionDep) -> ImportResult:
+    """Import one extracted email into its matching trip. A receipt that isn't
+    `extracted` comes back `skipped` (no double-create of an already-processed one)."""
+    receipt = session.scalar(
+        select(EmailReceipt).where(EmailReceipt.resend_email_id == email_id)
+    )
+    if receipt is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Received email not found")
+    result = import_receipt(session, receipt)
+    session.commit()
+    return result
 
 
 # --- retrieve one (the catch-all /{email_id}, declared last) ---

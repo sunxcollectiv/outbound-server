@@ -270,12 +270,14 @@ def list_items(
     return list(session.scalars(query))
 
 
-@router.post("", response_model=TripItemRead, status_code=status.HTTP_201_CREATED)
-def create_item(
-    payload: TripItemCreate, trip: ViewableTrip, user: CurrentUser, session: SessionDep
+def build_trip_item(
+    session: Session, trip: Trip, user: User, payload: TripItemCreate
 ) -> TripItem:
-    if payload.scope is TripItemScope.GROUP and not is_organizer(session, trip, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can add group items")
+    """Build a TripItem (plus its transit legs) from a create payload and add it
+    to the session — shared by the create route and the mail-import stage, so
+    segment building, span roll-up, and time/zone resolution stay in one place.
+    The caller commits. Does not do the group-organizer permission check (that's
+    the route's job); import only ever creates personal items."""
     values = payload.model_dump()
     segments_payload = values.pop("segments", None)
     if payload.kind is TripItemKind.TRANSIT:
@@ -291,6 +293,16 @@ def create_item(
     if item.scope is TripItemScope.PERSONAL:
         item.participants.append(TripItemParticipant(user_id=user.id, status=RsvpStatus.GOING))
     session.add(item)
+    return item
+
+
+@router.post("", response_model=TripItemRead, status_code=status.HTTP_201_CREATED)
+def create_item(
+    payload: TripItemCreate, trip: ViewableTrip, user: CurrentUser, session: SessionDep
+) -> TripItem:
+    if payload.scope is TripItemScope.GROUP and not is_organizer(session, trip, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can add group items")
+    item = build_trip_item(session, trip, user, payload)
     session.commit()
     return _refresh(session, item)
 

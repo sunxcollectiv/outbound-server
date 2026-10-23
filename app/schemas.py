@@ -600,7 +600,21 @@ class ReceivedMailRead(ReadModel):
     received_at: datetime | None
     created_at: datetime
     user_id: uuid.UUID | None = None
+    trip_id: uuid.UUID | None = None
     extracted_at: datetime | None = None
     raw: dict[str, Any] | None = None
     extracted: dict[str, Any] | None = None
     failures: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ImportResult(ReadModel):
+    """The outcome of importing one receipt: `placed` (into `trip_id`,
+    `item_count` items created), `no_match`/`ambiguous` (left `extracted`; for
+    ambiguous, `candidate_trip_ids` lists the overlapping trips), or `skipped`
+    (the receipt wasn't in an importable state)."""
+
+    receipt: ReceivedMailRead
+    outcome: Literal["placed", "no_match", "ambiguous", "skipped"]
+    trip_id: uuid.UUID | None = None
+    item_count: int = 0
+    candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)

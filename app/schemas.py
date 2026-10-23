@@ -607,6 +607,25 @@ class ReceivedMailRead(ReadModel):
     failures: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ImageReceiptRead(ReadModel):
+    """A stored uploaded image's metadata (the bytes themselves aren't returned).
+    `extracted`/`extracted_at`/`trip_id` are filled by the later extract/import
+    stages (null until then)."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    trip_id: uuid.UUID | None = None
+    status: EmailReceiptStatus
+    content_type: str
+    filename: str | None
+    byte_size: int
+    sha256: str
+    created_at: datetime
+    extracted_at: datetime | None = None
+    extracted: dict[str, Any] | None = None
+    failures: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ImportResult(ReadModel):
     """The outcome of importing one receipt: `placed` (into `trip_id`,
     `item_count` items created), `no_match`/`ambiguous` (left `extracted`; for

@@ -1,10 +1,19 @@
 import hashlib
+import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
 from app.schemas import ImageReceiptRead
+from app.services.image_extraction import (
+    ImageExtractionNotConfigured,
+    ImageExtractor,
+    get_image_extractor,
+)
+from app.services.image_processing import EXTRACTABLE_STATUSES, extract_image
 
 # The image pipeline mirrors the mail one (received → extracted → processed), but
 # images arrive by upload instead of being fetched, so the retrieve stage is a
@@ -12,9 +21,20 @@ from app.schemas import ImageReceiptRead
 # mail; when the /extract and /import routes land, declare them before any /{id}.
 router = APIRouter(prefix="/received/images", tags=["received-images"])
 
+ImageExtractorDep = Annotated[ImageExtractor, Depends(get_image_extractor)]
+
 # Screenshots are small; cap the inline-stored bytes so a huge upload can't bloat
 # a row. Object storage is the eventual home.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _extract(session: SessionDep, image: ImageReceipt, extractor: ImageExtractor) -> None:
+    try:
+        extract_image(session, image, extractor=extractor)
+    except ImageExtractionNotConfigured:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Claude (image extraction) is not configured"
+        ) from None
 
 
 @router.post("/upload", response_model=ImageReceiptRead, status_code=status.HTTP_201_CREATED)
@@ -47,4 +67,50 @@ def upload_image(
     session.add(image)
     session.commit()
     session.refresh(image)
+    return image
+
+
+# --- extract ---
+
+
+@router.post("/extract", response_model=list[ImageReceiptRead])
+def extract_recent(
+    _: CurrentUser,
+    session: SessionDep,
+    extractor: ImageExtractorDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> list[ImageReceipt]:
+    """Extract the backlog: run vision on every image still awaiting it (status
+    `received` or `pending`), oldest first, up to `limit`. Terminal rows
+    (processed/rejected) are left alone, so this is safe to re-run."""
+    images = list(
+        session.scalars(
+            select(ImageReceipt)
+            .where(ImageReceipt.status.in_(EXTRACTABLE_STATUSES))
+            .order_by(ImageReceipt.created_at)
+            .limit(limit)
+        )
+    )
+    for image in images:
+        _extract(session, image, extractor)
+    session.commit()
+    return images
+
+
+@router.post("/extract/{image_id}", response_model=ImageReceiptRead)
+def extract_one(
+    image_id: uuid.UUID,
+    _: CurrentUser,
+    session: SessionDep,
+    extractor: ImageExtractorDep,
+    force: Annotated[bool, Query(description="re-extract even a terminal image")] = False,
+) -> ImageReceipt:
+    """Extract one uploaded image by id. By default a terminal image
+    (processed/rejected) is returned unchanged; pass `force=true` to re-run it."""
+    image = session.get(ImageReceipt, image_id)
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Image not found")
+    if force or image.status in EXTRACTABLE_STATUSES:
+        _extract(session, image, extractor)
+        session.commit()
     return image

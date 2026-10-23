@@ -2,8 +2,14 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import func, select
 
-from app.models import Place, TripItem
+from app.models import (
+    Place,
+    TripItem,
+    TripItemParticipant,
+    TripItemTransitSegment,
+)
 
 
 def _place(client, headers, **fields):
@@ -748,3 +754,41 @@ def test_transit_mode_validation(client, make_user, make_trip):
     assert post(kind="transit",
                 segments=[{"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo",
                            "transit_mode": "mixed"}]).status_code == 422
+
+
+def test_deleting_an_item_cascades_its_segments_and_rsvps(client, make_user, make_trip, session):
+    """Deleting an item must take its child rows with it — the transit legs and
+    the RSVPs — not just the item row. Guards the ON DELETE CASCADE / delete-orphan
+    on trip_item_transit_segments and trip_item_participants."""
+    sun, sean = make_user("sun"), make_user("sean")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    client.post(f"/trips/{trip['id']}/members", json={"user_id": sean.user_id}, headers=sun)
+
+    # A plain transit hop auto-builds a single leg from its own ends, and a
+    # member's RSVP adds a participant row — one of each child table.
+    item = client.post(
+        url,
+        json={
+            "kind": "transit",
+            "scope": "group",
+            "title": "Airport shuttle",
+            "starts_at": "2026-04-10T09:00:00",
+            "start_timezone": "Asia/Tokyo",
+        },
+        headers=sun,
+    ).json()
+    item_id = uuid.UUID(item["id"])
+    client.put(f"{url}/{item['id']}/rsvp", json={"status": "going"}, headers=sean)
+
+    def _count(model, column) -> int:
+        session.expire_all()  # see the app's committed rows, not a stale identity map
+        return session.scalar(select(func.count()).select_from(model).where(column == item_id))
+
+    assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 1
+    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 1
+
+    assert client.delete(f"{url}/{item['id']}", headers=sun).status_code == 204
+
+    assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 0
+    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 0

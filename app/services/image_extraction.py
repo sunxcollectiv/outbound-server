@@ -17,6 +17,7 @@ from app.services.extraction import (
     Extraction,
     ExtractionError,
     parse_extraction,
+    reference_date_line,
 )
 
 EXTRACTION_MODEL = "claude-haiku-5-5"
@@ -81,7 +82,10 @@ class ImageExtractor:
                     "data": base64.standard_b64encode(data).decode("ascii"),
                 },
             },
-            {"type": "text", "text": "Extract the travel booking shown in this image."},
+            {
+                "type": "text",
+                "text": f"{reference_date_line()}\n\nExtract the travel booking shown in this image.",
+            },
         ]
         try:
             response = client.messages.create(

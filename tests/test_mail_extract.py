@@ -1,7 +1,16 @@
+from datetime import date
+
 from sqlalchemy import select
 
 from app.models import EmailReceipt, EmailReceiptStatus
+from app.services.extraction import reference_date_line
 from app.services.mail_extraction import Extraction, MailExtractionError
+
+
+def test_reference_date_line_carries_today_and_the_no_year_rule():
+    line = reference_date_line(date(2026, 10, 23))
+    assert "2026-10-23" in line
+    assert "no" in line.lower() and "year" in line.lower()  # states the no-year rule
 
 
 def _email(email_id: str, sender: str, **extra) -> dict:

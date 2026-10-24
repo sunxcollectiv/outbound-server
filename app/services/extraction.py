@@ -9,6 +9,7 @@ the schema must never drift between sources, since both feed the same later
 trip-item step.
 """
 import json
+from datetime import UTC, date, datetime
 from typing import Literal
 
 import anthropic
@@ -118,7 +119,22 @@ has differing leg modes. A leg's confirmation_number is only for a leg ticketed 
 separately from the booking-level one; usually null.
 - Times are naive local wall-clock with NO offset. Give the IANA timezone per \
 end when you can tell it from the airport/city; null if unsure rather than \
-guessing. Use null for any field the source doesn't state."""
+guessing. Use null for any field the source doesn't state.
+- Year: if a date gives a month and day but no year, assume the booking is within \
+the next 12 months — use the soonest occurrence of that month/day on or after the \
+reference date given with the input (this is the ONE case where you supply a \
+value the source doesn't literally state; everything else stays null if unstated)."""
+
+
+def reference_date_line(today: date | None = None) -> str:
+    """The line handed to the model alongside the input so it can resolve a
+    year-less date to the next 12 months. Carried in the user turn (not the cached
+    system prompt) since it changes by the day. `today` is injectable for tests."""
+    today = today or datetime.now(UTC).date()
+    return (
+        f"Reference date (today): {today.isoformat()}. When a booking date has no "
+        "year, use the soonest occurrence of that month/day on or after this date."
+    )
 
 
 def parse_extraction(response: anthropic.types.Message) -> Extraction:

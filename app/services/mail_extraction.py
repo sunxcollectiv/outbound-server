@@ -24,6 +24,7 @@ from app.services.extraction import (  # noqa: F401 — re-exported for callers/
     Extraction,
     ExtractionError,
     parse_extraction,
+    reference_date_line,
 )
 
 EXTRACTION_MODEL = "claude-haiku-5-5"
@@ -72,7 +73,10 @@ class MailExtractor:
         if self._client is None and not self._api_key:
             raise MailExtractionNotConfigured("ANTHROPIC_API_KEY is not set")
         client = self._client or self._build_client()
-        content = f"Subject: {subject or '(no subject)'}\n\n{text_body or '(no body)'}"
+        content = (
+            f"{reference_date_line()}\n\n"
+            f"Subject: {subject or '(no subject)'}\n\n{text_body or '(no body)'}"
+        )
         try:
             response = client.messages.create(
                 model=self._model,

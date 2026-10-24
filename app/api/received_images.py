@@ -7,13 +7,14 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
-from app.schemas import ImageReceiptRead
+from app.schemas import ImageImportResult, ImageReceiptRead
 from app.services.image_extraction import (
     ImageExtractionNotConfigured,
     ImageExtractor,
     get_image_extractor,
 )
 from app.services.image_processing import EXTRACTABLE_STATUSES, extract_image
+from app.services.receipt_import import ImportOutcome, import_receipt
 
 # The image pipeline mirrors the mail one (received → extracted → processed), but
 # images arrive by upload instead of being fetched, so the retrieve stage is a
@@ -114,3 +115,38 @@ def extract_one(
         _extract(session, image, extractor)
         session.commit()
     return image
+
+
+# --- import ---
+
+
+@router.post("/import", response_model=list[ImageImportResult])
+def import_recent(
+    _: CurrentUser,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+) -> list[ImportOutcome]:
+    """Import the backlog: every `extracted` image, oldest first, up to `limit`.
+    Places the ones that uniquely match a trip; the rest come back `no_match`/
+    `ambiguous` and stay `extracted` (safe to re-run once more trips exist)."""
+    images = session.scalars(
+        select(ImageReceipt)
+        .where(ImageReceipt.status == EmailReceiptStatus.EXTRACTED)
+        .order_by(ImageReceipt.created_at)
+        .limit(limit)
+    )
+    results = [import_receipt(session, image) for image in images]
+    session.commit()
+    return results
+
+
+@router.post("/import/{image_id}", response_model=ImageImportResult)
+def import_one(image_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> ImportOutcome:
+    """Import one extracted image into its matching trip. An image that isn't
+    `extracted` comes back `skipped` (no double-create of an already-processed one)."""
+    image = session.get(ImageReceipt, image_id)
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Image not found")
+    result = import_receipt(session, image)
+    session.commit()
+    return result

@@ -3,10 +3,26 @@ import hashlib
 from sqlalchemy import func, select
 
 from app.models import EmailReceiptStatus, ImageReceipt
+from app.services.extraction import ExtractedItem, ExtractedPlace, ExtractedSegment, Extraction
 from app.services.image_extraction import ImageExtractionError
-from app.services.mail_extraction import Extraction
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake image bytes"
+
+# A flight overlapping JAPAN_TRIP (conftest make_trip default: 2026-04-09 .. 04-15).
+FLIGHT = Extraction(
+    category="flight", confidence=0.95, summary="LAX to Tokyo",
+    items=[ExtractedItem(
+        kind="transit", transit_mode="flight", title="Flight LAX to Tokyo",
+        confirmation_number="IMG123",
+        segments=[ExtractedSegment(
+            transit_mode="flight", carrier="ANA", flight_number="NH105",
+            start_local="2026-04-09T11:00", start_timezone="America/Los_Angeles",
+            end_local="2026-04-10T15:00", end_timezone="Asia/Tokyo",
+            origin=ExtractedPlace(name="LAX", iata_code="LAX", city="Los Angeles"),
+            destination=ExtractedPlace(name="HND", iata_code="HND", city="Tokyo"),
+        )],
+    )],
+)
 
 
 def _count(session) -> int:
@@ -22,6 +38,15 @@ def _upload(client, headers, image_id="ticket.png", data=PNG, content_type="imag
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
+
+
+def _extract_image(client, headers, image_extractor, extraction, filename="ticket.png") -> str:
+    """Drive an image to `extracted` via the upload + extract endpoints."""
+    image_extractor.result = extraction
+    image_id = _upload(client, headers, filename)
+    r = client.post(f"/received/images/extract/{image_id}", headers=headers)
+    assert r.status_code == 200 and r.json()["status"] == "extracted", r.text
+    return image_id
 
 
 def test_upload_requires_auth(client):
@@ -166,3 +191,73 @@ def test_extract_unknown_id_is_404(client, make_user):
         .status_code
         == 404
     )
+
+
+# --- import ---
+
+NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def test_import_endpoints_require_auth(client):
+    assert client.post("/received/images/import").status_code == 401
+    assert client.post(f"/received/images/import/{NIL_UUID}").status_code == 401
+
+
+def test_import_places_flight_into_matching_trip(
+    client, make_user, make_trip, image_extractor, session
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)  # 2026-04-09 .. 04-15, overlaps the flight
+    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+
+    body = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    assert body["outcome"] == "placed"
+    assert body["trip_id"] == trip["id"]
+    assert body["item_count"] == 1
+    assert body["receipt"]["status"] == "processed"
+    assert body["receipt"]["trip_id"] == trip["id"]
+
+    items = client.get(f"/trips/{trip['id']}/items", headers=sun).json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["kind"] == "transit" and item["transit_mode"] == "flight"
+    assert item["confirmation_number"] == "IMG123"
+    assert item["place"]["name"] == "LAX" and item["end_place"]["name"] == "HND"
+
+    row = session.get(ImageReceipt, image_id)
+    assert row.status is EmailReceiptStatus.PROCESSED and row.trip_id is not None
+
+
+def test_import_no_matching_trip_stays_extracted(client, make_user, image_extractor, session):
+    sun = make_user("sun")  # no trips at all
+    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+
+    body = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    assert body["outcome"] == "no_match"
+    assert session.get(ImageReceipt, image_id).status is EmailReceiptStatus.EXTRACTED
+
+
+def test_reimport_is_a_noop(client, make_user, make_trip, image_extractor):
+    sun = make_user("sun")
+    make_trip(sun)
+    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+
+    assert client.post(f"/received/images/import/{image_id}", headers=sun).json()["outcome"] == "placed"
+    again = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    assert again["outcome"] == "skipped"  # already processed, not re-created
+
+
+def test_import_batch_places_only_extracted(client, make_user, make_trip, image_extractor):
+    sun = make_user("sun")
+    make_trip(sun)
+    _extract_image(client, sun, image_extractor, FLIGHT, "a.png")
+    # An uploaded-but-not-extracted image is skipped by the import backlog.
+    _upload(client, sun, "b.png")
+
+    outcomes = [r["outcome"] for r in client.post("/received/images/import", headers=sun).json()]
+    assert outcomes == ["placed"]  # only the single `extracted` image was imported
+
+
+def test_import_unknown_id_is_404(client, make_user):
+    sun = make_user("sun")
+    assert client.post(f"/received/images/import/{NIL_UUID}", headers=sun).status_code == 404

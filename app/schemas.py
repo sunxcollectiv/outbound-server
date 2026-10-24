@@ -637,3 +637,14 @@ class ImportResult(ReadModel):
     trip_id: uuid.UUID | None = None
     item_count: int = 0
     candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class ImageImportResult(ReadModel):
+    """The outcome of importing one uploaded image — same shape as `ImportResult`,
+    but `receipt` is the image's metadata rather than an email's."""
+
+    receipt: ImageReceiptRead
+    outcome: Literal["placed", "no_match", "ambiguous", "skipped"]
+    trip_id: uuid.UUID | None = None
+    item_count: int = 0
+    candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)

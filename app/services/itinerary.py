@@ -29,6 +29,17 @@ def _layover_minutes(arriving: TripItemTransitSegment, departing: TripItemTransi
     return max(int(delta.total_seconds() // 60), 0)
 
 
+def _layover_timezone(
+    arriving: TripItemTransitSegment, departing: TripItemTransitSegment
+) -> str | None:
+    """The layover airport's IANA zone, taken from the segment zones rather than a
+    place: the arriving leg's end zone, but only when the departing leg's start
+    zone agrees (same airport → same zone). Null if they differ or either is
+    unset — we'd rather say nothing than pick a side on inconsistent data."""
+    tz = arriving.end_timezone
+    return tz if tz is not None and tz == departing.start_timezone else None
+
+
 def _transit_entries(
     read: TripItemRead, item: TripItem
 ) -> list[tuple[datetime, ItineraryEntry]]:
@@ -58,6 +69,7 @@ def _transit_entries(
                         else None
                     ),
                     layover_minutes=_layover_minutes(arriving, departing),
+                    layover_timezone=_layover_timezone(arriving, departing),
                 ),
             )
         )

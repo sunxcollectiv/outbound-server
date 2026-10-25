@@ -619,6 +619,8 @@ def test_multi_leg_transit_shows_layovers(client, make_user, make_trip):
     assert layover["phase"] == "layover"
     assert layover["layover_place"]["name"] == "HND"
     assert layover["layover_minutes"] == 240
+    # The layover zone comes from the matching segment zones (land + take off at HND).
+    assert layover["layover_timezone"] == "Asia/Tokyo"
     assert arrival["phase"] == "arrival"
     assert layover["item"]["id"] == arrival["item"]["id"] == flight["id"]
 
@@ -638,6 +640,55 @@ def test_multi_leg_transit_shows_layovers(client, make_user, make_trip):
     assert patched.json()["starts_at"] == "2026-04-08T22:00:00"
     again = {d["date"]: d for d in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
     assert [e["phase"] for e in again["2026-04-10"]["items"]] == ["arrival"]  # no layover now
+
+
+def test_layover_timezone_comes_from_segments_without_places(client, make_user, make_trip):
+    """Even with no resolved place at the stop (the mail/image-import case), the
+    layover carries its zone when the arriving and departing legs agree on it."""
+    sun = make_user("sun")
+    url = f"/trips/{make_trip(sun)['id']}"
+    created = client.post(
+        f"{url}/items",
+        json={
+            "kind": "transit", "scope": "personal", "title": "LAX to Osaka via Tokyo",
+            "segments": [
+                {"starts_at": "2026-04-10T07:00:00", "start_timezone": "America/Los_Angeles",
+                 "ends_at": "2026-04-11T11:00:00", "end_timezone": "Asia/Tokyo"},
+                {"starts_at": "2026-04-11T14:00:00", "start_timezone": "Asia/Tokyo",
+                 "ends_at": "2026-04-11T15:30:00", "end_timezone": "Asia/Tokyo"},
+            ],
+        },
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+    days = {d["date"]: d for d in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
+    layover = next(e for d in days.values() for e in d["items"] if e["phase"] == "layover")
+    assert layover["layover_place"] is None             # nothing resolved at the stop
+    assert layover["layover_timezone"] == "Asia/Tokyo"  # ...the zone still comes through
+
+
+def test_layover_timezone_null_when_legs_disagree(client, make_user, make_trip):
+    """If the arriving end zone and the next departure zone don't match, we don't
+    guess — the layover zone is null."""
+    sun = make_user("sun")
+    url = f"/trips/{make_trip(sun)['id']}"
+    created = client.post(
+        f"{url}/items",
+        json={
+            "kind": "transit", "scope": "personal", "title": "Mismatched zones",
+            "segments": [
+                {"starts_at": "2026-04-10T07:00:00", "start_timezone": "America/Los_Angeles",
+                 "ends_at": "2026-04-11T11:00:00", "end_timezone": "Asia/Tokyo"},
+                {"starts_at": "2026-04-11T14:00:00", "start_timezone": "Asia/Seoul",
+                 "ends_at": "2026-04-11T15:30:00", "end_timezone": "Asia/Seoul"},
+            ],
+        },
+        headers=sun,
+    )
+    assert created.status_code == 201, created.text
+    days = {d["date"]: d for d in client.get(f"{url}/itinerary", headers=sun).json()["days"]}
+    layover = next(e for d in days.values() for e in d["items"] if e["phase"] == "layover")
+    assert layover["layover_timezone"] is None
 
 
 def test_transit_segment_validation(client, make_user, make_trip):

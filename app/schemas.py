@@ -564,6 +564,12 @@ class ItineraryEntry(BaseModel):
     # Set only on a `layover` entry: where you wait and for how many minutes.
     layover_place: PlaceRead | None = None
     layover_minutes: int | None = None
+    # The layover's IANA zone — the arriving leg's end zone when it agrees with the
+    # departing leg's start zone (you land and take off at the same airport). Comes
+    # straight from the segment zones, so it's available even when the layover has
+    # no resolved place (the mail/image-import case). Null if the two disagree or
+    # either is unset.
+    layover_timezone: str | None = None
 
 
 class ItineraryDay(BaseModel):

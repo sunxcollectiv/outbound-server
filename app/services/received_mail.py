@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from app.models import EmailReceipt, EmailReceiptStatus
 from app.services.mail_processing import InboundEmail
-from app.services.resend import ResendClient
 
 
 def _upsert_received(
@@ -58,29 +57,6 @@ def store_received_email(session: Session, email: dict[str, Any]) -> EmailReceip
     if inbound is None:
         return None
     return _upsert_received(session, inbound, raw=email)
-
-
-def fetch_recent(
-    client: ResendClient, count: int, *, page_size: int = 100
-) -> list[dict[str, Any]]:
-    """The most recent `count` emails Resend has received, newest first. Resend
-    caps a page at 100 (and has no time filter), so we page back by id cursor until
-    we've gathered `count` of them or run out."""
-    collected: list[dict[str, Any]] = []
-    before: str | None = None
-    while len(collected) < count:
-        listing = client.list_received_emails(
-            limit=min(page_size, count - len(collected)), before=before
-        )
-        batch = listing.get("data") or []
-        if not batch:
-            break
-        collected.extend(item for item in batch if isinstance(item, dict))
-        last_id = batch[-1].get("id") if isinstance(batch[-1], dict) else None
-        if not listing.get("has_more") or not last_id:
-            break
-        before = last_id
-    return collected[:count]
 
 
 def store_received_list(session: Session, emails: list[Any]) -> list[EmailReceipt]:

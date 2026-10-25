@@ -13,11 +13,7 @@ from app.services.mail_extraction import (
 )
 from app.services.mail_processing import EXTRACTABLE_STATUSES, extract_receipt
 from app.services.receipt_import import ImportOutcome, import_receipt, process_receipt
-from app.services.received_mail import (
-    fetch_recent,
-    store_received_email,
-    store_received_list,
-)
+from app.services.received_mail import store_received_email, store_received_list
 from app.services.resend import (
     ResendClient,
     ResendError,
@@ -178,18 +174,19 @@ def process_new_mail(
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
-    count: Annotated[
-        int, Query(ge=1, le=500, description="how many of the most recent emails to pull from Resend")
-    ] = 100,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    before: Annotated[str | None, Query(description="email-id cursor: older than this id")] = None,
+    after: Annotated[str | None, Query(description="email-id cursor: newer than this id")] = None,
 ) -> list[ImportOutcome]:
-    """Pull the most recent `count` emails from Resend and run each one all the way
-    through the pipeline — retrieve, extract, and import into its matching trip.
-    Returns one outcome per receipt processed in this pass. Idempotent: mail
-    already seen and finished is skipped, so re-running is safe. (Resend has no time
-    filter, so this is a count, not a window; it's an admin/manual path — the
-    primary ingress will be webhooks.)"""
-    emails = _resend(lambda: fetch_recent(resend, count))
-    receipts = store_received_list(session, emails)
+    """Pull a page of recent emails from Resend and run each one all the way through
+    the pipeline — retrieve, extract, and import into its matching trip. Paging
+    matches the retrieve route (`limit` bounds the page; `before`/`after` page
+    further back by email id — Resend has no time filter). Returns one outcome per
+    receipt processed in this pass. Idempotent: mail already seen and finished is
+    skipped, so re-running is safe. This is an admin/manual path — the primary mail
+    ingress will be webhooks."""
+    listing = _resend(lambda: resend.list_received_emails(limit=limit, before=before, after=after))
+    receipts = store_received_list(session, listing.get("data") or [])
     results = [
         process_receipt(session, r, extract=lambda r=r: _extract(session, r, resend, extractor))
         for r in receipts

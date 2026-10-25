@@ -14,7 +14,7 @@ from app.services.image_extraction import (
     get_image_extractor,
 )
 from app.services.image_processing import EXTRACTABLE_STATUSES, extract_image
-from app.services.receipt_import import ImportOutcome, import_receipt
+from app.services.receipt_import import ImportOutcome, import_receipt, process_receipt
 
 # The image pipeline mirrors the mail one (received → extracted → processed), but
 # images arrive by upload instead of being fetched, so the retrieve stage is a
@@ -38,13 +38,9 @@ def _extract(session: SessionDep, image: ImageReceipt, extractor: ImageExtractor
         ) from None
 
 
-@router.post("/upload", response_model=ImageReceiptRead, status_code=status.HTTP_201_CREATED)
-def upload_image(
-    user: CurrentUser, session: SessionDep, file: UploadFile = File(...)
-) -> ImageReceipt:
-    """Upload one image (e.g. a booking screenshot) into the received-item
-    pipeline. Stores the bytes and records it as `received`, owned by the
-    uploader; extraction happens in a later call."""
+def _store_upload(session: SessionDep, user_id: uuid.UUID, file: UploadFile) -> ImageReceipt:
+    """Validate an upload and persist it as a `received` image owned by the
+    uploader. Shared by /upload and /process. Does NOT commit."""
     data = file.file.read()
     if not data:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "The upload is empty")
@@ -55,9 +51,8 @@ def upload_image(
         raise HTTPException(
             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Only image uploads are accepted"
         )
-
     image = ImageReceipt(
-        user_id=user.id,
+        user_id=user_id,
         status=EmailReceiptStatus.RECEIVED,
         data=data,
         content_type=content_type,
@@ -66,6 +61,17 @@ def upload_image(
         sha256=hashlib.sha256(data).hexdigest(),
     )
     session.add(image)
+    return image
+
+
+@router.post("/upload", response_model=ImageReceiptRead, status_code=status.HTTP_201_CREATED)
+def upload_image(
+    user: CurrentUser, session: SessionDep, file: UploadFile = File(...)
+) -> ImageReceipt:
+    """Upload one image (e.g. a booking screenshot) into the received-item
+    pipeline. Stores the bytes and records it as `received`, owned by the
+    uploader; extraction happens in a later call."""
+    image = _store_upload(session, user.id, file)
     session.commit()
     session.refresh(image)
     return image
@@ -148,5 +154,31 @@ def import_one(image_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Impo
     if image is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Image not found")
     result = import_receipt(session, image)
+    session.commit()
+    return result
+
+
+# --- process (upload + extract + import in one call) ---
+
+
+@router.post(
+    "/process", response_model=ImageImportResult, status_code=status.HTTP_201_CREATED
+)
+def process_upload(
+    user: CurrentUser,
+    session: SessionDep,
+    extractor: ImageExtractorDep,
+    file: UploadFile = File(...),
+) -> ImportOutcome:
+    """Upload an image and run the whole pipeline in one call — store, extract
+    (Claude vision), and import into the matching trip. Returns the final outcome
+    (`placed`/`no_match`/`ambiguous`, or `skipped` with a `rejected` receipt when
+    it isn't a confident booking) so the client can update its progress pill and
+    refresh the itinerary in one round-trip."""
+    image = _store_upload(session, user.id, file)
+    session.flush()  # assign the id before we process
+    result = process_receipt(
+        session, image, extract=lambda: _extract(session, image, extractor)
+    )
     session.commit()
     return result

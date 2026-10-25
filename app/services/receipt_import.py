@@ -15,6 +15,7 @@ new trip is out of scope.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Literal
@@ -38,6 +39,10 @@ Receipt = EmailReceipt | ImageReceipt
 PlaceCache = dict  # (norm_name, norm_address) -> place id, per import call
 
 Outcome = Literal["placed", "no_match", "ambiguous", "skipped"]
+
+# The statuses the extract step will (re)run on; terminal ones are left alone, so
+# process is safe to re-run. Mirrors the per-source EXTRACTABLE_STATUSES.
+EXTRACTABLE_STATUSES = (EmailReceiptStatus.RECEIVED, EmailReceiptStatus.PENDING)
 
 
 @dataclass
@@ -170,3 +175,20 @@ def import_receipt(session: Session, receipt: Receipt) -> ImportOutcome:
     receipt.status = EmailReceiptStatus.PROCESSED
     receipt.trip_id = trip.id
     return ImportOutcome(receipt, "placed", trip_id=trip.id, item_count=count)
+
+
+def process_receipt(
+    session: Session, receipt: Receipt, *, extract: Callable[[], None]
+) -> ImportOutcome:
+    """Run the full pipeline on one receipt in a single pass: extract (if it's
+    still awaiting it), then import. `extract` is the source-specific extract
+    step as a no-arg callable (mail needs Resend + its extractor, image just its
+    extractor), run in place on the receipt. Import only fires when extract left
+    the receipt `extracted`, so a non-booking/low-confidence/ignored/errored
+    receipt comes back with that status and a `skipped` outcome. Safe to re-run:
+    a terminal receipt skips extract, and import no-ops once it's `processed`.
+    The caller commits; the returned `ImportOutcome` carries the final state the
+    UI needs (receipt status + placement outcome)."""
+    if receipt.status in EXTRACTABLE_STATUSES:
+        extract()
+    return import_receipt(session, receipt)

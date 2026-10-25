@@ -261,3 +261,46 @@ def test_import_batch_places_only_extracted(client, make_user, make_trip, image_
 def test_import_unknown_id_is_404(client, make_user):
     sun = make_user("sun")
     assert client.post(f"/received/images/import/{NIL_UUID}", headers=sun).status_code == 404
+
+
+# --- process (upload + extract + import in one call) ---
+
+
+def test_process_requires_auth(client):
+    assert client.post(
+        "/received/images/process", files={"file": ("x.png", PNG, "image/png")}
+    ).status_code == 401
+
+
+def test_process_uploads_extracts_and_imports(client, make_user, make_trip, image_extractor):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    image_extractor.result = FLIGHT
+    resp = client.post(
+        "/received/images/process",
+        files={"file": ("ticket.png", PNG, "image/png")},
+        headers=sun,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["outcome"] == "placed"
+    assert body["trip_id"] == trip["id"]
+    assert body["item_count"] == 1
+    assert body["receipt"]["status"] == "processed"
+    assert len(image_extractor.calls) == 1  # one upload → one vision call
+    assert len(client.get(f"/trips/{trip['id']}/items", headers=sun).json()) == 1
+
+
+def test_process_not_a_booking_never_imports(client, make_user, make_trip, image_extractor):
+    sun = make_user("sun")
+    make_trip(sun)
+    image_extractor.result = Extraction(
+        category="not_a_booking", confidence=0.99, summary="A meme", items=[]
+    )
+    body = client.post(
+        "/received/images/process",
+        files={"file": ("x.png", PNG, "image/png")},
+        headers=sun,
+    ).json()
+    assert body["receipt"]["status"] == "rejected"
+    assert body["outcome"] == "skipped"  # extract rejected it; import never ran

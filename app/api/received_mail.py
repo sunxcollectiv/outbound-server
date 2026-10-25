@@ -11,9 +11,13 @@ from app.services.mail_extraction import (
     MailExtractor,
     get_mail_extractor,
 )
-from app.services.mail_import import import_receipt
 from app.services.mail_processing import EXTRACTABLE_STATUSES, extract_receipt
-from app.services.received_mail import store_received_email, store_received_list
+from app.services.receipt_import import ImportOutcome, import_receipt, process_receipt
+from app.services.received_mail import (
+    fetch_recent,
+    store_received_email,
+    store_received_list,
+)
 from app.services.resend import (
     ResendClient,
     ResendError,
@@ -163,6 +167,36 @@ def import_one(email_id: str, _: CurrentUser, session: SessionDep) -> ImportResu
     result = import_receipt(session, receipt)
     session.commit()
     return result
+
+
+# --- process (pull new mail from Resend + extract + import; before /{email_id}) ---
+
+
+@router.post("/process", response_model=list[ImportResult])
+def process_new_mail(
+    _: CurrentUser,
+    session: SessionDep,
+    resend: ResendDep,
+    extractor: MailExtractorDep,
+    count: Annotated[
+        int, Query(ge=1, le=500, description="how many of the most recent emails to pull from Resend")
+    ] = 100,
+) -> list[ImportOutcome]:
+    """Pull the most recent `count` emails from Resend and run each one all the way
+    through the pipeline — retrieve, extract, and import into its matching trip.
+    Returns one outcome per receipt processed in this pass. Idempotent: mail
+    already seen and finished is skipped, so re-running is safe. (Resend has no time
+    filter, so this is a count, not a window; it's an admin/manual path — the
+    primary ingress will be webhooks.)"""
+    emails = _resend(lambda: fetch_recent(resend, count))
+    receipts = store_received_list(session, emails)
+    results = [
+        process_receipt(session, r, extract=lambda r=r: _extract(session, r, resend, extractor))
+        for r in receipts
+        if r.status in EXTRACTABLE_STATUSES
+    ]
+    session.commit()
+    return results
 
 
 # --- retrieve one (the catch-all /{email_id}, declared last) ---

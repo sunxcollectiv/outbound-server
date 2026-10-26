@@ -235,3 +235,46 @@ def test_import_does_not_merge_on_name_alone(client, make_user, make_trip, resen
 def test_import_unknown_id_is_404(client, make_user):
     sun = make_user("sun")
     assert client.post("/received/mail/import/nope", headers=sun).status_code == 404
+
+
+# --- process (pull a page of recent mail from Resend + extract + import) ---
+
+
+def test_process_requires_auth(client):
+    assert client.post("/received/mail/process").status_code == 401
+
+
+def test_process_pulls_and_runs_recent_mail(client, make_user, make_trip, resend, mail_extractor):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    resend.received = [_email("re_1", "sun@example.com")]
+    mail_extractor.result = FLIGHT
+
+    results = client.post("/received/mail/process", headers=sun).json()
+    assert len(results) == 1
+    assert results[0]["outcome"] == "placed"
+    assert results[0]["trip_id"] == trip["id"]
+    assert results[0]["receipt"]["status"] == "processed"
+
+
+def test_process_limit_bounds_the_page(client, make_user, make_trip, resend, mail_extractor):
+    sun = make_user("sun")
+    make_trip(sun)
+    resend.received = [_email(f"re_{i}", "sun@example.com") for i in range(3)]
+    mail_extractor.result = FLIGHT
+
+    results = client.post("/received/mail/process?limit=2", headers=sun).json()
+    assert len(results) == 2  # only the first 2 of the page were pulled
+    assert len(mail_extractor.calls) == 2
+
+
+def test_process_is_idempotent(client, make_user, make_trip, resend, mail_extractor):
+    sun = make_user("sun")
+    make_trip(sun)
+    resend.received = [_email("re_x", "sun@example.com")]
+    mail_extractor.result = FLIGHT
+
+    assert client.post("/received/mail/process", headers=sun).json()[0]["outcome"] == "placed"
+    # Re-running pulls the same mail, but it's already processed → nothing to do.
+    assert client.post("/received/mail/process", headers=sun).json() == []
+    assert len(mail_extractor.calls) == 1

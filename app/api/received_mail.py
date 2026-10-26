@@ -11,8 +11,8 @@ from app.services.mail_extraction import (
     MailExtractor,
     get_mail_extractor,
 )
-from app.services.mail_import import import_receipt
 from app.services.mail_processing import EXTRACTABLE_STATUSES, extract_receipt
+from app.services.receipt_import import ImportOutcome, import_receipt, process_receipt
 from app.services.received_mail import store_received_email, store_received_list
 from app.services.resend import (
     ResendClient,
@@ -163,6 +163,37 @@ def import_one(email_id: str, _: CurrentUser, session: SessionDep) -> ImportResu
     result = import_receipt(session, receipt)
     session.commit()
     return result
+
+
+# --- process (pull new mail from Resend + extract + import; before /{email_id}) ---
+
+
+@router.post("/process", response_model=list[ImportResult])
+def process_new_mail(
+    _: CurrentUser,
+    session: SessionDep,
+    resend: ResendDep,
+    extractor: MailExtractorDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    before: Annotated[str | None, Query(description="email-id cursor: older than this id")] = None,
+    after: Annotated[str | None, Query(description="email-id cursor: newer than this id")] = None,
+) -> list[ImportOutcome]:
+    """Pull a page of recent emails from Resend and run each one all the way through
+    the pipeline — retrieve, extract, and import into its matching trip. Paging
+    matches the retrieve route (`limit` bounds the page; `before`/`after` page
+    further back by email id — Resend has no time filter). Returns one outcome per
+    receipt processed in this pass. Idempotent: mail already seen and finished is
+    skipped, so re-running is safe. This is an admin/manual path — the primary mail
+    ingress will be webhooks."""
+    listing = _resend(lambda: resend.list_received_emails(limit=limit, before=before, after=after))
+    receipts = store_received_list(session, listing.get("data") or [])
+    results = [
+        process_receipt(session, r, extract=lambda r=r: _extract(session, r, resend, extractor))
+        for r in receipts
+        if r.status in EXTRACTABLE_STATUSES
+    ]
+    session.commit()
+    return results
 
 
 # --- retrieve one (the catch-all /{email_id}, declared last) ---

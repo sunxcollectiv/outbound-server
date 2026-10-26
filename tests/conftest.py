@@ -16,6 +16,7 @@ from app.services.google_places import (
     GooglePlacesClient,
     get_google_places_client,
 )
+from app.services.image_extraction import ImageExtractor, get_image_extractor
 from app.services.mail_extraction import (
     ExtractedItem,
     Extraction,
@@ -161,6 +162,34 @@ def mail_extractor() -> FakeMailExtractor:
     return FakeMailExtractor()
 
 
+class FakeImageExtractor(ImageExtractor):
+    """Returns a canned Extraction (a confident flight by default) and records its
+    calls. Set `result` to change what it returns or `error` to make it raise, so
+    tests drive the extracted/rejected/failure branches without the real Claude
+    vision call."""
+
+    def __init__(self) -> None:
+        self.result = Extraction(
+            category="flight",
+            confidence=0.95,
+            summary="Flight to Tokyo",
+            items=[ExtractedItem(kind="transit", transit_mode="flight", title="Flight to Tokyo")],
+        )
+        self.error: Exception | None = None
+        self.calls: list[tuple[bytes, str]] = []
+
+    def extract(self, *, data: bytes, content_type: str) -> Extraction:
+        self.calls.append((data, content_type))
+        if self.error:
+            raise self.error
+        return self.result
+
+
+@pytest.fixture
+def image_extractor() -> FakeImageExtractor:
+    return FakeImageExtractor()
+
+
 @pytest.fixture
 def client(
     session: Session,
@@ -168,12 +197,14 @@ def client(
     unsplash: FakeUnsplash,
     resend: FakeResend,
     mail_extractor: FakeMailExtractor,
+    image_extractor: FakeImageExtractor,
 ) -> Iterator[TestClient]:
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_google_places_client] = lambda: google_places
     app.dependency_overrides[get_unsplash_client] = lambda: unsplash
     app.dependency_overrides[get_resend_client] = lambda: resend
     app.dependency_overrides[get_mail_extractor] = lambda: mail_extractor
+    app.dependency_overrides[get_image_extractor] = lambda: image_extractor
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

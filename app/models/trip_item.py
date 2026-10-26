@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db import Base
 from app.models.base import LocalDateTime, TimestampMixin, UUIDPrimaryKeyMixin, str_enum
 from app.models.place import Place
-from app.models.trip import Trip
+from app.models.trip import Trip, TripMember
 from app.models.user import User
 from app.services.timekeeping import to_utc
 
@@ -287,11 +287,13 @@ register_instant_sync(TripItem, TripItemTransitSegment)
 
 
 class TripItemParticipant(TimestampMixin, Base):
-    """Who's in on an item.
+    """Who's in on an item, by trip member, so the organizer can record an
+    answer for someone who has no account.
 
     On a group item a row is an RSVP (no row = hasn't answered). On a personal
     item the rows are the people attending: the creator is added as going when
     the item is made, and others can add themselves only if it's open.
+    Removing someone from the trip takes their rows with them.
     """
 
     __tablename__ = "trip_item_participants"
@@ -299,10 +301,10 @@ class TripItemParticipant(TimestampMixin, Base):
     item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_members.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     status: Mapped[RsvpStatus] = mapped_column(str_enum(RsvpStatus, "rsvp_status"))
 
     item: Mapped[TripItem] = relationship(back_populates="participants")
-    user: Mapped[User] = relationship()
+    member: Mapped[TripMember] = relationship()

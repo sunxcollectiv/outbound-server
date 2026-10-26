@@ -379,12 +379,12 @@ def test_items_are_scoped_to_their_trip(client, make_user, make_trip):
     assert client.get(f"/trips/{other['id']}/items", headers=sun).json() == []
 
 
-def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
+def test_itinerary_groups_items_into_local_days(client, make_user, make_trip, add_member):
     """Day 1 of the design: land, check in, Sean arrives, dinner."""
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
+    add_member(trip["id"], sun, sean)
 
     def add(headers=sun, scope="group", start_timezone="Asia/Tokyo", **item):
         payload = {"scope": scope, "start_timezone": start_timezone, **item}
@@ -441,7 +441,7 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip):
     arrival = days[0]["items"][2]["item"]
     assert arrival["created_by"]["email"] == "sean@example.com"
     assert arrival["visibility"] == "shared"
-    assert [(p["user"]["email"], p["status"]) for p in arrival["participants"]] == [
+    assert [(p["member"]["email"], p["status"]) for p in arrival["participants"]] == [
         ("sean@example.com", "going")
     ]
     assert [entry["item"]["title"] for entry in days[1]["items"]] == ["Golden Gai", "Jet-lag nap"]
@@ -807,14 +807,16 @@ def test_transit_mode_validation(client, make_user, make_trip):
                            "transit_mode": "mixed"}]).status_code == 422
 
 
-def test_deleting_an_item_cascades_its_segments_and_rsvps(client, make_user, make_trip, session):
+def test_deleting_an_item_cascades_its_segments_and_rsvps(
+    client, make_user, make_trip, add_member, session
+):
     """Deleting an item must take its child rows with it — the transit legs and
     the RSVPs — not just the item row. Guards the ON DELETE CASCADE / delete-orphan
     on trip_item_transit_segments and trip_item_participants."""
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    client.post(f"/trips/{trip['id']}/members", json={"user_id": sean.user_id}, headers=sun)
+    add_member(trip["id"], sun, sean)
 
     # A plain transit hop auto-builds a single leg from its own ends, and a
     # member's RSVP adds a participant row — one of each child table.

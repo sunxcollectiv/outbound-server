@@ -58,6 +58,13 @@ def _trip_role(session: Session, trip: Trip, user: User) -> TripRole | None:
     )
 
 
+def member_for(session: Session, trip: Trip, user_id: uuid.UUID) -> TripMember | None:
+    """The member row linked to this account on this trip, if any."""
+    return session.scalar(
+        select(TripMember).where(TripMember.trip_id == trip.id, TripMember.user_id == user_id)
+    )
+
+
 def is_organizer(session: Session, trip: Trip, user: User) -> bool:
     """Roles live on trip_members for everyone, the owner included."""
     return _trip_role(session, trip, user) is TripRole.ORGANIZER

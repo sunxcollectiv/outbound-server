@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import CurrentUser, SessionDep, ViewableTrip, is_organizer
+from app.api.deps import CurrentUser, SessionDep, ViewableTrip, is_organizer, member_for
 from app.models import (
     Place,
     RsvpStatus,
@@ -18,9 +18,11 @@ from app.models import (
     TripItemScope,
     TripItemTransitSegment,
     TripItemVisibility,
+    TripMember,
     User,
 )
 from app.schemas import (
+    ParticipantSet,
     RsvpUpdate,
     TripItemCreate,
     TripItemRead,
@@ -41,7 +43,11 @@ def _unprocessable(detail: str) -> HTTPException:
 def visible_items(trip: Trip, user: User) -> Select[tuple[TripItem]]:
     """Items on the trip that `user` may see: every group item, their own
     items, anything shared or open, and anything they're a participant on."""
-    joined = select(TripItemParticipant.item_id).where(TripItemParticipant.user_id == user.id)
+    joined = (
+        select(TripItemParticipant.item_id)
+        .join(TripMember, TripMember.id == TripItemParticipant.member_id)
+        .where(TripMember.user_id == user.id)
+    )
     return (
         select(TripItem)
         .where(TripItem.trip_id == trip.id)
@@ -62,7 +68,9 @@ def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]
         selectinload(TripItem.place).selectinload(Place.area),
         selectinload(TripItem.end_place).selectinload(Place.area),
         selectinload(TripItem.created_by),
-        selectinload(TripItem.participants).selectinload(TripItemParticipant.user),
+        selectinload(TripItem.participants)
+        .selectinload(TripItemParticipant.member)
+        .selectinload(TripMember.user),
         selectinload(TripItem.transit_segments).selectinload(
             TripItemTransitSegment.place
         ).selectinload(Place.area),
@@ -232,8 +240,16 @@ def _require_can_modify(
         )
 
 
-def _settle_participants(item: TripItem) -> None:
-    """After a scope change, make the participant rows fit the new meaning.
+def _creator_member(session: Session, trip: Trip, item: TripItem) -> TripMember:
+    """The member row of a personal item's creator. Personal items always have
+    a creator on the trip: leaving takes them with you."""
+    member = member_for(session, trip, item.created_by_id)
+    assert member is not None, "personal item whose creator isn't on the trip"
+    return member
+
+
+def _settle_participants(session: Session, trip: Trip, item: TripItem) -> None:
+    """Make the participant rows fit the item's scope.
 
     Personal items list who's in, so a 'declined' RSVP from the group days is
     dropped and the creator is always in. Group items keep rows as RSVPs."""
@@ -241,10 +257,40 @@ def _settle_participants(item: TripItem) -> None:
         for row in list(item.participants):
             if row.status is RsvpStatus.DECLINED:
                 item.participants.remove(row)
-        if not any(row.user_id == item.created_by_id for row in item.participants):
+        creator = _creator_member(session, trip, item)
+        if not any(row.member_id == creator.id for row in item.participants):
             item.participants.append(
-                TripItemParticipant(user_id=item.created_by_id, status=RsvpStatus.GOING)
+                TripItemParticipant(member_id=creator.id, status=RsvpStatus.GOING)
             )
+
+
+def _set_participants(
+    session: Session, trip: Trip, item: TripItem, entries: list[ParticipantSet]
+) -> None:
+    """Replace the item's answers with `entries`: listed members get the status
+    given (keeping their row if they had one), everyone else's is dropped.
+    Every member must be on this trip. Call after the item's scope is final,
+    since a personal item only lists who's in and always includes its creator."""
+    known = set(session.scalars(select(TripMember.id).where(TripMember.trip_id == trip.id)))
+    unknown = [str(entry.member_id) for entry in entries if entry.member_id not in known]
+    if unknown:
+        raise _unprocessable(f"Not on this trip: {', '.join(unknown)}")
+    if item.scope is TripItemScope.PERSONAL and any(
+        entry.status is RsvpStatus.DECLINED for entry in entries
+    ):
+        raise _unprocessable(
+            "a personal item lists who's in; leave people out instead of declining"
+        )
+
+    wanted = {entry.member_id: entry.status for entry in entries}
+    for row in list(item.participants):
+        if row.member_id in wanted:
+            row.status = wanted.pop(row.member_id)
+        else:
+            item.participants.remove(row)
+    for member_id, rsvp in wanted.items():
+        item.participants.append(TripItemParticipant(member_id=member_id, status=rsvp))
+    _settle_participants(session, trip, item)
 
 
 def _refresh(session: Session, item: TripItem) -> TripItem:
@@ -280,6 +326,7 @@ def build_trip_item(
     the route's job); import only ever creates personal items."""
     values = payload.model_dump()
     segments_payload = values.pop("segments", None)
+    del values["participants"]
     if payload.kind is TripItemKind.TRANSIT:
         # A transit always has at least one leg: its own ends when none is given.
         segments = _build_segments(session, segments_payload or [_leg_from_span(values)])
@@ -290,8 +337,10 @@ def build_trip_item(
         segments = []
     item = TripItem(**values, trip_id=trip.id, created_by_id=user.id)
     item.transit_segments = segments
-    if item.scope is TripItemScope.PERSONAL:
-        item.participants.append(TripItemParticipant(user_id=user.id, status=RsvpStatus.GOING))
+    if payload.participants is not None:
+        _set_participants(session, trip, item, payload.participants)
+    else:
+        _settle_participants(session, trip, item)
     session.add(item)
     return item
 
@@ -327,6 +376,7 @@ def update_item(
 
     changes = payload.model_dump(exclude_unset=True)
     segments_payload = changes.pop("segments", None)
+    changes.pop("participants", None)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise _unprocessable(f"{field} cannot be null")
@@ -398,8 +448,10 @@ def update_item(
 
     for field, value in changes.items():
         setattr(item, field, value)
-    if "scope" in changes:
-        _settle_participants(item)
+    if payload.participants is not None:
+        _set_participants(session, trip, item, payload.participants)
+    elif "scope" in changes:
+        _settle_participants(session, trip, item)
     session.commit()
     return _refresh(session, item)
 
@@ -434,9 +486,10 @@ def set_rsvp(
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This item isn't open to join")
 
-    row = next((p for p in item.participants if p.user_id == user.id), None)
+    member = member_for(session, trip, user.id)
+    row = next((p for p in item.participants if p.member_id == member.id), None)
     if row is None:
-        item.participants.append(TripItemParticipant(user_id=user.id, status=payload.status))
+        item.participants.append(TripItemParticipant(member_id=member.id, status=payload.status))
     else:
         row.status = payload.status
     session.commit()
@@ -451,7 +504,8 @@ def clear_rsvp(
     item = _get_item(session, trip, user, item_id)
     if item.scope is TripItemScope.PERSONAL and item.created_by_id == user.id:
         raise HTTPException(status.HTTP_409_CONFLICT, "You can't leave your own item; delete it")
-    row = next((p for p in item.participants if p.user_id == user.id), None)
+    member = member_for(session, trip, user.id)
+    row = next((p for p in item.participants if p.member_id == member.id), None)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No RSVP to clear")
     item.participants.remove(row)  # delete-orphan cascade removes the row

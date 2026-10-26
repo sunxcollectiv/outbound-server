@@ -248,6 +248,32 @@ class PlacesRefreshResponse(BaseModel):
 # --- trips ---
 
 
+class TripMemberCreate(BaseModel):
+    """A person on the trip, by email. They needn't have an account: the row is
+    linked to one as soon as it exists."""
+
+    email: Email
+    role: TripRole = TripRole.MEMBER
+
+
+def _unique_emails(members: list[TripMemberCreate] | None) -> list[TripMemberCreate] | None:
+    if members is not None and len({m.email for m in members}) != len(members):
+        raise ValueError("each email may appear only once")
+    return members
+
+
+TripMembersIn = Annotated[list[TripMemberCreate], AfterValidator(_unique_emails)]
+
+
+class TripMemberRead(ReadModel):
+    id: uuid.UUID
+    email: str
+    # Null while no account has this email.
+    user: UserRead | None
+    role: TripRole
+    created_at: datetime
+
+
 class TripCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = None
@@ -258,6 +284,8 @@ class TripCreate(BaseModel):
     timezone: TimezoneName | None = None
     # Areas (countries/cities) this trip covers. Deduped; unknown ids 404.
     area_ids: list[uuid.UUID] = Field(default_factory=list)
+    # People to add besides the creator, who is always on as an organizer.
+    members: TripMembersIn = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -274,6 +302,11 @@ class TripUpdate(BaseModel):
     cover_image_url: Url | None = None
     # Omit to leave areas untouched; a list (even empty) replaces the whole set.
     area_ids: list[uuid.UUID] | None = None
+    # Omit to leave the roster untouched; a list replaces it, matched by email:
+    # listed people keep their row (role updated), new ones are added, and
+    # anyone missing is removed with their personal items and RSVPs. The owner
+    # is always kept, as an organizer, whether listed or not.
+    members: TripMembersIn | None = None
 
 
 class TripRead(ReadModel):
@@ -291,6 +324,8 @@ class TripRead(ReadModel):
     # if this is non-empty — call POST /areas/refresh-photos with these ids to
     # fetch covers and patch them in. (Two-step, like places' stale_place_ids.)
     areas_missing_photos: list[uuid.UUID] = Field(default_factory=list)
+    # Everyone on the trip, owner included, in the order they were added.
+    members: list[TripMemberRead]
     created_at: datetime
     updated_at: datetime
 
@@ -321,17 +356,6 @@ class TripDayRead(ReadModel):
     updated_at: datetime
 
 
-class TripMemberCreate(BaseModel):
-    user_id: uuid.UUID
-    role: TripRole = TripRole.MEMBER
-
-
-class TripMemberRead(ReadModel):
-    user: UserRead
-    role: TripRole
-    created_at: datetime
-
-
 # --- trip items ---
 
 
@@ -349,6 +373,24 @@ def resolve_scope_fields(
     if requirement is not None:
         raise ValueError("requirement only applies to group items")
     return None, visibility or TripItemVisibility.SHARED
+
+
+class ParticipantSet(BaseModel):
+    """One person's answer on an item, set by whoever manages the item."""
+
+    member_id: uuid.UUID
+    status: RsvpStatus
+
+
+def _unique_members(participants: list[ParticipantSet] | None) -> list[ParticipantSet] | None:
+    if participants is not None and len({p.member_id for p in participants}) != len(
+        participants
+    ):
+        raise ValueError("each member may appear only once")
+    return participants
+
+
+ParticipantsIn = Annotated[list[ParticipantSet], AfterValidator(_unique_members)]
 
 
 class TransitSegmentCreate(BaseModel):
@@ -406,6 +448,10 @@ class TripItemCreate(BaseModel):
     # Transit only. Omit for a plain hop (the item's own ends are the one leg);
     # supply two or more to spell out layovers.
     segments: list[TransitSegmentCreate] | None = None
+    # Answers to record up front, by trip member — e.g. an organizer filling in
+    # RSVPs for people who aren't on the app. On a personal item these are who's
+    # coming along (going/maybe); the creator is always in as going.
+    participants: ParticipantsIn | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -470,10 +516,13 @@ class TripItemUpdate(BaseModel):
     end_place_id: uuid.UUID | None = None
     # Replaces the whole leg list when present; only valid on a transit item.
     segments: list[TransitSegmentCreate] | None = None
+    # Replaces every answer on the item when present (members left out lose
+    # theirs). Same rules as on create.
+    participants: ParticipantsIn | None = None
 
 
 class ParticipantRead(ReadModel):
-    user: UserRead
+    member: TripMemberRead
     status: RsvpStatus
     updated_at: datetime
 

@@ -8,18 +8,16 @@ FIRST_AT = datetime(2026, 4, 10, 9, 0)  # floating wall time; the wedding needs 
 
 
 def _rsvps(item: dict) -> dict[str, str]:
-    return {p["user"]["email"]: p["status"] for p in item["participants"]}
+    return {p["member"]["email"]: p["status"] for p in item["participants"]}
 
 
 @pytest.fixture
-def wedding(client, make_user, make_trip):
+def wedding(client, make_user, make_trip, add_member, set_role):
     """Sun organizes; Sean and Amy are members."""
     sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(sun, title="Wedding")
     url = f"/trips/{trip['id']}"
-    for guest in (sean, amy):
-        response = client.post(f"{url}/members", json={"user_id": guest.user_id}, headers=sun)
-        assert response.status_code == 201, response.text
+    members = {"sean": add_member(trip["id"], sun, sean), "amy": add_member(trip["id"], sun, amy)}
 
     clock = iter(range(1, 100))
 
@@ -32,7 +30,16 @@ def wedding(client, make_user, make_trip):
         assert response.status_code == 201, response.text
         return response.json()
 
-    return {"url": url, "sun": sun, "sean": sean, "amy": amy, "add": add}
+    return {
+        "url": url,
+        "trip_id": trip["id"],
+        "sun": sun,
+        "sean": sean,
+        "amy": amy,
+        "add": add,
+        "members": members,
+        "set_role": set_role,
+    }
 
 
 def _titles(client, url, headers, **params):
@@ -165,6 +172,7 @@ def test_joining_personal_items(client, wedding):
 
 def test_removing_a_member_takes_their_personal_items_and_rsvps(client, wedding):
     url, sun, sean, amy, add = (wedding[k] for k in ("url", "sun", "sean", "amy", "add"))
+    sean_member = f"{url}/members/{wedding['members']['sean']['id']}"
     ceremony = add(sun, scope="group", title="Ceremony", requirement="mandatory")
     client.put(f"{url}/items/{ceremony['id']}/rsvp", json={"status": "going"}, headers=sean)
     add(sean, scope="personal", title="Dinner with cousins")
@@ -172,13 +180,10 @@ def test_removing_a_member_takes_their_personal_items_and_rsvps(client, wedding)
     client.put(f"{url}/items/{karaoke['id']}/rsvp", json={"status": "going"}, headers=sean)
 
     # Promote Sean so he can post a group item, which should outlive him.
-    client.delete(f"{url}/members/{sean.user_id}", headers=sun)
-    client.post(
-        f"{url}/members", json={"user_id": sean.user_id, "role": "organizer"}, headers=sun
-    )
+    wedding["set_role"](wedding["trip_id"], sun, sean.email, "organizer")
     add(sean, scope="group", title="After party")
 
-    assert client.delete(f"{url}/members/{sean.user_id}", headers=sun).status_code == 204
+    assert client.delete(sean_member, headers=sun).status_code == 204
 
     assert _titles(client, url, sun) == ["Ceremony", "Karaoke", "After party"]
     assert _rsvps(client.get(f"{url}/items/{ceremony['id']}", headers=sun).json()) == {}
@@ -224,7 +229,7 @@ def test_changing_scope(client, wedding):
     client.put(f"{url}/items/{dinner['id']}/rsvp", json={"status": "going"}, headers=sean)
     client.put(f"{url}/items/{dinner['id']}/rsvp", json={"status": "declined"}, headers=amy)
     # Another organizer who didn't create it can't re-home it.
-    client.post(f"{url}/members", json={"user_id": amy.user_id, "role": "organizer"}, headers=sun)
+    wedding["set_role"](wedding["trip_id"], sun, amy.email, "organizer")
     denied = client.patch(f"{url}/items/{dinner['id']}", json={"scope": "personal"}, headers=amy)
     assert denied.status_code == 403
 

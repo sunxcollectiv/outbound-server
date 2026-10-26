@@ -57,6 +57,62 @@ def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid
     return unique
 
 
+def _remove_member_items(session: SessionDep, trip: Trip, user_id: uuid.UUID) -> None:
+    """A departing account's personal items go with them; group items they
+    posted stay."""
+    session.execute(
+        delete(TripItem).where(
+            TripItem.trip_id == trip.id,
+            TripItem.scope == TripItemScope.PERSONAL,
+            TripItem.created_by_id == user_id,
+        )
+    )
+
+
+def _remove_member(session: SessionDep, trip: Trip, member: TripMember) -> None:
+    """Their RSVPs go too. The FK would cascade them, but removing them through
+    each item keeps any item already loaded in the session in step."""
+    if member.user_id is not None:
+        _remove_member_items(session, trip, member.user_id)
+    answers = select(TripItemParticipant).where(TripItemParticipant.member_id == member.id)
+    for row in session.scalars(answers.options(selectinload(TripItemParticipant.item))):
+        row.item.participants.remove(row)  # delete-orphan
+    trip.members.remove(member)  # delete-orphan
+
+
+def _new_member(session: SessionDep, trip: Trip, entry: TripMemberCreate) -> TripMember:
+    """A member row for `entry`, linked to the account with that email if any."""
+    member = TripMember(
+        email=entry.email,
+        role=entry.role,
+        user_id=session.scalar(select(User.id).where(User.email == entry.email)),
+    )
+    trip.members.append(member)
+    return member
+
+
+def _set_members(
+    session: SessionDep, trip: Trip, entries: list[TripMemberCreate], *, replace: bool
+) -> None:
+    """Bring the roster in line with `entries`, matched by email: listed people
+    keep their row with the role given, new ones are added. With `replace`,
+    anyone not listed is removed. The owner is never removed or demoted."""
+    current = {member.email: member for member in trip.members}
+    for entry in entries:
+        member = current.get(entry.email)
+        if member is None:
+            _new_member(session, trip, entry)
+            continue
+        if member.user_id == trip.owner_id and entry.role is not TripRole.ORGANIZER:
+            raise HTTPException(status.HTTP_409_CONFLICT, "The owner is always an organizer")
+        member.role = entry.role
+    if replace:
+        listed = {entry.email for entry in entries}
+        for member in list(trip.members):
+            if member.email not in listed and member.user_id != trip.owner_id:
+                _remove_member(session, trip, member)
+
+
 def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
     """Resolve each trip's area_ids into `Area` objects (in stored order) for
     the response, and drop any id that no longer matches an area — e.g. the
@@ -99,13 +155,16 @@ def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
 def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
-    trip_members is the full headcount and roles live in one place. A day row
-    is made for every date, seeded with the timezone if one was given."""
+    trip_members is the full headcount and roles live in one place; anyone in
+    `members` is added alongside. A day row is made for every date, seeded
+    with the timezone if one was given."""
     values = payload.model_dump()
     seed_timezone = values.pop("timezone")
+    del values["members"]
     values["area_ids"] = _clean_area_ids(session, values["area_ids"])
     trip = Trip(**values, owner_id=user.id)
-    trip.members.append(TripMember(user_id=user.id, role=TripRole.ORGANIZER))
+    trip.members.append(TripMember(user_id=user.id, email=user.email, role=TripRole.ORGANIZER))
+    _set_members(session, trip, payload.members, replace=False)
     sync_trip_days(trip, seed_timezone)
     session.add(trip)
     session.commit()
@@ -117,7 +176,12 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
 def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
     """Trips the caller is on, as owner or member."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
-    query = select(Trip).where(Trip.id.in_(member_of)).order_by(Trip.start_date, Trip.id)
+    query = (
+        select(Trip)
+        .where(Trip.id.in_(member_of))
+        .options(selectinload(Trip.members).selectinload(TripMember.user))
+        .order_by(Trip.start_date, Trip.id)
+    )
     trips = list(session.scalars(query))
     attach_areas(session, trips)
     return trips
@@ -133,6 +197,7 @@ def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
 def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
     changes = payload.model_dump(exclude_unset=True)
     area_ids = changes.pop("area_ids", None)
+    changes.pop("members", None)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} cannot be null")
@@ -146,6 +211,8 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
         setattr(trip, field, value)
     if area_ids is not None:
         trip.area_ids = _clean_area_ids(session, area_ids)
+    if payload.members is not None:
+        _set_members(session, trip, payload.members, replace=True)
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
     session.commit()
@@ -210,12 +277,12 @@ def update_day(
 
 @router.get("/{trip_id}/members", response_model=list[TripMemberRead])
 def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
-    """Everyone on the trip, owner included."""
+    """Everyone on the trip, owner included, with or without an account."""
     query = (
         select(TripMember)
         .where(TripMember.trip_id == trip.id)
         .options(selectinload(TripMember.user))
-        .order_by(TripMember.created_at, TripMember.user_id)
+        .order_by(TripMember.created_at, TripMember.id)
     )
     return list(session.scalars(query))
 
@@ -224,44 +291,29 @@ def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
     "/{trip_id}/members", response_model=TripMemberRead, status_code=status.HTTP_201_CREATED
 )
 def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionDep) -> TripMember:
-    if session.get(User, payload.user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    if session.get(TripMember, (trip.id, payload.user_id)) is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "User is already on the trip")
-    member = TripMember(trip_id=trip.id, user_id=payload.user_id, role=payload.role)
-    session.add(member)
+    """Adds one person by email. Linked to their account now if one exists,
+    otherwise when they register; the row stays on the roster either way."""
+    if any(member.email == payload.email for member in trip.members):
+        raise HTTPException(status.HTTP_409_CONFLICT, "That email is already on the trip")
+    member = _new_member(session, trip, payload)
     session.commit()
+    session.refresh(member)
     return member
 
 
-@router.delete("/{trip_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{trip_id}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_member(
-    user_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
+    member_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> None:
     """Organizers can remove anyone but the owner; a member can remove themself (leave).
 
     Their personal items and RSVPs go with them; group items they posted stay."""
-    if user.id != user_id and not is_organizer(session, trip, user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can remove others")
-    member = session.get(TripMember, (trip.id, user_id))
+    member = next((m for m in trip.members if m.id == member_id), None)
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
-    if user_id == trip.owner_id:
+    if member.user_id != user.id and not is_organizer(session, trip, user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can remove others")
+    if member.user_id == trip.owner_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "The owner can't be removed from their trip")
-
-    trip_item_ids = select(TripItem.id).where(TripItem.trip_id == trip.id)
-    session.execute(
-        delete(TripItemParticipant).where(
-            TripItemParticipant.user_id == user_id,
-            TripItemParticipant.item_id.in_(trip_item_ids),
-        )
-    )
-    session.execute(
-        delete(TripItem).where(
-            TripItem.trip_id == trip.id,
-            TripItem.scope == TripItemScope.PERSONAL,
-            TripItem.created_by_id == user_id,
-        )
-    )
-    session.delete(member)
+    _remove_member(session, trip, member)
     session.commit()

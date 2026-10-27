@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentAccessToken, SessionDep
 from app.config import get_settings
-from app.models import AccessToken, User
+from app.models import AccessToken, TripMember, User
 from app.schemas import Credentials, TokenRead, UserCreate
 from app.security import hash_password, hash_token, new_token, verify_password
 
@@ -28,14 +28,21 @@ def _issue_token(session: Session, user: User) -> TokenRead:
 
 @router.post("/register", response_model=TokenRead, status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, session: SessionDep) -> TokenRead:
+    """Also links the new account to any trips they were added to by email, so
+    those trips are theirs to open straight away."""
     fields = payload.model_dump(exclude={"password"})
     user = User(**fields, password_hash=hash_password(payload.password))
     session.add(user)
     try:
-        session.commit()
+        session.flush()
     except IntegrityError:
         session.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Email is already registered") from None
+    waiting = select(TripMember).where(
+        TripMember.email == user.email, TripMember.user_id.is_(None)
+    )
+    for member in session.scalars(waiting):
+        member.user = user
     return _issue_token(session, user)
 
 

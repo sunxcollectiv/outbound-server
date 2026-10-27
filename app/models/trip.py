@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
     text,
@@ -55,7 +56,10 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     owner: Mapped[User] = relationship()
     members: Mapped[list[TripMember]] = relationship(
-        back_populates="trip", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="trip",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by=lambda: (TripMember.created_at, TripMember.id),
     )
     items: Mapped[list[TripItem]] = relationship(
         back_populates="trip", cascade="all, delete-orphan", passive_deletes=True
@@ -104,19 +108,33 @@ class TripDay(TimestampMixin, Base):
         return (self.date - self.trip.start_date).days + 1
 
 
-class TripMember(Base):
+class TripMember(UUIDPrimaryKeyMixin, Base):
     """Everyone on a trip, owner included, with their role. trips.owner_id
     only says who pays for and can delete the trip; it always has an
     organizer row here, so counting rows gives the real headcount and a
-    transfer of ownership is a role edit, not a row swap."""
+    transfer of ownership is a role edit, not a row swap.
+
+    A member is a person on the trip, not necessarily an account: organizers
+    add people by email, and the row stays on the roster whether or not that
+    person ever signs up, so the organizer can plan around them (RSVPs are
+    keyed by member, not user). `user_id` is filled in as soon as an account
+    with that email exists, at add time or when they register, and from then
+    on that account can open the trip."""
 
     __tablename__ = "trip_members"
-
-    trip_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("trips.id", ondelete="CASCADE"), primary_key=True
+    __table_args__ = (
+        UniqueConstraint("trip_id", "email", name="uq_trip_members_trip_id_email"),
+        UniqueConstraint("trip_id", "user_id", name="uq_trip_members_trip_id_user_id"),
     )
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True
+
+    trip_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("trips.id", ondelete="CASCADE"))
+    # Stored lowercased. The address they were added at; for a linked member
+    # it matches their account's email.
+    email: Mapped[str] = mapped_column(String(320), index=True)
+    # Null until an account with this email exists. SET NULL so the person
+    # stays on the trip if the account goes away.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     role: Mapped[TripRole] = mapped_column(
         str_enum(TripRole, "trip_role"), default=TripRole.MEMBER
@@ -126,4 +144,4 @@ class TripMember(Base):
     )
 
     trip: Mapped[Trip] = relationship(back_populates="members")
-    user: Mapped[User] = relationship()
+    user: Mapped[User | None] = relationship()

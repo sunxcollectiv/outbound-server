@@ -214,9 +214,10 @@ PASSWORD = "correct horse battery"
 
 
 class AuthHeaders(dict[str, str]):
-    """Headers for acting as a user, plus their id for use in request bodies."""
+    """Headers for acting as a user, plus their id and email for use in request bodies."""
 
     user_id: str
+    email: str
 
 
 @pytest.fixture
@@ -236,6 +237,7 @@ def make_user(client: TestClient) -> Callable[[str], AuthHeaders]:
         body = response.json()
         headers = AuthHeaders(Authorization=f"Bearer {body['token']}")
         headers.user_id = body["user"]["id"]
+        headers.email = body["user"]["email"]
         return headers
 
     return _make
@@ -256,3 +258,36 @@ def make_trip(client: TestClient) -> Callable[..., dict[str, Any]]:
         return response.json()
 
     return _make
+
+
+@pytest.fixture
+def add_member(client: TestClient) -> Callable[..., dict[str, Any]]:
+    """Adds `guest` to a trip by email as `organizer`. Returns the membership."""
+
+    def _add(
+        trip_id: str, organizer: dict[str, str], guest: AuthHeaders, role: str = "member"
+    ) -> dict[str, Any]:
+        payload = {"email": guest.email, "role": role}
+        added = client.post(f"/trips/{trip_id}/members", json=payload, headers=organizer)
+        assert added.status_code == 201, added.text
+        return added.json()
+
+    return _add
+
+
+@pytest.fixture
+def set_role(client: TestClient) -> Callable[..., dict[str, Any]]:
+    """Changes one person's role by PATCHing the trip's whole roster, the way a
+    client edits members. Returns the updated trip."""
+
+    def _set(trip_id: str, organizer: dict[str, str], email: str, role: str) -> dict[str, Any]:
+        trip = client.get(f"/trips/{trip_id}", headers=organizer).json()
+        roster = [
+            {"email": m["email"], "role": role if m["email"] == email else m["role"]}
+            for m in trip["members"]
+        ]
+        response = client.patch(f"/trips/{trip_id}", json={"members": roster}, headers=organizer)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    return _set

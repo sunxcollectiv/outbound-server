@@ -40,64 +40,71 @@ def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_trip):
     assert [t["id"] for t in client.get("/trips", headers=sun).json()] == [trip["id"]]
 
 
-def test_member_roles(client, make_user, make_trip):
+def test_member_roles(client, make_user, make_trip, add_member, set_role):
     sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    sean_id, amy_id = sean.user_id, amy.user_id
-    group_item = {
+    item = {
         "kind": "activity",
-        "scope": "group",
-        "title": "Ceremony",
+        "title": "Coffee",
         "starts_at": "2026-04-10T14:00:00",
         "start_timezone": "Asia/Tokyo",
     }
-    personal_item = {**group_item, "scope": "personal", "title": "Coffee"}
 
     # The owner is on the member list from the start, as an organizer.
     roster = client.get(f"{url}/members", headers=sun).json()
-    assert [(m["user"]["email"], m["role"]) for m in roster] == [("sun@example.com", "organizer")]
-    re_added = client.post(f"{url}/members", json={"user_id": sun.user_id}, headers=sun)
+    assert [(m["email"], m["user"]["id"], m["role"]) for m in roster] == [
+        ("sun@example.com", sun.user_id, "organizer")
+    ]
+    assert client.get(url, headers=sun).json()["members"] == roster
+    owner = f"{url}/members/{roster[0]['id']}"
+    re_added = client.post(f"{url}/members", json={"email": "SUN@example.com"}, headers=sun)
     assert re_added.status_code == 409
-    assert client.delete(f"{url}/members/{sun.user_id}", headers=sun).status_code == 409
+    assert client.delete(owner, headers=sun).status_code == 409
+    demoted = client.patch(
+        url, json={"members": [{"email": sun.email, "role": "member"}]}, headers=sun
+    )
+    assert demoted.status_code == 409
 
     # Members default to the member role.
-    added = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
-    assert added.status_code == 201
-    assert added.json()["user"]["email"] == "sean@example.com"
-    assert added.json()["role"] == "member"
-    again = client.post(f"{url}/members", json={"user_id": sean_id}, headers=sun)
+    sean_member = add_member(trip["id"], sun, sean)
+    assert sean_member["user"]["email"] == "sean@example.com"
+    assert sean_member["role"] == "member"
+    sean_url = f"{url}/members/{sean_member['id']}"
+    again = client.post(f"{url}/members", json={"email": sean.email}, headers=sun)
     assert again.status_code == 409
     roster = client.get(f"{url}/members", headers=sean).json()
-    assert sorted(m["user"]["email"] for m in roster) == ["sean@example.com", "sun@example.com"]
+    assert sorted(m["email"] for m in roster) == ["sean@example.com", "sun@example.com"]
 
-    # A member can read and add their own items, but not change the trip,
-    # post group items, or manage members.
+    # A member can read the trip and add items (roles don't govern items), but
+    # not change the trip or manage members.
     assert client.get(url, headers=sean).status_code == 200
     assert [t["id"] for t in client.get("/trips", headers=sean).json()] == [trip["id"]]
-    assert client.post(f"{url}/items", json=personal_item, headers=sean).status_code == 201
-    assert client.post(f"{url}/items", json=group_item, headers=sean).status_code == 403
+    assert client.post(f"{url}/items", json=item, headers=sean).status_code == 201
     assert client.patch(url, json={"title": "Nope"}, headers=sean).status_code == 403
     assert client.delete(url, headers=sean).status_code == 403
-    denied = client.post(f"{url}/members", json={"user_id": amy_id}, headers=sean)
+    denied = client.post(f"{url}/members", json={"email": amy.email}, headers=sean)
     assert denied.status_code == 403
+    roster_edit = {"members": [{"email": sean.email, "role": "organizer"}]}
+    assert client.patch(url, json=roster_edit, headers=sean).status_code == 403
 
-    # Re-add as an organizer: can edit the trip, post group items and manage
-    # members, still can't delete the trip.
-    assert client.delete(f"{url}/members/{sean_id}", headers=sun).status_code == 204
-    client.post(f"{url}/members", json={"user_id": sean_id, "role": "organizer"}, headers=sun)
+    # Promoted to organizer: can edit the trip and manage members, still can't
+    # delete the trip. Their items are untouched.
+    promoted = set_role(trip["id"], sun, sean.email, "organizer")
+    assert {m["email"]: m["role"] for m in promoted["members"]}[sean.email] == "organizer"
+    assert [i["title"] for i in client.get(f"{url}/items", headers=sean).json()] == ["Coffee"]
     renamed = client.patch(url, json={"title": "Japan 2026"}, headers=sean)
     assert renamed.status_code == 200
     assert renamed.json()["title"] == "Japan 2026"
-    assert client.post(f"{url}/items", json=group_item, headers=sean).status_code == 201
-    assert client.post(f"{url}/members", json={"user_id": amy_id}, headers=sean).status_code == 201
-    assert client.delete(f"{url}/members/{amy_id}", headers=sean).status_code == 204
-    assert client.delete(f"{url}/members/{sun.user_id}", headers=sean).status_code == 409
+    amy_member = add_member(trip["id"], sean, amy)
+    assert client.delete(f"{url}/members/{amy_member['id']}", headers=sean).status_code == 204
+    assert client.delete(owner, headers=sean).status_code == 409
     assert client.delete(url, headers=sean).status_code == 403
 
     # A member can leave; after that the trip is gone for them.
-    assert client.delete(f"{url}/members/{sean_id}", headers=sean).status_code == 204
+    assert client.delete(sean_url, headers=sean).status_code == 204
     assert client.get(url, headers=sean).status_code == 404
+    assert client.delete(sean_url, headers=sun).status_code == 404
 
 
 def test_update_cannot_put_end_before_start(client, make_user, make_trip):
@@ -295,14 +302,13 @@ def test_trip_get_prunes_deleted_area_ids(client, make_user, make_trip):
     assert [a["id"] for a in again["areas"]] == [tokyo["id"]]
 
 
-def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_trip):
+def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_trip, add_member):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
+    add_member(trip["id"], sun, sean)
     item = {
         "kind": "activity",
-        "scope": "group",
         "title": "Dinner",
         "starts_at": "2026-04-09T18:30:00",
         "start_timezone": "Asia/Tokyo",

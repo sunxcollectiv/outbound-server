@@ -61,11 +61,11 @@ def test_a_trip_without_a_zone_has_empty_days(client, make_user, make_trip):
     assert client.post("/trips", json={**JAPAN_TRIP, "timezone": "Asia/Tokio"}, headers=sun).status_code == 422
 
 
-def test_editing_a_day(client, make_user, make_trip):
+def test_editing_a_day(client, make_user, make_trip, add_member):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    client.post(f"{url}/members", json={"user_id": sean.user_id}, headers=sun)
+    add_member(trip["id"], sun, sean)
     stub = client.post("/places", json={"google_place_id": "g-flagstaff"}, headers=sun).json()
     client.patch(f"/places/{stub['id']}", json={"name": "Flagstaff"}, headers=sun)
 

@@ -19,7 +19,6 @@ from app.models import (
     TransitMode,
     TripItemKind,
     TripItemRequirement,
-    TripItemScope,
     TripItemVisibility,
     TripRole,
 )
@@ -248,6 +247,32 @@ class PlacesRefreshResponse(BaseModel):
 # --- trips ---
 
 
+class TripMemberCreate(BaseModel):
+    """A person on the trip, by email. They needn't have an account: the row is
+    linked to one as soon as it exists."""
+
+    email: Email
+    role: TripRole = TripRole.MEMBER
+
+
+def _unique_emails(members: list[TripMemberCreate] | None) -> list[TripMemberCreate] | None:
+    if members is not None and len({m.email for m in members}) != len(members):
+        raise ValueError("each email may appear only once")
+    return members
+
+
+TripMembersIn = Annotated[list[TripMemberCreate], AfterValidator(_unique_emails)]
+
+
+class TripMemberRead(ReadModel):
+    id: uuid.UUID
+    email: str
+    # Null while no account has this email.
+    user: UserRead | None
+    role: TripRole
+    created_at: datetime
+
+
 class TripCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     description: str | None = None
@@ -258,6 +283,8 @@ class TripCreate(BaseModel):
     timezone: TimezoneName | None = None
     # Areas (countries/cities) this trip covers. Deduped; unknown ids 404.
     area_ids: list[uuid.UUID] = Field(default_factory=list)
+    # People to add besides the creator, who is always on as an organizer.
+    members: TripMembersIn = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -274,6 +301,11 @@ class TripUpdate(BaseModel):
     cover_image_url: Url | None = None
     # Omit to leave areas untouched; a list (even empty) replaces the whole set.
     area_ids: list[uuid.UUID] | None = None
+    # Omit to leave the roster untouched; a list replaces it, matched by email:
+    # listed people keep their row (role updated), new ones are added, and
+    # anyone missing is removed with their personal items and RSVPs. The owner
+    # is always kept, as an organizer, whether listed or not.
+    members: TripMembersIn | None = None
 
 
 class TripRead(ReadModel):
@@ -291,6 +323,8 @@ class TripRead(ReadModel):
     # if this is non-empty — call POST /areas/refresh-photos with these ids to
     # fetch covers and patch them in. (Two-step, like places' stale_place_ids.)
     areas_missing_photos: list[uuid.UUID] = Field(default_factory=list)
+    # Everyone on the trip, owner included, in the order they were added.
+    members: list[TripMemberRead]
     created_at: datetime
     updated_at: datetime
 
@@ -321,34 +355,26 @@ class TripDayRead(ReadModel):
     updated_at: datetime
 
 
-class TripMemberCreate(BaseModel):
-    user_id: uuid.UUID
-    role: TripRole = TripRole.MEMBER
-
-
-class TripMemberRead(ReadModel):
-    user: UserRead
-    role: TripRole
-    created_at: datetime
-
-
 # --- trip items ---
 
 
-def resolve_scope_fields(
-    scope: TripItemScope,
-    requirement: TripItemRequirement | None,
-    visibility: TripItemVisibility | None,
-) -> tuple[TripItemRequirement | None, TripItemVisibility | None]:
-    """Group items carry a requirement, personal items carry a visibility, never
-    both. Fills in the default for the missing one and rejects the wrong one."""
-    if scope is TripItemScope.GROUP:
-        if visibility is not None:
-            raise ValueError("visibility only applies to personal items")
-        return requirement or TripItemRequirement.OPTIONAL, None
-    if requirement is not None:
-        raise ValueError("requirement only applies to group items")
-    return None, visibility or TripItemVisibility.SHARED
+class ParticipantSet(BaseModel):
+    """One person an item is for. `status` is an optional RSVP-style answer;
+    leave it out to keep whatever they had (none, for someone new)."""
+
+    member_id: uuid.UUID
+    status: RsvpStatus | None = None
+
+
+def _unique_members(participants: list[ParticipantSet] | None) -> list[ParticipantSet] | None:
+    if participants is not None and len({p.member_id for p in participants}) != len(
+        participants
+    ):
+        raise ValueError("each member may appear only once")
+    return participants
+
+
+ParticipantsIn = Annotated[list[ParticipantSet], AfterValidator(_unique_members)]
 
 
 class TransitSegmentCreate(BaseModel):
@@ -377,11 +403,10 @@ class TransitSegmentCreate(BaseModel):
 
 class TripItemCreate(BaseModel):
     kind: TripItemKind
-    scope: TripItemScope
-    # Defaults to optional for group items; must be absent for personal ones.
+    # How much the participants are expected to be there; a label only.
     requirement: TripItemRequirement | None = None
-    # Defaults to shared for personal items; must be absent for group ones.
-    visibility: TripItemVisibility | None = None
+    # What people who aren't participants see. Participants always see it all.
+    visibility: TripItemVisibility = TripItemVisibility.OPEN
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
@@ -406,12 +431,12 @@ class TripItemCreate(BaseModel):
     # Transit only. Omit for a plain hop (the item's own ends are the one leg);
     # supply two or more to spell out layovers.
     segments: list[TransitSegmentCreate] | None = None
+    # Who the item is for, by trip member. Nobody is implied: an item for the
+    # whole trip lists every member. Omit to make it just for the creator.
+    participants: ParticipantsIn | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        self.requirement, self.visibility = resolve_scope_fields(
-            self.scope, self.requirement, self.visibility
-        )
         if self.transit_mode is TransitMode.MIXED:
             raise ValueError("'mixed' is derived from the legs, not set directly")
         if self.transit_mode is not None and self.kind is not TripItemKind.TRANSIT:
@@ -451,9 +476,6 @@ class TripItemUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: TripItemKind | None = None
-    # Changing scope re-homes the item, so the route requires the caller to be
-    # allowed to modify both the old and the new form.
-    scope: TripItemScope | None = None
     requirement: TripItemRequirement | None = None
     visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
@@ -470,11 +492,14 @@ class TripItemUpdate(BaseModel):
     end_place_id: uuid.UUID | None = None
     # Replaces the whole leg list when present; only valid on a transit item.
     segments: list[TransitSegmentCreate] | None = None
+    # Replaces who the item is for when present: members left out are dropped,
+    # listed ones keep their answer unless a new status is sent.
+    participants: ParticipantsIn | None = None
 
 
 class ParticipantRead(ReadModel):
-    user: UserRead
-    status: RsvpStatus
+    member: TripMemberRead
+    status: RsvpStatus | None
     updated_at: datetime
 
 
@@ -516,9 +541,11 @@ class TripItemRead(TimeSpanRead):
     id: uuid.UUID
     trip_id: uuid.UUID
     kind: TripItemKind
-    scope: TripItemScope
+    visibility: TripItemVisibility
+    # True when the caller isn't a participant on a closed item: they get its
+    # kind, title and times, and every other detail below is blanked.
+    redacted: bool = False
     requirement: TripItemRequirement | None
-    visibility: TripItemVisibility | None
     title: str
     notes: str | None
     confirmation_number: str | None
@@ -533,8 +560,7 @@ class TripItemRead(TimeSpanRead):
         default_factory=list, validation_alias="transit_segments", serialization_alias="segments"
     )
     created_by: UserRead | None
-    # RSVPs on a group item; attendees on a personal one. Callers find their
-    # own entry by user id.
+    # Who the item is for. Callers find their own entry by member.user.id.
     participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime

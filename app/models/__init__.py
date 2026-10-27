@@ -12,7 +12,6 @@ from app.models.trip_item import (
     TripItemKind,
     TripItemParticipant,
     TripItemRequirement,
-    TripItemScope,
     TripItemTransitSegment,
     TripItemVisibility,
 )
@@ -34,7 +33,6 @@ __all__ = [
     "TripItemKind",
     "TripItemParticipant",
     "TripItemRequirement",
-    "TripItemScope",
     "TripItemTransitSegment",
     "TripItemVisibility",
     "TripMember",

@@ -67,7 +67,6 @@ def test_patching_the_roster(client, make_user, make_trip):
     ids = _member_ids(trip)
     coffee = {
         "kind": "activity",
-        "scope": "personal",
         "title": "Coffee",
         "starts_at": "2026-04-10T09:00:00",
     }
@@ -97,9 +96,10 @@ def test_patching_the_roster(client, make_user, make_trip):
     }
     assert _member_ids(patched.json())["grandma@example.com"] == ids["grandma@example.com"]
 
-    # Sean is off the trip, and his personal item went with him.
+    # Sean is off the trip and off his item, which stays on the trip.
     assert client.get(url, headers=sean).status_code == 404
-    assert client.get(f"{url}/items", headers=sun).json() == []
+    items = client.get(f"{url}/items", headers=sun).json()
+    assert [(i["title"], i["participants"]) for i in items] == [("Coffee", [])]
 
     # The owner can't be demoted, and only organizers edit the roster.
     owner_demoted = client.patch(
@@ -110,7 +110,7 @@ def test_patching_the_roster(client, make_user, make_trip):
     assert client.patch(url, json={"members": []}, headers=amy).status_code == 403
 
 
-def test_organizer_records_answers_for_people_without_accounts(client, make_user, make_trip):
+def test_items_can_be_for_people_without_accounts(client, make_user, make_trip):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun, members=[{"email": "grandma@example.com"}, {"email": sean.email}])
     url = f"/trips/{trip['id']}"
@@ -120,7 +120,6 @@ def test_organizer_records_answers_for_people_without_accounts(client, make_user
         f"{url}/items",
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Rehearsal dinner",
             "starts_at": "2026-04-10T19:00:00",
             "participants": [{"member_id": ids["grandma@example.com"], "status": "going"}],
@@ -133,15 +132,15 @@ def test_organizer_records_answers_for_people_without_accounts(client, make_user
     assert dinner["participants"][0]["member"]["user"] is None
     item_url = f"{url}/items/{dinner['id']}"
 
-    # Sean answers for himself; a PATCH then replaces the whole set, so the
-    # organizer sends his answer along to keep it.
+    # Sean answers for himself, which adds him. A PATCH replaces the set:
+    # listed members keep their answer unless a new one is sent.
     client.put(f"{item_url}/rsvp", json={"status": "maybe"}, headers=sean)
     patched = client.patch(
         item_url,
         json={
             "participants": [
                 {"member_id": ids["grandma@example.com"], "status": "declined"},
-                {"member_id": ids["sean@example.com"], "status": "maybe"},
+                {"member_id": ids["sean@example.com"]},
             ]
         },
         headers=sun,
@@ -154,13 +153,12 @@ def test_organizer_records_answers_for_people_without_accounts(client, make_user
     cleared = client.patch(item_url, json={"participants": []}, headers=sun).json()
     assert _rsvps(cleared) == {}
 
-    # A plain member can't set other people's answers on a group item.
-    denied = client.patch(
-        item_url,
-        json={"participants": [{"member_id": ids["grandma@example.com"], "status": "going"}]},
-        headers=sean,
+    # Any member can edit who an item is for, for now.
+    by_sean = client.patch(
+        item_url, json={"participants": [{"member_id": ids["grandma@example.com"]}]}, headers=sean
     )
-    assert denied.status_code == 403
+    assert by_sean.status_code == 200
+    assert _rsvps(by_sean.json()) == {"grandma@example.com": None}
 
     # Members must be on this trip, and appear once.
     other_trip = make_trip(sun, title="Italy", members=[{"email": "amy@example.com"}])
@@ -180,39 +178,6 @@ def test_organizer_records_answers_for_people_without_accounts(client, make_user
     assert _rsvps(client.get(item_url, headers=sun).json()) == {}
 
 
-def test_participants_on_a_personal_item(client, make_user, make_trip):
-    sun = make_user("sun")
-    trip = make_trip(sun, members=[{"email": "grandma@example.com"}])
-    url = f"/trips/{trip['id']}"
-    ids = _member_ids(trip)
-    grandma = {"member_id": ids["grandma@example.com"], "status": "going"}
-
-    # The creator is always in, even when the list leaves them out.
-    created = client.post(
-        f"{url}/items",
-        json={
-            "kind": "activity",
-            "scope": "personal",
-            "title": "Tea with grandma",
-            "starts_at": "2026-04-11T15:00:00",
-            "participants": [grandma],
-        },
-        headers=sun,
-    )
-    assert created.status_code == 201, created.text
-    assert _rsvps(created.json()) == {"sun@example.com": "going", "grandma@example.com": "going"}
-    item_url = f"{url}/items/{created.json()['id']}"
-    assert _rsvps(client.patch(item_url, json={"participants": []}, headers=sun).json()) == {
-        "sun@example.com": "going"
-    }
-
-    # A personal item lists who's in, so there's no declining on it.
-    declined = client.patch(
-        item_url, json={"participants": [{**grandma, "status": "declined"}]}, headers=sun
-    )
-    assert declined.status_code == 422
-
-
 def test_answers_carry_over_when_someone_signs_up(client, make_user, make_trip):
     sun = make_user("sun")
     trip = make_trip(sun, members=[{"email": "sean@example.com"}])
@@ -222,7 +187,6 @@ def test_answers_carry_over_when_someone_signs_up(client, make_user, make_trip):
         f"{url}/items",
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Dinner",
             "starts_at": "2026-04-10T19:00:00",
             "participants": [{"member_id": ids["sean@example.com"], "status": "maybe"}],

@@ -19,7 +19,6 @@ from app.models import (
     TransitMode,
     TripItemKind,
     TripItemRequirement,
-    TripItemScope,
     TripItemVisibility,
     TripRole,
 )
@@ -359,27 +358,12 @@ class TripDayRead(ReadModel):
 # --- trip items ---
 
 
-def resolve_scope_fields(
-    scope: TripItemScope,
-    requirement: TripItemRequirement | None,
-    visibility: TripItemVisibility | None,
-) -> tuple[TripItemRequirement | None, TripItemVisibility | None]:
-    """Group items carry a requirement, personal items carry a visibility, never
-    both. Fills in the default for the missing one and rejects the wrong one."""
-    if scope is TripItemScope.GROUP:
-        if visibility is not None:
-            raise ValueError("visibility only applies to personal items")
-        return requirement or TripItemRequirement.OPTIONAL, None
-    if requirement is not None:
-        raise ValueError("requirement only applies to group items")
-    return None, visibility or TripItemVisibility.SHARED
-
-
 class ParticipantSet(BaseModel):
-    """One person's answer on an item, set by whoever manages the item."""
+    """One person an item is for. `status` is an optional RSVP-style answer;
+    leave it out to keep whatever they had (none, for someone new)."""
 
     member_id: uuid.UUID
-    status: RsvpStatus
+    status: RsvpStatus | None = None
 
 
 def _unique_members(participants: list[ParticipantSet] | None) -> list[ParticipantSet] | None:
@@ -419,11 +403,10 @@ class TransitSegmentCreate(BaseModel):
 
 class TripItemCreate(BaseModel):
     kind: TripItemKind
-    scope: TripItemScope
-    # Defaults to optional for group items; must be absent for personal ones.
+    # How much the participants are expected to be there; a label only.
     requirement: TripItemRequirement | None = None
-    # Defaults to shared for personal items; must be absent for group ones.
-    visibility: TripItemVisibility | None = None
+    # What people who aren't participants see. Participants always see it all.
+    visibility: TripItemVisibility = TripItemVisibility.OPEN
     title: str = Field(min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
@@ -448,16 +431,12 @@ class TripItemCreate(BaseModel):
     # Transit only. Omit for a plain hop (the item's own ends are the one leg);
     # supply two or more to spell out layovers.
     segments: list[TransitSegmentCreate] | None = None
-    # Answers to record up front, by trip member — e.g. an organizer filling in
-    # RSVPs for people who aren't on the app. On a personal item these are who's
-    # coming along (going/maybe); the creator is always in as going.
+    # Who the item is for, by trip member. Nobody is implied: an item for the
+    # whole trip lists every member. Omit to make it just for the creator.
     participants: ParticipantsIn | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        self.requirement, self.visibility = resolve_scope_fields(
-            self.scope, self.requirement, self.visibility
-        )
         if self.transit_mode is TransitMode.MIXED:
             raise ValueError("'mixed' is derived from the legs, not set directly")
         if self.transit_mode is not None and self.kind is not TripItemKind.TRANSIT:
@@ -497,9 +476,6 @@ class TripItemUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: TripItemKind | None = None
-    # Changing scope re-homes the item, so the route requires the caller to be
-    # allowed to modify both the old and the new form.
-    scope: TripItemScope | None = None
     requirement: TripItemRequirement | None = None
     visibility: TripItemVisibility | None = None
     title: str | None = Field(default=None, min_length=1, max_length=200)
@@ -516,14 +492,14 @@ class TripItemUpdate(BaseModel):
     end_place_id: uuid.UUID | None = None
     # Replaces the whole leg list when present; only valid on a transit item.
     segments: list[TransitSegmentCreate] | None = None
-    # Replaces every answer on the item when present (members left out lose
-    # theirs). Same rules as on create.
+    # Replaces who the item is for when present: members left out are dropped,
+    # listed ones keep their answer unless a new status is sent.
     participants: ParticipantsIn | None = None
 
 
 class ParticipantRead(ReadModel):
     member: TripMemberRead
-    status: RsvpStatus
+    status: RsvpStatus | None
     updated_at: datetime
 
 
@@ -565,9 +541,11 @@ class TripItemRead(TimeSpanRead):
     id: uuid.UUID
     trip_id: uuid.UUID
     kind: TripItemKind
-    scope: TripItemScope
+    visibility: TripItemVisibility
+    # True when the caller isn't a participant on a closed item: they get its
+    # kind, title and times, and every other detail below is blanked.
+    redacted: bool = False
     requirement: TripItemRequirement | None
-    visibility: TripItemVisibility | None
     title: str
     notes: str | None
     confirmation_number: str | None
@@ -582,8 +560,7 @@ class TripItemRead(TimeSpanRead):
         default_factory=list, validation_alias="transit_segments", serialization_alias="segments"
     )
     created_by: UserRead | None
-    # RSVPs on a group item; attendees on a personal one. Callers find their
-    # own entry by user id.
+    # Who the item is for. Callers find their own entry by member.user.id.
     participants: list[ParticipantRead]
     created_at: datetime
     updated_at: datetime

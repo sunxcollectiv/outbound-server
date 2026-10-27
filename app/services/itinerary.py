@@ -1,3 +1,4 @@
+import uuid
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 
@@ -12,6 +13,7 @@ from app.schemas import (
     TripRead,
 )
 from app.services.google_places import place_needs_refresh
+from app.services.item_visibility import present_item
 
 
 def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
@@ -46,7 +48,18 @@ def _transit_entries(
     """A transit booking's timeline entries: its departure, a layover for each
     stop between legs, and its arrival. A plain hop with no real arrival (a
     single leg that lands at its departure time, or never) stays one unphased
-    entry, the way any other single-ended item does."""
+    entry, the way any other single-ended item does.
+
+    A redacted booking shows only its own departure and arrival: its legs, and
+    so its layovers, are among the details hidden."""
+    if read.redacted:
+        if item.ends_at is None or item.ends_at == item.starts_at:
+            return [(item.starts_at, ItineraryEntry(item=read))]
+        return [
+            (item.starts_at, ItineraryEntry(item=read, phase="departure")),
+            (item.ends_at, ItineraryEntry(item=read, phase="arrival")),
+        ]
+
     legs = item.transit_segments
     first, last = legs[0], legs[-1]
     distinct = len(legs) > 1 or (first.ends_at is not None and first.ends_at != first.starts_at)
@@ -102,8 +115,9 @@ def _stale_place_ids(items: list[TripItem], now: datetime) -> list[object]:
     ]
 
 
-def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
-    """Group a trip's items into calendar days by their wall times.
+def build_itinerary(trip: Trip, items: list[TripItem], member_id: uuid.UUID) -> Itinerary:
+    """Group a trip's items into calendar days by their wall times, each as
+    the member `member_id` gets to see it (see item_visibility).
 
     Most items appear once, on the day their start names. An item with distinct
     ends is split instead, each piece placed and sorted by the wall time of its
@@ -119,10 +133,13 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     # that day: a flight arriving at 11:00 sorts by 11:00, not by when it left.
     items_by_day: dict[date, list[tuple[datetime, ItineraryEntry]]] = defaultdict(list)
     lodging_by_day: dict[date, list[LodgingStay]] = defaultdict(list)
+    detailed: list[TripItem] = []  # the items whose places the caller may see
 
     for item in items:
         start_day = item.starts_at.date()
-        read = TripItemRead.model_validate(item)
+        read = present_item(item, member_id)
+        if not read.redacted:
+            detailed.append(item)
 
         if item.kind is TripItemKind.TRANSIT:
             for moment, entry in _transit_entries(read, item):
@@ -174,5 +191,5 @@ def build_itinerary(trip: Trip, items: list[TripItem]) -> Itinerary:
     return Itinerary(
         trip=TripRead.model_validate(trip),
         days=days,
-        stale_place_ids=_stale_place_ids(items, datetime.now(UTC)),
+        stale_place_ids=_stale_place_ids(detailed, datetime.now(UTC)),
     )

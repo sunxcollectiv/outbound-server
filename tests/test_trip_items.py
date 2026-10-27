@@ -34,7 +34,6 @@ def test_itinerary_flags_stale_places_for_followup_refresh(client, make_user, ma
         url,
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Coffee",
             "starts_at": "2026-04-10T09:00:00",
             "start_timezone": "America/Los_Angeles",
@@ -71,7 +70,6 @@ def test_item_round_trip_with_places(client, make_user, make_trip):
         url,
         json={
             "kind": "transit",
-            "scope": "group",
             "title": "Train to Osaka",
             "tags": ["Transit", "JR"],
             "starts_at": "2026-04-14T09:00:00",
@@ -92,10 +90,14 @@ def test_item_round_trip_with_places(client, make_user, make_trip):
     assert item["starts_at_utc"] == "2026-04-14T00:00:00Z"
     assert item["ends_at_utc"] == "2026-04-14T00:30:00Z"
     assert item["tags"] == ["Transit", "JR"]
-    assert item["requirement"] == "optional"
-    assert item["visibility"] is None
+    assert item["requirement"] is None
+    assert item["visibility"] == "open"
+    assert item["redacted"] is False
     assert item["created_by"]["email"] == "sun@example.com"
-    assert item["participants"] == []
+    # With no participants given, it's just for whoever added it.
+    assert [(p["member"]["email"], p["status"]) for p in item["participants"]] == [
+        ("sun@example.com", None)
+    ]
     # A plain hop is kept as its single leg, mirroring the item's own ends.
     assert len(item["segments"]) == 1
     leg = item["segments"][0]
@@ -121,7 +123,6 @@ def test_item_validation(client, make_user, make_trip):
     url = f"/trips/{trip['id']}/items"
     base = {
         "kind": "activity",
-        "scope": "group",
         "title": "Dinner",
         "starts_at": "2026-04-09T18:30:00",
         "start_timezone": "Asia/Tokyo",
@@ -149,11 +150,8 @@ def test_item_validation(client, make_user, make_trip):
     del end_zone_on_floating["start_timezone"]
     assert client.post(url, json=end_zone_on_floating, headers=sun).status_code == 422
 
-    # Group items carry a requirement, personal items a visibility; never the other.
-    group_with_visibility = {**base, "visibility": "shared"}
-    assert client.post(url, json=group_with_visibility, headers=sun).status_code == 422
-    personal_with_requirement = {**base, "scope": "personal", "requirement": "mandatory"}
-    assert client.post(url, json=personal_with_requirement, headers=sun).status_code == 422
+    # The old group/personal scope and `shared` visibility are gone.
+    assert client.post(url, json={**base, "visibility": "shared"}, headers=sun).status_code == 422
 
     assert client.post(url, json=base, headers=stranger).status_code == 404
 
@@ -164,14 +162,15 @@ def test_item_validation(client, make_user, make_trip):
     # The old single-zone field is gone, not silently ignored.
     assert client.patch(item_url, json={"timezone": "Asia/Tokyo"}, headers=sun).status_code == 422
 
-    # The scope-bound field can't be nulled or swapped for the other scope's.
-    assert client.patch(item_url, json={"scope": None}, headers=sun).status_code == 422
-    assert client.patch(item_url, json={"requirement": None}, headers=sun).status_code == 422
-    assert client.patch(item_url, json={"visibility": "open"}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"scope": "group"}, headers=sun).status_code == 422
+    assert client.patch(item_url, json={"visibility": None}, headers=sun).status_code == 422
     assert client.patch(item_url, json={"colour": "red"}, headers=sun).status_code == 422
+    # requirement is an optional label on any item.
     changed = client.patch(item_url, json={"requirement": "mandatory"}, headers=sun)
     assert changed.status_code == 200
     assert changed.json()["requirement"] == "mandatory"
+    cleared = client.patch(item_url, json={"requirement": None}, headers=sun)
+    assert cleared.json()["requirement"] is None
 
 
 def test_items_without_a_zone_float(client, make_user, make_trip):
@@ -184,7 +183,6 @@ def test_items_without_a_zone_float(client, make_user, make_trip):
         url,
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Dinner at my place",
             "starts_at": "2026-04-17T19:00:00",
             "ends_at": "2026-04-17T22:00:00",
@@ -233,7 +231,6 @@ def test_aware_times_are_converted_into_the_resolved_zone(client, make_user, mak
         f"/trips/{trip['id']}/items",
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Call from the office",
             "starts_at": "2026-04-14T09:00:00+09:00",
             "start_timezone": "America/Los_Angeles",
@@ -255,7 +252,6 @@ def test_patching_only_the_timezone_keeps_the_wall_time(client, make_user, make_
         url,
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Standup",
             "starts_at": "2026-04-14T09:00:00",
             "start_timezone": "Asia/Tokyo",
@@ -290,7 +286,6 @@ def test_clearing_ends_at_clears_its_timezone(client, make_user, make_trip):
         url,
         json={
             "kind": "lodging",
-            "scope": "group",
             "title": "Hotel",
             "starts_at": "2026-04-09T15:00:00",
             "start_timezone": "Asia/Tokyo",
@@ -323,7 +318,6 @@ def test_cross_zone_transit_may_arrive_at_an_earlier_wall_time(client, make_user
     url = f"/trips/{trip['id']}/items"
     flight = {
         "kind": "transit",
-        "scope": "personal",
         "title": "Fly home",
         "starts_at": "2026-04-14T17:00:00",
         "start_timezone": "Asia/Tokyo",
@@ -367,7 +361,6 @@ def test_items_are_scoped_to_their_trip(client, make_user, make_trip):
         f"/trips/{japan['id']}/items",
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Dinner",
             "starts_at": "2026-04-09T18:30:00",
             "start_timezone": "Asia/Tokyo",
@@ -386,8 +379,8 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip, ad
     url = f"/trips/{trip['id']}"
     add_member(trip["id"], sun, sean)
 
-    def add(headers=sun, scope="group", start_timezone="Asia/Tokyo", **item):
-        payload = {"scope": scope, "start_timezone": start_timezone, **item}
+    def add(headers=sun, start_timezone="Asia/Tokyo", **item):
+        payload = {"start_timezone": start_timezone, **item}
         response = client.post(f"{url}/items", json=payload, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()
@@ -407,10 +400,9 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip, ad
         starts_at="2026-04-09T12:00:00",
         ends_at="2026-04-11T11:00:00",
     )
-    # Sean posts his own flight; it's shared so the group sees when he lands.
+    # Sean posts his own flight; it's open so the group sees when he lands.
     add(
         headers=sean,
-        scope="personal",
         kind="transit",
         title="Sean Salim arrives",
         starts_at="2026-04-09T15:00:00",
@@ -440,9 +432,9 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_trip, ad
     assert [entry["phase"] for entry in days[0]["items"]] == [None, "check_in", None, None]
     arrival = days[0]["items"][2]["item"]
     assert arrival["created_by"]["email"] == "sean@example.com"
-    assert arrival["visibility"] == "shared"
+    assert arrival["visibility"] == "open"
     assert [(p["member"]["email"], p["status"]) for p in arrival["participants"]] == [
-        ("sean@example.com", "going")
+        ("sean@example.com", None)
     ]
     assert [entry["item"]["title"] for entry in days[1]["items"]] == ["Golden Gai", "Jet-lag nap"]
 
@@ -464,7 +456,6 @@ def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make
     def add(title, starts_at, start_timezone=None, **item):
         payload = {
             "kind": "activity",
-            "scope": "group",
             "title": title,
             "starts_at": starts_at,
             "start_timezone": start_timezone,
@@ -520,7 +511,6 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
         f"{url}/items",
         json={
             "kind": "transit",
-            "scope": "personal",
             "title": "Flight to Tokyo",
             "starts_at": "2026-04-08T23:00:00Z",
             "ends_at": "2026-04-09T22:00:00Z",
@@ -538,7 +528,6 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
         f"{url}/items",
         json={
             "kind": "activity",
-            "scope": "group",
             "title": "Breakfast",
             "starts_at": "2026-04-10T06:00:00",
             "start_timezone": "Asia/Tokyo",
@@ -577,7 +566,6 @@ def test_multi_leg_transit_shows_layovers(client, make_user, make_trip):
         f"{url}/items",
         json={
             "kind": "transit",
-            "scope": "group",
             "title": "Home to Osaka",
             "segments": [
                 {
@@ -650,7 +638,7 @@ def test_layover_timezone_comes_from_segments_without_places(client, make_user, 
     created = client.post(
         f"{url}/items",
         json={
-            "kind": "transit", "scope": "personal", "title": "LAX to Osaka via Tokyo",
+            "kind": "transit", "title": "LAX to Osaka via Tokyo",
             "segments": [
                 {"starts_at": "2026-04-10T07:00:00", "start_timezone": "America/Los_Angeles",
                  "ends_at": "2026-04-11T11:00:00", "end_timezone": "Asia/Tokyo"},
@@ -675,7 +663,7 @@ def test_layover_timezone_null_when_legs_disagree(client, make_user, make_trip):
     created = client.post(
         f"{url}/items",
         json={
-            "kind": "transit", "scope": "personal", "title": "Mismatched zones",
+            "kind": "transit", "title": "Mismatched zones",
             "segments": [
                 {"starts_at": "2026-04-10T07:00:00", "start_timezone": "America/Los_Angeles",
                  "ends_at": "2026-04-11T11:00:00", "end_timezone": "Asia/Tokyo"},
@@ -698,7 +686,7 @@ def test_transit_segment_validation(client, make_user, make_trip):
     leg = {"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo"}
 
     def post(**item):
-        return client.post(url, json={"scope": "group", "title": "x", **item}, headers=sun)
+        return client.post(url, json={"title": "x", **item}, headers=sun)
 
     # Only transit carries segments.
     assert post(kind="activity", segments=[leg]).status_code == 422
@@ -740,7 +728,7 @@ def test_transit_mode_rolls_up_from_legs(client, make_user, make_trip):
     # Uniform-mode multi-leg booking: the item summarizes to that mode; legs carry
     # their own mode, and a separately-ticketed leg keeps its own confirmation.
     flight = client.post(url, json={
-        "kind": "transit", "scope": "group", "title": "JFK to MEL",
+        "kind": "transit", "title": "JFK to MEL",
         "confirmation_number": "HPY28W",
         "segments": [
             {"starts_at": "2026-11-10T16:25:00", "start_timezone": "America/New_York",
@@ -762,7 +750,7 @@ def test_transit_mode_rolls_up_from_legs(client, make_user, make_trip):
 
     # Genuinely mixed booking → the item summarizes as "mixed".
     mixed = client.post(url, json={
-        "kind": "transit", "scope": "group", "title": "Ferry then bus",
+        "kind": "transit", "title": "Ferry then bus",
         "segments": [
             {"starts_at": "2026-05-01T09:00:00", "start_timezone": "Europe/Athens",
              "ends_at": "2026-05-01T11:00:00", "end_timezone": "Europe/Athens", "transit_mode": "ferry"},
@@ -775,7 +763,7 @@ def test_transit_mode_rolls_up_from_legs(client, make_user, make_trip):
 
     # Plain hop: item-level mode is allowed and is copied onto the lone leg.
     hop = client.post(url, json={
-        "kind": "transit", "scope": "group", "title": "Train to Kyoto", "transit_mode": "train",
+        "kind": "transit", "title": "Train to Kyoto", "transit_mode": "train",
         "starts_at": "2026-04-12T10:00:00", "start_timezone": "Asia/Tokyo",
         "ends_at": "2026-04-12T12:30:00", "end_timezone": "Asia/Tokyo",
     }, headers=sun).json()
@@ -789,7 +777,7 @@ def test_transit_mode_validation(client, make_user, make_trip):
     url = f"/trips/{trip['id']}/items"
 
     def post(**item):
-        return client.post(url, json={"scope": "group", "title": "x", **item}, headers=sun)
+        return client.post(url, json={"title": "x", **item}, headers=sun)
 
     # Mode only on transit items.
     assert post(kind="activity", starts_at="2026-04-10T09:00:00",
@@ -818,13 +806,12 @@ def test_deleting_an_item_cascades_its_segments_and_rsvps(
     url = f"/trips/{trip['id']}/items"
     add_member(trip["id"], sun, sean)
 
-    # A plain transit hop auto-builds a single leg from its own ends, and a
-    # member's RSVP adds a participant row — one of each child table.
+    # A plain transit hop auto-builds a single leg from its own ends; the
+    # creator is its participant, and a member's RSVP adds them as another.
     item = client.post(
         url,
         json={
             "kind": "transit",
-            "scope": "group",
             "title": "Airport shuttle",
             "starts_at": "2026-04-10T09:00:00",
             "start_timezone": "Asia/Tokyo",
@@ -839,7 +826,7 @@ def test_deleting_an_item_cascades_its_segments_and_rsvps(
         return session.scalar(select(func.count()).select_from(model).where(column == item_id))
 
     assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 1
-    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 1
+    assert _count(TripItemParticipant, TripItemParticipant.item_id) == 2
 
     assert client.delete(f"{url}/{item['id']}", headers=sun).status_code == 204
 

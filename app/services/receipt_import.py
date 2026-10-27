@@ -123,7 +123,6 @@ def _item_payload(
 
     values: dict[str, Any] = {
         "kind": kind,
-        "scope": "personal",
         "title": (item.get("title") or "Booking")[:200],
         "confirmation_number": item.get("confirmation_number"),
     }

@@ -2,7 +2,7 @@ import uuid
 from datetime import date
 
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import (
@@ -13,15 +13,13 @@ from app.api.deps import (
     ViewableTrip,
     is_organizer,
 )
-from app.api.trip_items import check_places, visible_items, with_item_details
+from app.api.trip_items import check_places, viewer, with_item_details
 from app.models import (
     Area,
     Place,
     Trip,
     TripDay,
-    TripItem,
     TripItemParticipant,
-    TripItemScope,
     TripMember,
     TripRole,
     User,
@@ -36,6 +34,7 @@ from app.schemas import (
     TripRead,
     TripUpdate,
 )
+from app.services.item_visibility import visible_items
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
 
@@ -57,23 +56,10 @@ def _clean_area_ids(session: SessionDep, area_ids: list[uuid.UUID]) -> list[uuid
     return unique
 
 
-def _remove_member_items(session: SessionDep, trip: Trip, user_id: uuid.UUID) -> None:
-    """A departing account's personal items go with them; group items they
-    posted stay."""
-    session.execute(
-        delete(TripItem).where(
-            TripItem.trip_id == trip.id,
-            TripItem.scope == TripItemScope.PERSONAL,
-            TripItem.created_by_id == user_id,
-        )
-    )
-
-
 def _remove_member(session: SessionDep, trip: Trip, member: TripMember) -> None:
-    """Their RSVPs go too. The FK would cascade them, but removing them through
-    each item keeps any item already loaded in the session in step."""
-    if member.user_id is not None:
-        _remove_member_items(session, trip, member.user_id)
+    """They come off every item they were a participant on. Items they added
+    stay. The FK would cascade the rows, but removing them through each item
+    keeps any item already loaded in the session in step."""
     answers = select(TripItemParticipant).where(TripItemParticipant.member_id == member.id)
     for row in session.scalars(answers.options(selectinload(TripItemParticipant.item))):
         row.item.participants.remove(row)  # delete-orphan
@@ -228,10 +214,11 @@ def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
 
 @router.get("/{trip_id}/itinerary", response_model=Itinerary)
 def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -> Itinerary:
-    """Everyone's plans in one view: group items plus every member's shared
-    items, each tagged with who added it. Private items show only to their creator."""
-    items = session.scalars(with_item_details(visible_items(trip, user)))
-    return build_itinerary(trip, list(items))
+    """Everyone's plans in one view, each item as the caller gets to see it:
+    private items only if they're on them, closed ones cut down unless they are."""
+    member = viewer(session, trip, user)
+    items = session.scalars(with_item_details(visible_items(trip, member)))
+    return build_itinerary(trip, list(items), member.id)
 
 
 # --- days ---

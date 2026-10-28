@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_session
 from app.main import app
+from app.models import User
 from app.services.google_places import (
     GooglePlaceNotFound,
     GooglePlacesClient,
@@ -256,6 +258,20 @@ def make_trip(client: TestClient) -> Callable[..., dict[str, Any]]:
         response = client.post("/trips", json={**JAPAN_TRIP, **overrides}, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()
+
+    return _make
+
+
+@pytest.fixture
+def make_admin(session: Session) -> Callable[[AuthHeaders], AuthHeaders]:
+    """Makes an existing user an admin, the way scripts/make_admin.py does."""
+
+    def _make(headers: AuthHeaders) -> AuthHeaders:
+        user = session.get(User, uuid.UUID(headers.user_id))
+        assert user is not None
+        user.is_admin = True
+        session.flush()
+        return headers
 
     return _make
 

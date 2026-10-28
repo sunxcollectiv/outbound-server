@@ -5,17 +5,17 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import User
-from app.schemas import UserRead, UserUpdate
+from app.schemas import AccountRead, UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("/me", response_model=UserRead)
+@router.get("/me", response_model=AccountRead)
 def read_me(user: CurrentUser) -> User:
     return user
 
 
-@router.patch("/me", response_model=UserRead)
+@router.patch("/me", response_model=AccountRead)
 def update_me(payload: UserUpdate, user: CurrentUser, session: SessionDep) -> User:
     changes = payload.model_dump(exclude_unset=True)
     if changes.get("display_name", "") is None:

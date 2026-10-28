@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 
 from app.api import (
+    announcements,
     auth,
     areas,
+    notifications,
     places,
     received_images,
     received_mail,
@@ -21,6 +23,8 @@ app.include_router(places.router)
 app.include_router(areas.router)
 app.include_router(received_mail.router)
 app.include_router(received_images.router)
+app.include_router(notifications.router)
+app.include_router(announcements.router)
 
 
 @app.get("/health", tags=["meta"])

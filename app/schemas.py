@@ -318,6 +318,9 @@ class TripUpdate(BaseModel):
     # anyone missing is removed with their personal items and RSVPs. The owner
     # is always kept, as an organizer, whether listed or not.
     members: TripMembersIn | None = None
+    # Tell the trip's other members what changed: in their inbox, and as a
+    # push if they allow it. Nothing is sent if the edit changes nothing.
+    notify_members: bool = False
 
 
 class TripRead(ReadModel):

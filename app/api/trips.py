@@ -37,6 +37,7 @@ from app.schemas import (
 from app.services.item_visibility import visible_items
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
+from app.services.trip_notifications import TripSnapshot, notify_trip_updated
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
@@ -180,10 +181,16 @@ def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
 
 
 @router.patch("/{trip_id}", response_model=TripRead)
-def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -> Trip:
+def update_trip(
+    payload: TripUpdate, trip: OrganizerTrip, user: CurrentUser, session: SessionDep
+) -> Trip:
+    """Edit the trip. With `notify_members`, everyone else on it is told what
+    changed (and anyone the edit adds, that they were added)."""
     changes = payload.model_dump(exclude_unset=True)
     area_ids = changes.pop("area_ids", None)
     changes.pop("members", None)
+    changes.pop("notify_members", None)
+    before = TripSnapshot.of(trip) if payload.notify_members else None
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} cannot be null")
@@ -201,6 +208,8 @@ def update_trip(payload: TripUpdate, trip: OrganizerTrip, session: SessionDep) -
         _set_members(session, trip, payload.members, replace=True)
     if "start_date" in changes or "end_date" in changes:
         sync_trip_days(trip)
+    if before is not None:
+        notify_trip_updated(session, trip, user, before)
     session.commit()
     attach_areas(session, [trip])
     return trip

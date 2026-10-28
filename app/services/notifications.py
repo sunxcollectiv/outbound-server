@@ -6,8 +6,8 @@ same transaction as the change it reports and vanishes with it on rollback.
 
 What reaches a user is gated by their preferences: a category × channel matrix
 whose defaults live in DEFAULTS, with only a user's changes stored. The inbox
-is the in_app channel; push and email have preferences and (for push) device
-tokens already, but no sender yet — they'd hang off `notify`.
+is the in_app channel. Push goes out from `notify` once the caller commits
+(app.services.push); email has preferences but no sender yet.
 
 Broadcasts are `Announcement` rows, copied into a user's inbox by
 `sync_announcements` the first time it's read while they run, so the inbox is
@@ -16,7 +16,7 @@ one table with one notion of read/unread.
 
 import uuid
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import ColumnElement, Select, Uuid, exists, func, literal, or_, select, update
@@ -36,6 +36,7 @@ from app.models import (
     TripMember,
     User,
 )
+from app.services import push
 
 C = NotificationCategory
 CH = NotificationChannel
@@ -128,7 +129,9 @@ def notify(
     """Put a notification in each recipient's inbox; returns how many got one.
 
     The actor never hears about their own doing, and anyone who has switched
-    `category` off in the inbox is skipped. `visible_at` (aware) holds it back
+    `category` off in the inbox is skipped. Once the session commits, those
+    with push on for `category` get it on their phones too (unless it's
+    scheduled: those aren't pushed yet). `visible_at` (aware) holds it back
     until then, e.g. a reminder written when the flight is booked;
     `expires_at` takes it out of the inbox again.
 
@@ -168,9 +171,12 @@ def notify(
             constraint="uq_notifications_user_id_dedupe_key",
             set_={**refreshed, "read_at": None, "archived_at": None},
         )
-    session.execute(statement)
-    # Push and email go out from here once they have senders: same recipients,
-    # filtered through enabled(..., CH.PUSH / CH.EMAIL).
+    # On a dedupe conflict the existing row's id comes back, not the new one.
+    ids = list(session.scalars(statement.returning(Notification.id)))
+    if visible_at is None or visible_at <= datetime.now(UTC):
+        push.queue(session, ids)
+    # Email goes out from here once it has a sender: filter the same
+    # recipients through enabled(..., CH.EMAIL).
     return len(recipients)
 
 

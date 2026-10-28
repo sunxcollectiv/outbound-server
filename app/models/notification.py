@@ -38,7 +38,7 @@ class NotificationCategory(StrEnum):
 
 class NotificationChannel(StrEnum):
     IN_APP = "in_app"  # the inbox (notifications table)
-    PUSH = "push"  # APNs/FCM via push_devices; no sender yet
+    PUSH = "push"  # to push_devices: APNs (app.services.push); no Android sender yet
     EMAIL = "email"  # no sender yet
 
 
@@ -188,7 +188,8 @@ class NotificationPreference(Base):
 class PushDevice(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A device the app can push to: an APNs/FCM/web-push token registered by
     the client after login. A token belongs to one user at a time; registering
-    it again from another account moves it. Nothing sends to these yet."""
+    it again from another account moves it. iOS tokens get pushes via
+    app.services.push, which deletes any Apple reports as dead."""
 
     __tablename__ = "push_devices"
 

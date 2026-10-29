@@ -449,6 +449,10 @@ class TripItemCreate(BaseModel):
     # Who the item is for, by trip member. Nobody is implied: an item for the
     # whole trip lists every member. Omit to make it just for the creator.
     participants: ParticipantsIn | None = None
+    # Tell the trip's other members about it, as far as they can see the item
+    # (see app.services.item_notifications): in their inbox, and as a push if
+    # they allow it.
+    notify_members: bool = False
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -510,6 +514,9 @@ class TripItemUpdate(BaseModel):
     # Replaces who the item is for when present: members left out are dropped,
     # listed ones keep their answer unless a new status is sent.
     participants: ParticipantsIn | None = None
+    # Tell the trip's other members what changed, as with TripItemCreate.
+    # Nothing is sent if the edit changes nothing.
+    notify_members: bool = False
 
 
 class ParticipantRead(ReadModel):

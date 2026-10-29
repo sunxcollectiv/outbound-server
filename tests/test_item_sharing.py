@@ -204,3 +204,22 @@ def test_removing_a_member_takes_them_off_items(client, wedding):
     assert _titles(client, url, sun) == ["Sean's flight", "Ceremony"]
     after = client.get(f"{url}/items/{ceremony['id']}", headers=sun).json()
     assert _rsvps(after) == {"sun@example.com": None}
+
+
+def test_an_untitled_item_is_named_by_what_the_reader_can_see(client, wedding):
+    url, sun, amy, add = (wedding[k] for k in ("url", "sun", "amy", "add"))
+    spa = _place(client, sun, "Thermae")
+    add(sun, participants=["sun"], place_id=spa["id"], visibility="closed")
+    add(sun, participants=["sun"], title="Massage", place_id=spa["id"], visibility="closed")
+
+    names = lambda items: [(i["title"], i["display_title"], bool(i["place"])) for i in items]
+    # Its participant sees the place, so it goes by the place's name.
+    assert names(client.get(f"{url}/items", headers=sun).json()) == [
+        (None, "Thermae", True),
+        ("Massage", "Massage", True),
+    ]
+    # Anyone else can't, so it goes by its kind; a title shows either way.
+    assert names(client.get(f"{url}/items", headers=amy).json()) == [
+        (None, "Activity", False),
+        ("Massage", "Massage", False),
+    ]

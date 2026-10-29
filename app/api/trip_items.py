@@ -35,11 +35,18 @@ from app.services.timekeeping import to_local, to_utc
 
 router = APIRouter(prefix="/trips/{trip_id}/items", tags=["trip items"])
 
-NOT_NULLABLE = ("kind", "visibility", "title", "tags", "starts_at")
+NOT_NULLABLE = ("kind", "visibility", "tags", "starts_at")
 
 
 def _unprocessable(detail: str) -> HTTPException:
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
+
+
+def _check_named(title: str | None, place_id: uuid.UUID | None) -> None:
+    """422 unless the item has a title or a place to go by. Checked on the
+    settled values, since a segmented transit's place comes from its first leg."""
+    if title is None and place_id is None:
+        raise _unprocessable("an item needs a title or a place")
 
 
 def viewer(session: Session, trip: Trip, user: User) -> TripMember:
@@ -275,6 +282,7 @@ def build_trip_item(
         check_places(session, values)
         _resolve_times(session, values)
         segments = []
+    _check_named(values["title"], values["place_id"])
     item = TripItem(**values, trip_id=trip.id, created_by_id=user.id)
     item.transit_segments = segments
     if payload.participants is not None:
@@ -370,6 +378,7 @@ def update_item(
         if item.kind is TripItemKind.TRANSIT:  # leaving transit drops its legs
             item.transit_segments = []
 
+    _check_named(changes.get("title", item.title), changes.get("place_id", item.place_id))
     for field, value in changes.items():
         setattr(item, field, value)
     if payload.participants is not None:

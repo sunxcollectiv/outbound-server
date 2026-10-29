@@ -114,10 +114,34 @@ def test_delivery_sends_the_payload_the_app_expects(client, session, make_trip, 
             "alert": {"title": "Gate change", "body": "Now boarding at 52"},
             "sound": "default",
             "badge": 2,
+            "category": "TRIP_ACTIVITY",
         },
         "notification_id": str(latest.id),
         "trip_id": trip["id"],
+        "trip_title": "Japan",
     }
+
+
+def test_trip_pushes_carry_the_trips_current_name(
+    client, session, make_user, make_trip, pushes, apns, sun
+):
+    """A real trip edit, through to the rich card's category and name tag."""
+    sean = make_user("sean")
+    trip = make_trip(sun, members=[{"email": sean.email}])
+    _device(client, sean, "seans-phone")
+    renamed = client.patch(
+        f"/trips/{trip['id']}", json={"title": "Japan 2027", "notify_members": True}, headers=sun
+    )
+    assert renamed.status_code == 200, renamed.text
+    # Renamed again, quietly, before the push goes out: the tag says what it's called now.
+    client.patch(f"/trips/{trip['id']}", json={"title": "Tokyo"}, headers=sun)
+
+    deliver(session, pushes.ids, apns)
+    [(token, payload, _)] = apns.sent
+    assert token == "seans-phone"
+    assert payload["aps"]["category"] == "TRIP_ACTIVITY"
+    assert payload["aps"]["alert"]["title"] == "Japan 2027"
+    assert payload["trip_title"] == "Tokyo"
 
 
 def test_delivery_leaves_out_what_a_notification_lacks(client, session, pushes, apns, sun):

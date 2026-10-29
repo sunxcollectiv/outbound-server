@@ -31,6 +31,7 @@ from app.models import (
     NotificationChannel,
     PushDevice,
     PushPlatform,
+    Trip,
     User,
 )
 from app.services.apns import ApnsClient, get_apns_client
@@ -91,18 +92,27 @@ dispatcher: Callable[[list[uuid.UUID]], None] = _deliver_in_background
 # --- delivery ---
 
 
-def payload(notification: Notification, badge: int) -> dict[str, Any]:
+# The iOS notification category for pushes about a trip: the app registers a
+# content extension (the rich card) and its actions under this name.
+TRIP_CATEGORY = "TRIP_ACTIVITY"
+
+
+def payload(
+    notification: Notification, badge: int, trip_title: str | None = None
+) -> dict[str, Any]:
     """What the app gets: the alert, the badge, and the ids it opens on tap.
-    Keys with nothing to say are left out."""
+    A push about a trip also names the iOS category for the rich card, with
+    the trip's current name for it. Keys with nothing to say are left out."""
     alert = {"title": notification.title}
     if notification.body:
         alert["body"] = notification.body[:BODY_MAX_CHARS]
-    content: dict[str, Any] = {
-        "aps": {"alert": alert, "sound": "default", "badge": badge},
-        "notification_id": str(notification.id),
-    }
+    aps: dict[str, Any] = {"alert": alert, "sound": "default", "badge": badge}
+    content: dict[str, Any] = {"aps": aps, "notification_id": str(notification.id)}
     if notification.trip_id is not None:
+        aps["category"] = TRIP_CATEGORY
         content["trip_id"] = str(notification.trip_id)
+        if trip_title is not None:
+            content["trip_title"] = trip_title
     if notification.trip_item_id is not None:
         content["trip_item_id"] = str(notification.trip_item_id)
     return content
@@ -149,11 +159,19 @@ def deliver(session: Session, notification_ids: Iterable[uuid.UUID], client: Apn
         user.id: unread_count(session, user)
         for user in session.scalars(select(User).where(User.id.in_(owners)))
     }
+    # The trip's name as it is now, for the rich card's tag.
+    trip_titles: dict[uuid.UUID, str] = {}
+    trip_ids = {n.trip_id for n in wanted if n.trip_id is not None}
+    if trip_ids:
+        rows = session.execute(select(Trip.id, Trip.title).where(Trip.id.in_(trip_ids)))
+        trip_titles = {trip_id: title for trip_id, title in rows}
 
     accepted = 0
     dead: set[uuid.UUID] = set()
     for notification in wanted:
-        content = payload(notification, badges[notification.user_id])
+        content = payload(
+            notification, badges[notification.user_id], trip_titles.get(notification.trip_id)
+        )
         for device in devices.get(notification.user_id, []):
             if device.id in dead:
                 continue

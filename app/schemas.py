@@ -4,10 +4,12 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     AfterValidator,
+    AwareDatetime,
     BaseModel,
     ConfigDict,
     EmailStr,
     Field,
+    computed_field,
     field_serializer,
     field_validator,
     model_validator,
@@ -15,6 +17,9 @@ from pydantic import (
 
 from app.models import (
     EmailReceiptStatus,
+    NotificationCategory,
+    NotificationChannel,
+    PushPlatform,
     RsvpStatus,
     TransitMode,
     TripItemKind,
@@ -64,6 +69,13 @@ class UserRead(ReadModel):
     created_at: datetime
 
 
+class AccountRead(UserRead):
+    """The signed-in user's own account: what anyone sees, plus flags only
+    they need."""
+
+    is_admin: bool
+
+
 # --- auth ---
 
 
@@ -78,7 +90,7 @@ class TokenRead(BaseModel):
 
     token: str
     expires_at: datetime
-    user: UserRead
+    user: AccountRead
 
 
 # --- areas (the place-on-the-map a place sits in) ---
@@ -306,6 +318,9 @@ class TripUpdate(BaseModel):
     # anyone missing is removed with their personal items and RSVPs. The owner
     # is always kept, as an organizer, whether listed or not.
     members: TripMembersIn | None = None
+    # Tell the trip's other members what changed: in their inbox, and as a
+    # push if they allow it. Nothing is sent if the edit changes nothing.
+    notify_members: bool = False
 
 
 class TripRead(ReadModel):
@@ -434,6 +449,10 @@ class TripItemCreate(BaseModel):
     # Who the item is for, by trip member. Nobody is implied: an item for the
     # whole trip lists every member. Omit to make it just for the creator.
     participants: ParticipantsIn | None = None
+    # Tell the trip's other members about it, as far as they can see the item
+    # (see app.services.item_notifications): in their inbox, and as a push if
+    # they allow it.
+    notify_members: bool = False
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -495,6 +514,9 @@ class TripItemUpdate(BaseModel):
     # Replaces who the item is for when present: members left out are dropped,
     # listed ones keep their answer unless a new status is sent.
     participants: ParticipantsIn | None = None
+    # Tell the trip's other members what changed, as with TripItemCreate.
+    # Nothing is sent if the edit changes nothing.
+    notify_members: bool = False
 
 
 class ParticipantRead(ReadModel):
@@ -680,3 +702,159 @@ class ImageImportResult(ReadModel):
     trip_id: uuid.UUID | None = None
     item_count: int = 0
     candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+# --- notifications ---
+
+
+class NotificationRead(ReadModel):
+    """One inbox entry. `type` says what happened (e.g. "trip_item.updated") and
+    `data` carries what the client needs to render and deep-link it; the trip
+    and item ids go null if those are deleted, leaving the text as written.
+    `announcement_id` is set on broadcasts. Ordered by `visible_at`, which is
+    when it arrived in the inbox."""
+
+    id: uuid.UUID
+    category: NotificationCategory
+    type: str
+    title: str
+    body: str | None
+    data: dict[str, Any]
+    actor: UserRead | None
+    trip_id: uuid.UUID | None
+    trip_item_id: uuid.UUID | None
+    announcement_id: uuid.UUID | None
+    visible_at: datetime
+    expires_at: datetime | None
+    read_at: datetime | None
+    created_at: datetime
+
+    @computed_field
+    @property
+    def read(self) -> bool:
+        return self.read_at is not None
+
+
+class NotificationPage(BaseModel):
+    """A page of the inbox, newest first. Pass `next_cursor` as `before` for
+    the next one; null when there's no more."""
+
+    items: list[NotificationRead]
+    next_cursor: uuid.UUID | None
+
+
+class UnreadCount(BaseModel):
+    count: int
+
+
+class NotificationSend(BaseModel):
+    """A notification sent by hand to particular accounts, by id or email (or
+    both). It isn't from anyone: no actor, so sending one to yourself works.
+    `visible_at` schedules it; `dedupe_key` rewrites an earlier send under the
+    same key instead of adding another."""
+
+    user_ids: list[uuid.UUID] = Field(default_factory=list)
+    emails: list[Email] = Field(default_factory=list)
+    category: NotificationCategory
+    type: str = Field(default="message", min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+    body: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    trip_id: uuid.UUID | None = None
+    trip_item_id: uuid.UUID | None = None
+    visible_at: AwareDatetime | None = None
+    expires_at: AwareDatetime | None = None
+    dedupe_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def _has_recipients(self) -> Self:
+        if not self.user_ids and not self.emails:
+            raise ValueError("name at least one recipient in user_ids or emails")
+        return self
+
+
+class NotificationSendResult(BaseModel):
+    """`recipients` accounts were named; `sent` of them got it (the rest have
+    the category switched off)."""
+
+    recipients: int
+    sent: int
+
+
+class NotificationPreferenceSet(BaseModel):
+    category: NotificationCategory
+    channel: NotificationChannel
+    enabled: bool
+
+
+class NotificationPreferenceRead(NotificationPreferenceSet):
+    # Fixed on: sending it disabled is refused.
+    locked: bool
+
+
+class PushDeviceCreate(BaseModel):
+    platform: PushPlatform
+    token: str = Field(min_length=1, max_length=4096)
+    app_version: str | None = Field(default=None, max_length=40)
+    locale: str | None = Field(default=None, max_length=35)
+    timezone: TimezoneName | None = None
+
+
+class PushDeviceRead(ReadModel):
+    id: uuid.UUID
+    platform: PushPlatform
+    app_version: str | None
+    locale: str | None
+    timezone: str | None
+    last_seen_at: datetime
+    created_at: datetime
+
+
+BroadcastCategory = Literal[NotificationCategory.ANNOUNCEMENT, NotificationCategory.PROMOTION]
+
+
+class AnnouncementCreate(BaseModel):
+    """A broadcast to every user. It shows from `starts_at` (now when omitted)
+    until `ends_at` (open-ended when omitted), including for people who sign
+    up meanwhile. `type` defaults to the category."""
+
+    category: BroadcastCategory
+    type: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+    body: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def _window(self) -> Self:
+        if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
+            raise ValueError("ends_at must be after starts_at")
+        return self
+
+
+class AnnouncementUpdate(BaseModel):
+    """Edits reach copies already in inboxes. Set `ends_at` to now to take one
+    down while keeping it on record."""
+
+    category: BroadcastCategory | None = None
+    type: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    body: str | None = None
+    data: dict[str, Any] | None = None
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime | None = None
+
+
+class AnnouncementRead(ReadModel):
+    id: uuid.UUID
+    category: NotificationCategory
+    type: str
+    title: str
+    body: str | None
+    data: dict[str, Any]
+    starts_at: datetime
+    ends_at: datetime | None
+    created_by_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime

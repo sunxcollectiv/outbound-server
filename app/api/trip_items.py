@@ -25,6 +25,11 @@ from app.schemas import (
     TripItemRead,
     TripItemUpdate,
 )
+from app.services.item_notifications import (
+    ItemSnapshot,
+    notify_item_created,
+    notify_item_updated,
+)
 from app.services.item_visibility import present_item, visible_items
 from app.services.timekeeping import to_local, to_utc
 
@@ -261,6 +266,7 @@ def build_trip_item(
     values = payload.model_dump()
     segments_payload = values.pop("segments", None)
     del values["participants"]
+    del values["notify_members"]
     if payload.kind is TripItemKind.TRANSIT:
         # A transit always has at least one leg: its own ends when none is given.
         segments = _build_segments(session, segments_payload or [_leg_from_span(values)])
@@ -283,8 +289,11 @@ def build_trip_item(
 def create_item(
     payload: TripItemCreate, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> TripItemRead:
-    """Anyone on the trip can add an item, for any of its members."""
+    """Anyone on the trip can add an item, for any of its members. With
+    `notify_members`, the others who can see it are told."""
     item = build_trip_item(session, trip, user, payload)
+    if payload.notify_members:
+        notify_item_created(session, trip, item, user)
     session.commit()
     return present_item(_refresh(session, item), viewer(session, trip, user).id)
 
@@ -305,13 +314,16 @@ def update_item(
     user: CurrentUser,
     session: SessionDep,
 ) -> TripItemRead:
-    """Anyone who can see the item can change it, for now."""
+    """Anyone who can see the item can change it, for now. With
+    `notify_members`, the others who can see it are told what changed."""
     member = viewer(session, trip, user)
     item = _get_item(session, trip, member, item_id)
+    before = ItemSnapshot.of(item) if payload.notify_members else None
 
     changes = payload.model_dump(exclude_unset=True)
     segments_payload = changes.pop("segments", None)
     changes.pop("participants", None)
+    changes.pop("notify_members", None)
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise _unprocessable(f"{field} cannot be null")
@@ -362,6 +374,8 @@ def update_item(
         setattr(item, field, value)
     if payload.participants is not None:
         _set_participants(session, trip, item, payload.participants)
+    if before is not None:
+        notify_item_updated(session, trip, item, user, before)
     session.commit()
     return present_item(_refresh(session, item), member.id)
 

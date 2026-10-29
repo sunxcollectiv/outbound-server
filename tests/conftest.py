@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -11,6 +12,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_session
 from app.main import app
+from app.models import User
+from app.services import push
+from app.services.apns import ApnsClient, ApnsResponse
 from app.services.google_places import (
     GooglePlaceNotFound,
     GooglePlacesClient,
@@ -190,6 +194,52 @@ def image_extractor() -> FakeImageExtractor:
     return FakeImageExtractor()
 
 
+class PushRecorder:
+    """Stands in for the push dispatcher: records the notification ids each
+    commit hands over instead of sending them from a background thread."""
+
+    def __init__(self) -> None:
+        self.batches: list[list[uuid.UUID]] = []
+
+    def __call__(self, notification_ids: list[uuid.UUID]) -> None:
+        self.batches.append(list(notification_ids))
+
+    @property
+    def ids(self) -> list[uuid.UUID]:
+        return [i for batch in self.batches for i in batch]
+
+
+@pytest.fixture(autouse=True)
+def pushes(monkeypatch: pytest.MonkeyPatch) -> PushRecorder:
+    """Every test: no real pushes, even with APNs keys in .env."""
+    recorder = PushRecorder()
+    monkeypatch.setattr(push, "dispatcher", recorder)
+    return recorder
+
+
+class FakeApns(ApnsClient):
+    """Records what it was asked to send. Set `responses[token]` to make a
+    token get that answer from "Apple" (default: accepted), or put an exception
+    there to make the send fail outright."""
+
+    def __init__(self) -> None:
+        self.topic = "earth.outbound"
+        self.sent: list[tuple[str, dict[str, Any], str | None]] = []
+        self.responses: dict[str, ApnsResponse | Exception] = {}
+
+    def send(self, device_token, payload, *, collapse_key=None) -> ApnsResponse:
+        self.sent.append((device_token, payload, collapse_key))
+        response = self.responses.get(device_token, ApnsResponse(200))
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+@pytest.fixture
+def apns() -> FakeApns:
+    return FakeApns()
+
+
 @pytest.fixture
 def client(
     session: Session,
@@ -256,6 +306,20 @@ def make_trip(client: TestClient) -> Callable[..., dict[str, Any]]:
         response = client.post("/trips", json={**JAPAN_TRIP, **overrides}, headers=headers)
         assert response.status_code == 201, response.text
         return response.json()
+
+    return _make
+
+
+@pytest.fixture
+def make_admin(session: Session) -> Callable[[AuthHeaders], AuthHeaders]:
+    """Makes an existing user an admin, the way scripts/make_admin.py does."""
+
+    def _make(headers: AuthHeaders) -> AuthHeaders:
+        user = session.get(User, uuid.UUID(headers.user_id))
+        assert user is not None
+        user.is_admin = True
+        session.flush()
+        return headers
 
     return _make
 

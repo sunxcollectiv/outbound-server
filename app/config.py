@@ -31,6 +31,19 @@ class Settings(BaseSettings):
     # when using one (or use a workspace-scoped key and leave it unset).
     anthropic_workspace_id: str | None = None
     access_token_ttl_days: int = 90
+    # Apple Push Notification service, token auth: a .p8 key from the Apple
+    # developer account (Keys), its id, and the team id. Give the key either
+    # inline (PEM contents; "\n" escapes are fine) or as a path to the file.
+    # With no key, pushes are skipped and the inbox works as before.
+    apns_key_id: str | None = None
+    apns_team_id: str | None = None
+    apns_private_key: str | None = None
+    apns_key_path: str | None = None
+    # The app's bundle id.
+    apns_topic: str = "earth.outbound"
+    # Debug builds (Xcode, the simulator) get sandbox tokens; TestFlight and
+    # App Store builds get production ones. Each only works on its own host.
+    apns_use_sandbox: bool = True
 
 
 @lru_cache

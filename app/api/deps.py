@@ -50,6 +50,15 @@ def get_current_user(access_token: CurrentAccessToken) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def get_admin_user(user: CurrentUser) -> User:
+    if not user.is_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
+    return user
+
+
+AdminUser = Annotated[User, Depends(get_admin_user)]
+
+
 def _trip_role(session: Session, trip: Trip, user: User) -> TripRole | None:
     return session.scalar(
         select(TripMember.role).where(

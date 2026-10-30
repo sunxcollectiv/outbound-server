@@ -12,11 +12,13 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 @router.get("/me", response_model=AccountRead)
 def read_me(user: CurrentUser) -> User:
+    """The signed-in account, including fields only the owner sees (e.g. `is_admin`)."""
     return user
 
 
 @router.patch("/me", response_model=AccountRead)
 def update_me(payload: UserUpdate, user: CurrentUser, session: SessionDep) -> User:
+    """Update the signed-in account's own profile (display name, avatar)."""
     changes = payload.model_dump(exclude_unset=True)
     if changes.get("display_name", "") is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "display_name cannot be null")
@@ -34,6 +36,7 @@ def find_users(email: str, _: CurrentUser, session: SessionDep) -> list[User]:
 
 @router.get("/{user_id}", response_model=UserRead)
 def read_user(user_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> User:
+    """The public profile of one user by id."""
     user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")

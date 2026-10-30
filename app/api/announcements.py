@@ -19,7 +19,12 @@ def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announ
     return announcement
 
 
-@router.post("", response_model=AnnouncementRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=AnnouncementRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Create announcement",
+)
 def create_announcement(
     payload: AnnouncementCreate, admin: AdminUser, session: SessionDep
 ) -> Announcement:
@@ -34,7 +39,9 @@ def create_announcement(
     return announcement
 
 
-@router.get("", response_model=list[AnnouncementRead])
+@router.get(
+    "", response_model=list[AnnouncementRead], summary="[admin] List announcements"
+)
 def list_announcements(_: AdminUser, session: SessionDep) -> list[Announcement]:
     """All announcements, past, running and scheduled; newest start first."""
     return list(
@@ -42,7 +49,11 @@ def list_announcements(_: AdminUser, session: SessionDep) -> list[Announcement]:
     )
 
 
-@router.patch("/{announcement_id}", response_model=AnnouncementRead)
+@router.patch(
+    "/{announcement_id}",
+    response_model=AnnouncementRead,
+    summary="[admin] Update announcement",
+)
 def update_announcement(
     announcement_id: uuid.UUID,
     payload: AnnouncementUpdate,
@@ -70,7 +81,11 @@ def update_announcement(
     return announcement
 
 
-@router.delete("/{announcement_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{announcement_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="[admin] Delete announcement",
+)
 def delete_announcement(announcement_id: uuid.UUID, _: AdminUser, session: SessionDep) -> None:
     """Delete an announcement and take it out of every inbox. To stop it
     without erasing it, PATCH `ends_at` instead."""

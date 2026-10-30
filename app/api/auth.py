@@ -48,6 +48,9 @@ def register(payload: UserCreate, session: SessionDep) -> TokenRead:
 
 @router.post("/login", response_model=TokenRead)
 def login(payload: Credentials, session: SessionDep) -> TokenRead:
+    """Log in with email and password and get a fresh bearer token (good for
+    `access_token_ttl_days`). A wrong password and an unknown email return the
+    same 401, so the response never reveals whether an account exists."""
     user = session.scalar(select(User).where(User.email == payload.email))
     if not verify_password(payload.password, user.password_hash if user else None):
         # Same answer for an unknown email and a wrong password.
@@ -57,5 +60,7 @@ def login(payload: Credentials, session: SessionDep) -> TokenRead:
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(access_token: CurrentAccessToken, session: SessionDep) -> None:
+    """Revoke the bearer token used for this call, ending just this session.
+    Tokens from other devices keep working."""
     session.delete(access_token)
     session.commit()

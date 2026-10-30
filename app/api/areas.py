@@ -46,6 +46,8 @@ def _get_area(session: SessionDep, area_id: uuid.UUID) -> Area:
 def create_area(
     payload: AreaCreate, _: CurrentUser, session: SessionDep
 ) -> Area:
+    """Create an area. The taxonomy is free-form: `kind` (country/territory/
+    city/…) plus a numeric `level`, with an optional `parent_id` for nesting."""
     area = Area(**payload.model_dump())
     session.add(area)
     session.commit()
@@ -138,6 +140,7 @@ def read_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Area:
 def update_area(
     area_id: uuid.UUID, payload: AreaUpdate, _: CurrentUser, session: SessionDep
 ) -> Area:
+    """Edit an area's fields (only those sent are changed)."""
     area = _get_area(session, area_id)
     changes = payload.model_dump(exclude_unset=True)
     if "name" in changes and changes["name"] is None:
@@ -150,5 +153,7 @@ def update_area(
 
 @router.delete("/{area_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> None:
+    """Delete an area. Trips that referenced it simply drop the id on their
+    next read (area_ids holds no foreign key)."""
     session.delete(_get_area(session, area_id))
     session.commit()

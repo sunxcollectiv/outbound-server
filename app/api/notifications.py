@@ -99,13 +99,18 @@ def list_notifications(
     )
 
 
-@router.post("", response_model=NotificationSendResult, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=NotificationSendResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Send notification",
+)
 def send_notification(
     payload: NotificationSend, _: AdminUser, session: SessionDep
 ) -> NotificationSendResult:
-    """Admins only: put a notification in particular people's inboxes, e.g. a
-    support message or to try out how one looks. Unknown ids or emails are a
-    422 and nothing is sent."""
+    """Put a notification in particular people's inboxes, e.g. a support
+    message or to try out how one looks. Unknown ids or emails are a 422 and
+    nothing is sent."""
     recipients: set[uuid.UUID] = set()
     if payload.user_ids:
         found = set(session.scalars(select(User.id).where(User.id.in_(payload.user_ids))))
@@ -214,6 +219,7 @@ def set_preferences(
 
 @router.get("/devices", response_model=list[PushDeviceRead])
 def list_devices(user: CurrentUser, session: SessionDep) -> list[PushDevice]:
+    """The caller's registered push devices, oldest first."""
     return list(
         session.scalars(
             select(PushDevice).where(PushDevice.user_id == user.id).order_by(PushDevice.created_at)
@@ -258,6 +264,7 @@ def unregister_device(device_id: uuid.UUID, user: CurrentUser, session: SessionD
 
 @router.post("/{notification_id}/read", response_model=NotificationRead)
 def mark_read(notification_id: uuid.UUID, user: CurrentUser, session: SessionDep) -> Notification:
+    """Mark one of the caller's notifications read."""
     notification = _get_notification(session, user, notification_id)
     if notification.read_at is None:
         notification.read_at = datetime.now(UTC)
@@ -269,6 +276,7 @@ def mark_read(notification_id: uuid.UUID, user: CurrentUser, session: SessionDep
 def mark_unread(
     notification_id: uuid.UUID, user: CurrentUser, session: SessionDep
 ) -> Notification:
+    """Mark one of the caller's notifications unread again."""
     notification = _get_notification(session, user, notification_id)
     notification.read_at = None
     session.commit()

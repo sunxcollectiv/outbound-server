@@ -138,6 +138,8 @@ def list_places(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[Place]:
+    """List saved places alphabetically by name. Optional `q` filters by name
+    (case-insensitive substring); paged with `limit`/`offset`."""
     query = (
         select(Place)
         .options(selectinload(Place.area))
@@ -152,6 +154,7 @@ def list_places(
 
 @router.get("/{place_id}", response_model=PlaceRead)
 def read_place(place_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Place:
+    """One saved place by id, with its cached Google details."""
     return _get_place(session, place_id)
 
 
@@ -159,6 +162,8 @@ def read_place(place_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Plac
 def update_place(
     place_id: uuid.UUID, payload: PlaceUpdate, _: CurrentUser, session: SessionDep
 ) -> Place:
+    """Edit a place. Changing `google_place_id` clears the cached Google data,
+    since the cache belonged to the old link."""
     place = _get_place(session, place_id)
     changes = payload.model_dump(exclude_unset=True)
     for field in NOT_NULLABLE:
@@ -180,6 +185,8 @@ def update_place(
 def refresh_place_from_google(
     place_id: uuid.UUID, _: CurrentUser, session: SessionDep, places: PlacesDep
 ) -> Place:
+    """Re-fetch this place's details from Google now, ignoring the refresh TTL.
+    409 if the place isn't linked to a Google place."""
     place = _get_place(session, place_id)
     if place.google_place_id is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Place is not linked to a Google place")

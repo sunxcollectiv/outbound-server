@@ -165,7 +165,9 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     visibility: Mapped[TripItemVisibility] = mapped_column(
         str_enum(TripItemVisibility, "trip_item_visibility"), default=TripItemVisibility.OPEN
     )
-    title: Mapped[str] = mapped_column(String(200))
+    # Optional when the item has a place: it's then known by the place's name
+    # (see display_title). The API requires one or the other.
+    title: Mapped[str | None] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(Text)
     # Booking reference / record locator for the whole item — a flight PNR, a
     # hotel confirmation number, etc. Null for items that aren't a booking.
@@ -216,6 +218,20 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         passive_deletes=True,
         order_by="TripItemTransitSegment.position",
     )
+
+    @property
+    def display_title(self) -> str:
+        """What to call the item: its title, else its place's name, else its kind
+        (a place can be unnamed, or deleted out from under the item)."""
+        if not self.title and self.place is not None and self.place.name:
+            return self.place.name
+        return self.redacted_title
+
+    @property
+    def redacted_title(self) -> str:
+        """What to call the item to someone who can't see its place (a
+        non-participant on a closed item): its title, else its kind."""
+        return self.title or self.kind.value.capitalize()
 
 
 class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):

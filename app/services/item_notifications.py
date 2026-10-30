@@ -26,6 +26,7 @@ from app.models import (
     NotificationCategory,
     Trip,
     TripItem,
+    TripItemKind,
     TripItemVisibility,
     TripMember,
     User,
@@ -45,17 +46,39 @@ _LABELS = {
 # What a non-participant can see of a closed item.
 _SEEN_WHEN_CLOSED = ("title", "time")
 
+# How an item reads when it has no title and no place to go by.
+_KIND_PHRASES = {
+    TripItemKind.ACTIVITY: "an activity",
+    TripItemKind.LODGING: "a stay",
+    TripItemKind.TRANSIT: "a transit item",
+}
+
+
+def _name(
+    title: str | None, place_name: str | None, kind: TripItemKind, *, quoted: bool = False
+) -> str:
+    """How an item reads mid-sentence: its title, else its place's name (pass
+    None when the reader can't see the place), else a phrase for its kind.
+    `quoted` puts real names in quotes; a kind phrase never is."""
+    name = title or place_name
+    if not name:
+        return _KIND_PHRASES[kind]
+    return f"“{name}”" if quoted else name
+
 
 @dataclass(frozen=True)
 class ItemSnapshot:
     """The parts of an item an edit can change, to compare before and after."""
 
-    title: str
+    title: str | None
     time: tuple[Any, ...]
     place: tuple[uuid.UUID | None, ...]
     notes: str | None
     participants: frozenset[uuid.UUID]  # member ids
     details: tuple[Any, ...]
+    # To name the item as it was (see _name).
+    place_name: str | None
+    kind: TripItemKind
 
     @classmethod
     def of(cls, item: TripItem) -> "ItemSnapshot":
@@ -91,6 +114,8 @@ class ItemSnapshot:
                 item.image_url,
                 legs,
             ),
+            place_name=item.place.name if item.place is not None else None,
+            kind=item.kind,
         )
 
 
@@ -117,18 +142,33 @@ def day_and_time(moment: datetime) -> str:
     return f"{day(moment)} at {hour}{minutes} {'AM' if moment.hour < 12 else 'PM'}"
 
 
-def _summary(actor: str, changes: list[str], before: ItemSnapshot, item: TripItem) -> str:
+def _item_name(item: TripItem, *, redacted: bool = False, quoted: bool = False) -> str:
+    """`redacted` names the item as a non-participant of a closed item sees it:
+    without its place."""
+    place_name = item.place.name if item.place is not None and not redacted else None
+    return _name(item.title, place_name, item.kind, quoted=quoted)
+
+
+def _summary(
+    actor: str, changes: list[str], before: ItemSnapshot, item: TripItem, *, redacted: bool = False
+) -> str:
+    """`redacted` names the item as a non-participant of a closed item sees it."""
+    name = _item_name(item, redacted=redacted)
     if changes == ["title"]:
-        return f"{actor} renamed “{before.title}” to “{item.title}”"
+        old_name = _name(
+            before.title, None if redacted else before.place_name, before.kind, quoted=True
+        )
+        new_name = _item_name(item, redacted=redacted, quoted=True)
+        return f"{actor} renamed {old_name} to {new_name}"
     if changes == ["time"]:
-        return f"{actor} moved {item.title} to {day_and_time(item.starts_at)}"
+        return f"{actor} moved {name} to {day_and_time(item.starts_at)}"
     if changes == ["place"]:
-        return f"{actor} changed the place for {item.title}"
+        return f"{actor} changed the place for {name}"
     if changes == ["participants"]:
-        return f"{actor} updated who's going to {item.title}"
+        return f"{actor} updated who's going to {name}"
     if changes == ["details"]:
-        return f"{actor} updated the details of {item.title}"
-    return f"{actor} updated the {_and([_LABELS[key] for key in changes])} of {item.title}"
+        return f"{actor} updated the details of {name}"
+    return f"{actor} updated the {_and([_LABELS[key] for key in changes])} of {name}"
 
 
 def _user_ids(session: Session, member_ids: frozenset[uuid.UUID]) -> set[uuid.UUID]:
@@ -157,15 +197,29 @@ def _common(trip: Trip, item: TripItem, actor: User) -> dict[str, Any]:
 def notify_item_created(session: Session, trip: Trip, item: TripItem, actor: User) -> int:
     """Tell the trip about a new item: "Sun added Dinner on Nov 12". Call after
     adding it to the session, before committing. Returns how many people were
-    notified. Title and day only, so it suits every visibility."""
+    notified. Name and day only, so it suits every visibility, though an
+    untitled closed item is named by its kind to those who can't see its place."""
     session.flush()  # the item's id, and its participant rows for the audience
-    return notify(
-        session,
-        user_ids=trip_audience(session, trip, item),
-        type="trip_item.created",
-        body=f"{actor.display_name} added {item.title} on {day(item.starts_at)}",
-        **_common(trip, item, actor),
-    )
+    audience = set(trip_audience(session, trip, item))
+    outsiders: set[uuid.UUID] = set()
+    if item.visibility is TripItemVisibility.CLOSED:
+        outsiders = audience - _user_ids(
+            session, frozenset(p.member_id for p in item.participants)
+        )
+    sent = 0
+    for user_ids, name in (
+        (audience - outsiders, _item_name(item)),
+        (outsiders, _item_name(item, redacted=True)),
+    ):
+        if user_ids:
+            sent += notify(
+                session,
+                user_ids=user_ids,
+                type="trip_item.created",
+                body=f"{actor.display_name} added {name} on {day(item.starts_at)}",
+                **_common(trip, item, actor),
+            )
+    return sent
 
 
 def notify_item_updated(
@@ -175,6 +229,8 @@ def notify_item_updated(
     edit; call after applying it, before committing). Returns how many people
     were notified; none when nothing changed."""
     session.flush()
+    # The edit sets place_id; reload the place so an untitled item reads by its new one.
+    session.expire(item, ["place"])
     after = ItemSnapshot.of(item)
     changes = changes_between(before, after)
     if not changes:
@@ -191,7 +247,7 @@ def notify_item_updated(
             session,
             user_ids=added,
             type="trip_item.participant_added",
-            body=f"{actor.display_name} added you to {item.title} on {day(item.starts_at)}",
+            body=f"{actor.display_name} added you to {_item_name(item)} on {day(item.starts_at)}",
             **common,
         )
 
@@ -205,7 +261,7 @@ def notify_item_updated(
                 session,
                 user_ids=outsiders,
                 type="trip_item.updated",
-                body=_summary(actor.display_name, seen, before, item),
+                body=_summary(actor.display_name, seen, before, item, redacted=True),
                 data={"changes": seen},
                 **common,
             )

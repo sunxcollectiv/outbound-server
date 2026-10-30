@@ -422,7 +422,9 @@ class TripItemCreate(BaseModel):
     requirement: TripItemRequirement | None = None
     # What people who aren't participants see. Participants always see it all.
     visibility: TripItemVisibility = TripItemVisibility.OPEN
-    title: str = Field(min_length=1, max_length=200)
+    # Needed unless the item has a place (for a segmented transit, its first
+    # leg's), whose name then stands in for it.
+    title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
     # Transit only, and only for a plain hop — a segmented transit's mode is
@@ -497,6 +499,7 @@ class TripItemUpdate(BaseModel):
     kind: TripItemKind | None = None
     requirement: TripItemRequirement | None = None
     visibility: TripItemVisibility | None = None
+    # null drops the title, as long as the item keeps a place.
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
@@ -568,7 +571,11 @@ class TripItemRead(TimeSpanRead):
     # kind, title and times, and every other detail below is blanked.
     redacted: bool = False
     requirement: TripItemRequirement | None
-    title: str
+    # As written; null when the item goes by its place.
+    title: str | None
+    # What to show as its name: the title, else the place's name, else the kind
+    # ("Activity"). On a redacted item, whose place is hidden, it skips the place.
+    display_title: str
     notes: str | None
     confirmation_number: str | None
     transit_mode: TransitMode | None

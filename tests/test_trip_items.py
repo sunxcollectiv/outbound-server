@@ -832,3 +832,58 @@ def test_deleting_an_item_cascades_its_segments_and_rsvps(
 
     assert _count(TripItemTransitSegment, TripItemTransitSegment.trip_item_id) == 0
     assert _count(TripItemParticipant, TripItemParticipant.item_id) == 0
+
+
+def test_an_item_goes_by_its_title_or_its_place(client, make_user, make_trip):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    ramen = _place(client, sun, name="Ichiran Shibuya", timezone="Asia/Tokyo")
+    narita = _place(client, sun, name="Narita", timezone="Asia/Tokyo")
+    itami = _place(client, sun, name="Itami", timezone="Asia/Tokyo")
+    when = {"starts_at": "2026-04-10T19:00:00"}
+
+    # Neither: nothing to call it.
+    missing = client.post(url, json={"kind": "activity", **when}, headers=sun)
+    assert missing.status_code == 422
+    assert missing.json()["detail"] == "an item needs a title or a place"
+
+    # A place alone will do; the title stays null.
+    untitled = client.post(
+        url, json={"kind": "activity", "place_id": ramen["id"], **when}, headers=sun
+    )
+    assert untitled.status_code == 201, untitled.text
+    item = untitled.json()
+    assert (item["title"], item["display_title"]) == (None, "Ichiran Shibuya")
+
+    # A segmented transit's place is its first leg's.
+    flight = client.post(
+        url,
+        json={
+            "kind": "transit",
+            "segments": [{"starts_at": "2026-04-11T09:00:00", "place_id": narita["id"],
+                          "end_place_id": itami["id"]}],
+        },
+        headers=sun,
+    )
+    assert flight.status_code == 201, flight.text
+    assert flight.json()["title"] is None
+    assert flight.json()["place"]["name"] == "Narita"
+    unplaced_legs = client.post(
+        url, json={"kind": "transit", "segments": [{"starts_at": "2026-04-11T09:00:00"}]},
+        headers=sun,
+    )
+    assert unplaced_legs.status_code == 422
+
+    # An untitled item can't lose its place; a titled one can drop its title only
+    # while it has a place.
+    item_url = f"{url}/{item['id']}"
+    assert client.patch(item_url, json={"place_id": None}, headers=sun).status_code == 422
+    named = client.patch(item_url, json={"title": "Ramen"}, headers=sun)
+    assert (named.json()["title"], named.json()["display_title"]) == ("Ramen", "Ramen")
+    unplaced = client.patch(item_url, json={"place_id": None}, headers=sun)
+    assert unplaced.status_code == 200, unplaced.text
+    assert client.patch(item_url, json={"title": None}, headers=sun).status_code == 422
+    dropped = client.patch(item_url, json={"title": None, "place_id": ramen["id"]}, headers=sun)
+    assert dropped.status_code == 200, dropped.text
+    assert (dropped.json()["title"], dropped.json()["display_title"]) == (None, "Ichiran Shibuya")

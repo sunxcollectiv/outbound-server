@@ -53,4 +53,7 @@ def is_redacted(item: TripItem, member_id: uuid.UUID) -> bool:
 def present_item(item: TripItem, member_id: uuid.UUID) -> TripItemRead:
     """The item as `member_id` gets to see it."""
     read = TripItemRead.model_validate(item)
-    return read.model_copy(update=_REDACTED) if is_redacted(item, member_id) else read
+    if not is_redacted(item, member_id):
+        return read
+    # Its place is hidden, so it can't go by the place's name either.
+    return read.model_copy(update={**_REDACTED, "display_title": item.redacted_title})

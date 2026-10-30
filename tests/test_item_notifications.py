@@ -168,3 +168,43 @@ def test_times_read_naturally():
     assert day_and_time(datetime(2026, 11, 12, 7, 30)) == "Nov 12 at 7:30 AM"
     assert day_and_time(datetime(2026, 11, 12, 0, 5)) == "Nov 12 at 12:05 AM"
     assert day_and_time(datetime(2026, 11, 12, 12, 0)) == "Nov 12 at 12 PM"
+
+
+def test_untitled_items_are_called_by_their_place(client, wedding):
+    sun = wedding["sun"]
+
+    def place(name):
+        stub = client.post("/places", json={"google_place_id": f"g-{name}"}, headers=sun)
+        return client.patch(f"/places/{stub.json()['id']}", json={"name": name}, headers=sun).json()
+
+    ramen, sushi = place("Ichiran"), place("Sushi Dai")
+    item = wedding["add"](title=None, place_id=ramen["id"], notify_members=True)
+    assert _bodies(client, wedding["sean"]) == ["Sun added Ichiran on Apr 10"]
+
+    wedding["edit"](item, place_id=sushi["id"], notify_members=True)
+    wedding["edit"](item, title="Omakase", notify_members=True)
+    assert set(_bodies(client, wedding["sean"])) == {
+        "Sun added Ichiran on Apr 10",
+        "Sun changed the place for Sushi Dai",
+        "Sun renamed “Sushi Dai” to “Omakase”",
+    }
+
+
+def test_outsiders_hear_of_an_untitled_closed_item_by_its_kind(client, wedding):
+    sun = wedding["sun"]
+    stub = client.post("/places", json={"google_place_id": "g-Thermae"}, headers=sun)
+    spa = client.patch(f"/places/{stub.json()['id']}", json={"name": "Thermae"}, headers=sun).json()
+
+    item = wedding["add"](
+        title=None, place_id=spa["id"], visibility="closed",
+        participants=("sun", "sean"), notify_members=True,
+    )
+    wedding["edit"](item, title="Massage", notify_members=True)
+    assert set(_bodies(client, wedding["sean"])) == {
+        "Sun added Thermae on Apr 10",
+        "Sun renamed “Thermae” to “Massage”",
+    }
+    assert set(_bodies(client, wedding["amy"])) == {
+        "Sun added an activity on Apr 10",
+        "Sun renamed an activity to “Massage”",
+    }

@@ -76,6 +76,23 @@ class AccountRead(UserRead):
     is_admin: bool
 
 
+class AdminUserRead(UserRead):
+    """A user row for the admin management dashboard: the public fields plus
+    whether the account is an admin."""
+
+    is_admin: bool
+
+
+class AdminUserPage(BaseModel):
+    """A page of users for the admin dashboard, newest first, plus the total
+    across all pages for the pager."""
+
+    items: list[AdminUserRead]
+    total: int
+    limit: int
+    offset: int
+
+
 # --- auth ---
 
 

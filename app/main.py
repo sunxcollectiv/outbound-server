@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.api import (
+    admin,
     announcements,
     auth,
     areas,
@@ -35,6 +36,7 @@ TAGS_METADATA = [
     {"name": "received-images", "description": "[admin] Uploaded booking screenshots, as an upload → extract → import pipeline. Every route is admin-only."},
     {"name": "notifications", "description": "The in-app inbox, per-category/channel preferences, and push-device registration."},
     {"name": "announcements", "description": "[admin] Broadcast messages that fan out into every user's inbox. Every route is admin-only."},
+    {"name": "admin", "description": "[admin] Management/dashboard APIs (e.g. browse all users). Every route is admin-only."},
     {"name": "meta", "description": "Service health and metadata."},
 ]
 
@@ -55,6 +57,7 @@ app.include_router(received_mail.router)
 app.include_router(received_images.router)
 app.include_router(notifications.router)
 app.include_router(announcements.router)
+app.include_router(admin.router)
 
 
 @app.get("/health", tags=["meta"])

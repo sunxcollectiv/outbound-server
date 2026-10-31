@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 
-from app.api.deps import AdminUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
 from app.schemas import ImageImportResult, ImageReceiptRead
 from app.services.image_extraction import (
@@ -71,7 +71,7 @@ def _store_upload(session: SessionDep, user_id: uuid.UUID, file: UploadFile) -> 
     summary="[admin] Upload image",
 )
 def upload_image(
-    user: AdminUser, session: SessionDep, file: UploadFile = File(...)
+    user: CurrentUser, session: SessionDep, file: UploadFile = File(...)
 ) -> ImageReceipt:
     """Upload one image (e.g. a booking screenshot) into the received-item
     pipeline. Stores the bytes and records it as `received`, owned by the
@@ -91,7 +91,6 @@ def upload_image(
     summary="[admin] Extract image backlog",
 )
 def extract_recent(
-    _: AdminUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
@@ -120,7 +119,6 @@ def extract_recent(
 )
 def extract_one(
     image_id: uuid.UUID,
-    _: AdminUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     force: Annotated[bool, Query(description="re-extract even a terminal image")] = False,
@@ -145,7 +143,6 @@ def extract_one(
     summary="[admin] Import image backlog",
 )
 def import_recent(
-    _: AdminUser,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[ImportOutcome]:
@@ -168,7 +165,7 @@ def import_recent(
     response_model=ImageImportResult,
     summary="[admin] Import one image",
 )
-def import_one(image_id: uuid.UUID, _: AdminUser, session: SessionDep) -> ImportOutcome:
+def import_one(image_id: uuid.UUID, session: SessionDep) -> ImportOutcome:
     """Import one extracted image into its matching trip. An image that isn't
     `extracted` comes back `skipped` (no double-create of an already-processed one)."""
     image = session.get(ImageReceipt, image_id)
@@ -189,7 +186,7 @@ def import_one(image_id: uuid.UUID, _: AdminUser, session: SessionDep) -> Import
     summary="[admin] Process upload",
 )
 def process_upload(
-    user: AdminUser,
+    user: CurrentUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     file: UploadFile = File(...),

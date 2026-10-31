@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 
-from app.api.deps import AdminUser, SessionDep
+from app.api.deps import SessionDep
 from app.models import EmailReceipt, EmailReceiptStatus
 from app.schemas import ImportResult, ReceivedMailRead
 from app.services.mail_extraction import (
@@ -63,7 +63,6 @@ def _extract(session: SessionDep, receipt: EmailReceipt, resend, extractor) -> N
     "", response_model=list[ReceivedMailRead], summary="[admin] Retrieve recent mail"
 )
 def retrieve_recent(
-    _: AdminUser,
     session: SessionDep,
     resend: ResendDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
@@ -88,7 +87,6 @@ def retrieve_recent(
     summary="[admin] Extract mail backlog",
 )
 def extract_recent(
-    _: AdminUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -118,7 +116,6 @@ def extract_recent(
 )
 def extract_one(
     email_id: str,
-    _: AdminUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -145,7 +142,6 @@ def extract_one(
     "/import", response_model=list[ImportResult], summary="[admin] Import mail backlog"
 )
 def import_recent(
-    _: AdminUser,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[ImportResult]:
@@ -166,7 +162,7 @@ def import_recent(
 @router.post(
     "/import/{email_id}", response_model=ImportResult, summary="[admin] Import one email"
 )
-def import_one(email_id: str, _: AdminUser, session: SessionDep) -> ImportResult:
+def import_one(email_id: str, session: SessionDep) -> ImportResult:
     """Import one extracted email into its matching trip. A receipt that isn't
     `extracted` comes back `skipped` (no double-create of an already-processed one)."""
     receipt = session.scalar(
@@ -186,7 +182,6 @@ def import_one(email_id: str, _: AdminUser, session: SessionDep) -> ImportResult
     "/process", response_model=list[ImportResult], summary="[admin] Process new mail"
 )
 def process_new_mail(
-    _: AdminUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -219,7 +214,7 @@ def process_new_mail(
     "/{email_id}", response_model=ReceivedMailRead, summary="[admin] Retrieve one email"
 )
 def retrieve_one(
-    email_id: str, _: AdminUser, session: SessionDep, resend: ResendDep
+    email_id: str, session: SessionDep, resend: ResendDep
 ) -> EmailReceipt:
     """Retrieve one received email by id and store it, body and all (in `raw`)."""
     email = _resend(lambda: resend.get_received_email(email_id))

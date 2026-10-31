@@ -76,8 +76,8 @@ def _make_extracted(client, headers, resend, mail_extractor, email_id, sender, e
     """Drive a receipt to `extracted` via the retrieve + extract endpoints."""
     resend.received = [_email(email_id, sender)]
     mail_extractor.result = extraction
-    assert client.post("/received/mail", headers=headers).status_code == 200
-    r = client.post(f"/received/mail/extract/{email_id}", headers=headers)
+    assert client.post("/admin/received/mail", headers=headers).status_code == 200
+    r = client.post(f"/admin/received/mail/extract/{email_id}", headers=headers)
     assert r.status_code == 200 and r.json()["status"] == "extracted", r.text
 
 
@@ -86,8 +86,8 @@ def _receipt(session, email_id):
 
 
 def test_import_requires_auth(client):
-    assert client.post("/received/mail/import").status_code == 401
-    assert client.post("/received/mail/import/re_1").status_code == 401
+    assert client.post("/admin/received/mail/import").status_code == 401
+    assert client.post("/admin/received/mail/import/re_1").status_code == 401
 
 
 def test_import_places_flight_into_matching_trip(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
@@ -95,7 +95,7 @@ def test_import_places_flight_into_matching_trip(client, make_user, make_admin, 
     trip = make_trip(sun)  # 2026-04-09 .. 04-15, overlaps the flight
     _make_extracted(client, sun, resend, mail_extractor, "re_1", "sun@example.com", FLIGHT)
 
-    body = client.post("/received/mail/import/re_1", headers=sun).json()
+    body = client.post("/admin/received/mail/import/re_1", headers=sun).json()
     assert body["outcome"] == "placed"
     assert body["trip_id"] == trip["id"]
     assert body["item_count"] == 1
@@ -123,7 +123,7 @@ def test_import_places_lodging_with_item_level_times(client, make_user, make_adm
     make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_2", "sun@example.com", LODGING)
 
-    trip_id = client.post("/received/mail/import/re_2", headers=sun).json()["trip_id"]
+    trip_id = client.post("/admin/received/mail/import/re_2", headers=sun).json()["trip_id"]
     item = client.get(f"/trips/{trip_id}/items", headers=sun).json()[0]
     assert item["kind"] == "lodging"
     assert item["starts_at"] == "2026-04-10T15:00:00" and item["start_timezone"] == "Asia/Tokyo"
@@ -135,7 +135,7 @@ def test_import_no_matching_trip_stays_extracted(client, make_user, make_admin, 
     sun = make_admin(make_user("sun"))  # no trips at all
     _make_extracted(client, sun, resend, mail_extractor, "re_3", "sun@example.com", FLIGHT)
 
-    body = client.post("/received/mail/import/re_3", headers=sun).json()
+    body = client.post("/admin/received/mail/import/re_3", headers=sun).json()
     assert body["outcome"] == "no_match"
     assert _receipt(session, "re_3").status is EmailReceiptStatus.EXTRACTED
 
@@ -145,7 +145,7 @@ def test_import_ambiguous_when_two_trips_overlap(client, make_user, make_admin, 
     t1, t2 = make_trip(sun), make_trip(sun)  # two trips over the same dates
     _make_extracted(client, sun, resend, mail_extractor, "re_4", "sun@example.com", FLIGHT)
 
-    body = client.post("/received/mail/import/re_4", headers=sun).json()
+    body = client.post("/admin/received/mail/import/re_4", headers=sun).json()
     assert body["outcome"] == "ambiguous"
     assert set(body["candidate_trip_ids"]) == {t1["id"], t2["id"]}
     assert _receipt(session, "re_4").status is EmailReceiptStatus.EXTRACTED
@@ -157,7 +157,7 @@ def test_import_ignores_trips_the_sender_isnt_on(client, make_user, make_admin, 
     make_trip(bob)  # covers the dates, but belongs to bob
     _make_extracted(client, sun, resend, mail_extractor, "re_5", "sun@example.com", FLIGHT)
 
-    assert client.post("/received/mail/import/re_5", headers=sun).json()["outcome"] == "no_match"
+    assert client.post("/admin/received/mail/import/re_5", headers=sun).json()["outcome"] == "no_match"
 
 
 def test_reimport_is_a_noop(client, make_user, make_admin, make_trip, resend, mail_extractor):
@@ -165,8 +165,8 @@ def test_reimport_is_a_noop(client, make_user, make_admin, make_trip, resend, ma
     trip = make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_6", "sun@example.com", FLIGHT)
 
-    assert client.post("/received/mail/import/re_6", headers=sun).json()["outcome"] == "placed"
-    again = client.post("/received/mail/import/re_6", headers=sun).json()
+    assert client.post("/admin/received/mail/import/re_6", headers=sun).json()["outcome"] == "placed"
+    again = client.post("/admin/received/mail/import/re_6", headers=sun).json()
     assert again["outcome"] == "skipped"  # already processed
     assert len(client.get(f"/trips/{trip['id']}/items", headers=sun).json()) == 1  # not doubled
 
@@ -181,7 +181,7 @@ def test_import_batch_places_only_unambiguous(client, make_user, make_admin, mak
     _make_extracted(client, sun, resend, mail_extractor, "re_b", "sun@example.com", dateless)
 
     results = {r["receipt"]["resend_email_id"]: r["outcome"]
-               for r in client.post("/received/mail/import", headers=sun).json()}
+               for r in client.post("/admin/received/mail/import", headers=sun).json()}
     assert results == {"re_a": "placed", "re_b": "no_match"}
 
 
@@ -189,7 +189,7 @@ def test_import_resolves_layover_airport_and_dedupes_it(client, make_user, make_
     sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_7", "sun@example.com", FLIGHT_2LEG)
-    client.post("/received/mail/import/re_7", headers=sun)
+    client.post("/admin/received/mail/import/re_7", headers=sun)
 
     days = client.get(f"/trips/{trip['id']}/itinerary", headers=sun).json()["days"]
     layovers = [e for day in days for e in day["items"] if e["phase"] == "layover"]
@@ -211,7 +211,7 @@ def test_import_reuses_place_on_name_and_address_match(client, make_user, make_a
     session.commit()
 
     _make_extracted(client, sun, resend, mail_extractor, "re_8", "sun@example.com", LODGING_ADDR)
-    client.post("/received/mail/import/re_8", headers=sun)
+    client.post("/admin/received/mail/import/re_8", headers=sun)
 
     # Solid name + address match → reuse, not duplicate.
     assert len(session.scalars(select(Place).where(Place.name == "Hotel Tokyo")).all()) == 1
@@ -226,7 +226,7 @@ def test_import_does_not_merge_on_name_alone(client, make_user, make_admin, make
     session.commit()
 
     _make_extracted(client, sun, resend, mail_extractor, "re_9", "sun@example.com", FLIGHT)
-    client.post("/received/mail/import/re_9", headers=sun)
+    client.post("/admin/received/mail/import/re_9", headers=sun)
 
     # Name alone isn't a solid match → a new LAX place is created, not merged.
     assert len(session.scalars(select(Place).where(Place.name == "LAX")).all()) == 2
@@ -234,14 +234,14 @@ def test_import_does_not_merge_on_name_alone(client, make_user, make_admin, make
 
 def test_import_unknown_id_is_404(client, make_user, make_admin):
     sun = make_admin(make_user("sun"))
-    assert client.post("/received/mail/import/nope", headers=sun).status_code == 404
+    assert client.post("/admin/received/mail/import/nope", headers=sun).status_code == 404
 
 
 # --- process (pull a page of recent mail from Resend + extract + import) ---
 
 
 def test_process_requires_auth(client):
-    assert client.post("/received/mail/process").status_code == 401
+    assert client.post("/admin/received/mail/process").status_code == 401
 
 
 def test_process_pulls_and_runs_recent_mail(client, make_user, make_admin, make_trip, resend, mail_extractor):
@@ -250,7 +250,7 @@ def test_process_pulls_and_runs_recent_mail(client, make_user, make_admin, make_
     resend.received = [_email("re_1", "sun@example.com")]
     mail_extractor.result = FLIGHT
 
-    results = client.post("/received/mail/process", headers=sun).json()
+    results = client.post("/admin/received/mail/process", headers=sun).json()
     assert len(results) == 1
     assert results[0]["outcome"] == "placed"
     assert results[0]["trip_id"] == trip["id"]
@@ -263,7 +263,7 @@ def test_process_limit_bounds_the_page(client, make_user, make_admin, make_trip,
     resend.received = [_email(f"re_{i}", "sun@example.com") for i in range(3)]
     mail_extractor.result = FLIGHT
 
-    results = client.post("/received/mail/process?limit=2", headers=sun).json()
+    results = client.post("/admin/received/mail/process?limit=2", headers=sun).json()
     assert len(results) == 2  # only the first 2 of the page were pulled
     assert len(mail_extractor.calls) == 2
 
@@ -274,7 +274,7 @@ def test_process_is_idempotent(client, make_user, make_admin, make_trip, resend,
     resend.received = [_email("re_x", "sun@example.com")]
     mail_extractor.result = FLIGHT
 
-    assert client.post("/received/mail/process", headers=sun).json()[0]["outcome"] == "placed"
+    assert client.post("/admin/received/mail/process", headers=sun).json()[0]["outcome"] == "placed"
     # Re-running pulls the same mail, but it's already processed → nothing to do.
-    assert client.post("/received/mail/process", headers=sun).json() == []
+    assert client.post("/admin/received/mail/process", headers=sun).json() == []
     assert len(mail_extractor.calls) == 1

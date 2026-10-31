@@ -30,24 +30,24 @@ def _receipt(session, email_id: str) -> EmailReceipt:
 
 
 def test_retrieve_endpoints_require_auth(client):
-    assert client.post("/received/mail").status_code == 401
-    assert client.post("/received/mail/re_1").status_code == 401
+    assert client.post("/admin/received/mail").status_code == 401
+    assert client.post("/admin/received/mail/re_1").status_code == 401
 
 
 def test_received_mail_is_admin_only(client, make_user):
     """A normal authenticated user is forbidden — the whole pipeline is admin-only."""
     sun = make_user("sun")
-    assert client.post("/received/mail", headers=sun).status_code == 403
-    assert client.post("/received/mail/extract", headers=sun).status_code == 403
-    assert client.post("/received/mail/import", headers=sun).status_code == 403
-    assert client.post("/received/mail/process", headers=sun).status_code == 403
+    assert client.post("/admin/received/mail", headers=sun).status_code == 403
+    assert client.post("/admin/received/mail/extract", headers=sun).status_code == 403
+    assert client.post("/admin/received/mail/import", headers=sun).status_code == 403
+    assert client.post("/admin/received/mail/process", headers=sun).status_code == 403
 
 
 def test_retrieve_recent_stores_metadata_only(client, make_user, make_admin, resend, session):
     sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "a@x.example"), _email("re_2", "b@y.example")]
 
-    body = client.post("/received/mail", headers=sun).json()
+    body = client.post("/admin/received/mail", headers=sun).json()
     assert {r["resend_email_id"] for r in body} == {"re_1", "re_2"}
     assert all(r["status"] == "received" for r in body)
     assert all(r["raw"] is None for r in body)  # list carries no body
@@ -66,7 +66,7 @@ def test_retrieve_recent_respects_limit(client, make_user, make_admin, resend):
     sun = make_admin(make_user("sun"))
     resend.received = [_email(f"re_{i}", "a@x.example") for i in range(10)]
 
-    body = client.post("/received/mail?limit=3", headers=sun).json()
+    body = client.post("/admin/received/mail?limit=3", headers=sun).json()
     assert len(body) == 3
 
 
@@ -74,7 +74,7 @@ def test_retrieve_one_stores_the_raw_body(client, make_user, make_admin, resend,
     sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "a@x.example")]
 
-    body = client.post("/received/mail/re_1", headers=sun).json()
+    body = client.post("/admin/received/mail/re_1", headers=sun).json()
     assert body["resend_email_id"] == "re_1"
     assert body["status"] == "received"
     assert body["raw"]["text"] == "Confirmation ABC123. NRT 2026-04-09."
@@ -90,12 +90,12 @@ def test_retrieval_is_idempotent_and_backfills_the_body(client, make_user, make_
     resend.received = [_email("re_1", "a@x.example")]
 
     # Seen first via the list (metadata only, no body)...
-    client.post("/received/mail", headers=sun)
+    client.post("/admin/received/mail", headers=sun)
     assert _receipt(session, "re_1").raw is None
     assert _count(session) == 1
 
     # ...then fetched by id: same row, now with its body, no duplicate.
-    client.post("/received/mail/re_1", headers=sun)
+    client.post("/admin/received/mail/re_1", headers=sun)
     session.expire_all()
     assert _count(session) == 1
     assert _receipt(session, "re_1").raw is not None
@@ -104,7 +104,7 @@ def test_retrieval_is_idempotent_and_backfills_the_body(client, make_user, make_
 def test_retrieve_recent_upstream_failure_is_502(client, make_user, make_admin, resend):
     sun = make_admin(make_user("sun"))
     resend.error = ResendError("Resend returned 500: boom")
-    assert client.post("/received/mail", headers=sun).status_code == 502
+    assert client.post("/admin/received/mail", headers=sun).status_code == 502
 
 
 def test_extract_sender_email_variants():

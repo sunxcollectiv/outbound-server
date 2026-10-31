@@ -82,7 +82,7 @@ def test_a_rewrite_pushes_the_existing_row(session, pushes, sun):
 def test_sending_by_hand_pushes(client, make_user, make_admin, pushes, sun):
     admin = make_admin(make_user("admin"))
     payload = {"emails": [sun.email, admin.email], "category": "travel_alert", "title": "Hi"}
-    assert client.post("/notifications", json=payload, headers=admin).status_code == 201
+    assert client.post("/admin/notifications", json=payload, headers=admin).status_code == 201
     assert len(pushes.ids) == 2
 
 

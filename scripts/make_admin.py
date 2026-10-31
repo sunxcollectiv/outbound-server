@@ -1,6 +1,6 @@
 """Grant (or with --revoke, take away) admin on an account.
 
-Admins can manage announcements (/announcements). No endpoint hands this out, so it's
+Admins can manage announcements (/admin/announcements). No endpoint hands this out, so it's
 done from here:
 
     uv run python scripts/make_admin.py someone@example.com

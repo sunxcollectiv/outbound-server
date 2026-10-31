@@ -1,18 +1,16 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.api import (
     admin,
-    announcements,
     auth,
     areas,
     notifications,
     places,
-    received_images,
-    received_mail,
     trip_items,
     trips,
     users,
 )
+from app.api.deps import get_admin_user
 
 DESCRIPTION = """
 Backend for Outbound, a collaborative trip-itinerary app.
@@ -53,11 +51,12 @@ app.include_router(trips.router)
 app.include_router(trip_items.router)
 app.include_router(places.router)
 app.include_router(areas.router)
-app.include_router(received_mail.router)
-app.include_router(received_images.router)
 app.include_router(notifications.router)
-app.include_router(announcements.router)
-app.include_router(admin.router)
+# Everything privileged lives under /admin/* (management endpoints + the
+# announcements and received-mail/images routers, included inside admin.router).
+# The admin gate is applied once, here, so no route under /admin can be
+# non-admin by construction.
+app.include_router(admin.router, dependencies=[Depends(get_admin_user)])
 
 
 @app.get("/health", tags=["meta"])

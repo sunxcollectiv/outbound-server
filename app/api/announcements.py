@@ -3,12 +3,13 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
-from app.api.deps import AdminUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep
 from app.models import Announcement
 from app.schemas import AnnouncementCreate, AnnouncementRead, AnnouncementUpdate
 from app.services.notifications import propagate_announcement
 
-# Managing broadcasts; every route is for admins only.
+# Managing broadcasts. Mounted under /admin, which applies the admin gate to
+# every route here (see app/api/admin.py), so no per-endpoint check is needed.
 router = APIRouter(prefix="/announcements", tags=["announcements"])
 
 
@@ -26,7 +27,7 @@ def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announ
     summary="[admin] Create announcement",
 )
 def create_announcement(
-    payload: AnnouncementCreate, admin: AdminUser, session: SessionDep
+    payload: AnnouncementCreate, admin: CurrentUser, session: SessionDep
 ) -> Announcement:
     """Broadcast to every user. It reaches each inbox the next time that
     inbox is read."""
@@ -42,7 +43,7 @@ def create_announcement(
 @router.get(
     "", response_model=list[AnnouncementRead], summary="[admin] List announcements"
 )
-def list_announcements(_: AdminUser, session: SessionDep) -> list[Announcement]:
+def list_announcements(session: SessionDep) -> list[Announcement]:
     """All announcements, past, running and scheduled; newest start first."""
     return list(
         session.scalars(select(Announcement).order_by(Announcement.starts_at.desc()))
@@ -57,7 +58,6 @@ def list_announcements(_: AdminUser, session: SessionDep) -> list[Announcement]:
 def update_announcement(
     announcement_id: uuid.UUID,
     payload: AnnouncementUpdate,
-    _: AdminUser,
     session: SessionDep,
 ) -> Announcement:
     """Edit an announcement; the copies already in inboxes follow."""
@@ -86,7 +86,7 @@ def update_announcement(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="[admin] Delete announcement",
 )
-def delete_announcement(announcement_id: uuid.UUID, _: AdminUser, session: SessionDep) -> None:
+def delete_announcement(announcement_id: uuid.UUID, session: SessionDep) -> None:
     """Delete an announcement and take it out of every inbox. To stop it
     without erasing it, PATCH `ends_at` instead."""
     session.delete(_get_announcement(session, announcement_id))

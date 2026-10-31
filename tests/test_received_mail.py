@@ -34,8 +34,17 @@ def test_retrieve_endpoints_require_auth(client):
     assert client.post("/received/mail/re_1").status_code == 401
 
 
-def test_retrieve_recent_stores_metadata_only(client, make_user, resend, session):
+def test_received_mail_is_admin_only(client, make_user):
+    """A normal authenticated user is forbidden — the whole pipeline is admin-only."""
     sun = make_user("sun")
+    assert client.post("/received/mail", headers=sun).status_code == 403
+    assert client.post("/received/mail/extract", headers=sun).status_code == 403
+    assert client.post("/received/mail/import", headers=sun).status_code == 403
+    assert client.post("/received/mail/process", headers=sun).status_code == 403
+
+
+def test_retrieve_recent_stores_metadata_only(client, make_user, make_admin, resend, session):
+    sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "a@x.example"), _email("re_2", "b@y.example")]
 
     body = client.post("/received/mail", headers=sun).json()
@@ -53,16 +62,16 @@ def test_retrieve_recent_stores_metadata_only(client, make_user, resend, session
     assert row.extracted is None
 
 
-def test_retrieve_recent_respects_limit(client, make_user, resend):
-    sun = make_user("sun")
+def test_retrieve_recent_respects_limit(client, make_user, make_admin, resend):
+    sun = make_admin(make_user("sun"))
     resend.received = [_email(f"re_{i}", "a@x.example") for i in range(10)]
 
     body = client.post("/received/mail?limit=3", headers=sun).json()
     assert len(body) == 3
 
 
-def test_retrieve_one_stores_the_raw_body(client, make_user, resend, session):
-    sun = make_user("sun")
+def test_retrieve_one_stores_the_raw_body(client, make_user, make_admin, resend, session):
+    sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "a@x.example")]
 
     body = client.post("/received/mail/re_1", headers=sun).json()
@@ -76,8 +85,8 @@ def test_retrieve_one_stores_the_raw_body(client, make_user, resend, session):
     assert resend.fetched == ["re_1"]  # fetched the single email by id
 
 
-def test_retrieval_is_idempotent_and_backfills_the_body(client, make_user, resend, session):
-    sun = make_user("sun")
+def test_retrieval_is_idempotent_and_backfills_the_body(client, make_user, make_admin, resend, session):
+    sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "a@x.example")]
 
     # Seen first via the list (metadata only, no body)...
@@ -92,8 +101,8 @@ def test_retrieval_is_idempotent_and_backfills_the_body(client, make_user, resen
     assert _receipt(session, "re_1").raw is not None
 
 
-def test_retrieve_recent_upstream_failure_is_502(client, make_user, resend):
-    sun = make_user("sun")
+def test_retrieve_recent_upstream_failure_is_502(client, make_user, make_admin, resend):
+    sun = make_admin(make_user("sun"))
     resend.error = ResendError("Resend returned 500: boom")
     assert client.post("/received/mail", headers=sun).status_code == 502
 

@@ -55,8 +55,21 @@ def test_upload_requires_auth(client):
     ).status_code == 401
 
 
-def test_upload_stores_the_image(client, make_user, session):
+def test_received_images_is_admin_only(client, make_user):
+    """A normal authenticated user is forbidden — the whole pipeline is admin-only."""
     sun = make_user("sun")
+    upload = client.post(
+        "/received/images/upload",
+        files={"file": ("x.png", PNG, "image/png")},
+        headers=sun,
+    )
+    assert upload.status_code == 403
+    assert client.post("/received/images/extract", headers=sun).status_code == 403
+    assert client.post("/received/images/import", headers=sun).status_code == 403
+
+
+def test_upload_stores_the_image(client, make_user, make_admin, session):
+    sun = make_admin(make_user("sun"))
     resp = client.post(
         "/received/images/upload",
         files={"file": ("ticket.png", PNG, "image/png")},
@@ -80,8 +93,8 @@ def test_upload_stores_the_image(client, make_user, session):
     assert row.status is EmailReceiptStatus.RECEIVED
 
 
-def test_upload_rejects_non_image(client, make_user, session):
-    sun = make_user("sun")
+def test_upload_rejects_non_image(client, make_user, make_admin, session):
+    sun = make_admin(make_user("sun"))
     resp = client.post(
         "/received/images/upload",
         files={"file": ("notes.txt", b"just text", "text/plain")},
@@ -91,8 +104,8 @@ def test_upload_rejects_non_image(client, make_user, session):
     assert _count(session) == 0
 
 
-def test_upload_rejects_empty_file(client, make_user, session):
-    sun = make_user("sun")
+def test_upload_rejects_empty_file(client, make_user, make_admin, session):
+    sun = make_admin(make_user("sun"))
     resp = client.post(
         "/received/images/upload",
         files={"file": ("empty.png", b"", "image/png")},
@@ -113,8 +126,8 @@ def test_extract_endpoints_require_auth(client):
     )
 
 
-def test_extract_one_processes_a_booking(client, make_user, image_extractor, session):
-    sun = make_user("sun")
+def test_extract_one_processes_a_booking(client, make_user, make_admin, image_extractor, session):
+    sun = make_admin(make_user("sun"))
     image_id = _upload(client, sun)
 
     body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
@@ -127,8 +140,8 @@ def test_extract_one_processes_a_booking(client, make_user, image_extractor, ses
     assert row.status is EmailReceiptStatus.EXTRACTED
 
 
-def test_extract_not_a_booking_is_rejected(client, make_user, image_extractor):
-    sun = make_user("sun")
+def test_extract_not_a_booking_is_rejected(client, make_user, make_admin, image_extractor):
+    sun = make_admin(make_user("sun"))
     image_id = _upload(client, sun)
     image_extractor.result = Extraction(
         category="not_a_booking", confidence=0.99, summary="A meme", items=[]
@@ -138,16 +151,16 @@ def test_extract_not_a_booking_is_rejected(client, make_user, image_extractor):
     assert body["extracted"]["category"] == "not_a_booking"
 
 
-def test_extract_low_confidence_is_rejected(client, make_user, image_extractor):
-    sun = make_user("sun")
+def test_extract_low_confidence_is_rejected(client, make_user, make_admin, image_extractor):
+    sun = make_admin(make_user("sun"))
     image_id = _upload(client, sun)
     image_extractor.result = Extraction(category="flight", confidence=0.2, summary="?", items=[])
     body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
     assert body["status"] == "rejected"
 
 
-def test_extract_error_goes_pending_with_failure_logged(client, make_user, image_extractor):
-    sun = make_user("sun")
+def test_extract_error_goes_pending_with_failure_logged(client, make_user, make_admin, image_extractor):
+    sun = make_admin(make_user("sun"))
     image_id = _upload(client, sun)
     image_extractor.error = ImageExtractionError("Claude extraction failed: boom")
 
@@ -157,8 +170,8 @@ def test_extract_error_goes_pending_with_failure_logged(client, make_user, image
     assert body["failures"][0]["step"] == "extract"
 
 
-def test_extract_batch_processes_only_the_worklist(client, make_user, image_extractor):
-    sun = make_user("sun")
+def test_extract_batch_processes_only_the_worklist(client, make_user, make_admin, image_extractor):
+    sun = make_admin(make_user("sun"))
     _upload(client, sun, "a.png")
     _upload(client, sun, "b.png")
 
@@ -172,8 +185,8 @@ def test_extract_batch_processes_only_the_worklist(client, make_user, image_extr
     assert len(image_extractor.calls) == 2
 
 
-def test_extract_single_terminal_needs_force(client, make_user, image_extractor):
-    sun = make_user("sun")
+def test_extract_single_terminal_needs_force(client, make_user, make_admin, image_extractor):
+    sun = make_admin(make_user("sun"))
     image_id = _upload(client, sun)
 
     client.post(f"/received/images/extract/{image_id}", headers=sun)  # → extracted
@@ -184,8 +197,8 @@ def test_extract_single_terminal_needs_force(client, make_user, image_extractor)
     assert len(image_extractor.calls) == 2
 
 
-def test_extract_unknown_id_is_404(client, make_user):
-    sun = make_user("sun")
+def test_extract_unknown_id_is_404(client, make_user, make_admin):
+    sun = make_admin(make_user("sun"))
     assert (
         client.post("/received/images/extract/00000000-0000-0000-0000-000000000000", headers=sun)
         .status_code
@@ -204,9 +217,9 @@ def test_import_endpoints_require_auth(client):
 
 
 def test_import_places_flight_into_matching_trip(
-    client, make_user, make_trip, image_extractor, session
+    client, make_user, make_admin, make_trip, image_extractor, session
 ):
-    sun = make_user("sun")
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)  # 2026-04-09 .. 04-15, overlaps the flight
     image_id = _extract_image(client, sun, image_extractor, FLIGHT)
 
@@ -228,8 +241,8 @@ def test_import_places_flight_into_matching_trip(
     assert row.status is EmailReceiptStatus.PROCESSED and row.trip_id is not None
 
 
-def test_import_no_matching_trip_stays_extracted(client, make_user, image_extractor, session):
-    sun = make_user("sun")  # no trips at all
+def test_import_no_matching_trip_stays_extracted(client, make_user, make_admin, image_extractor, session):
+    sun = make_admin(make_user("sun"))  # no trips at all
     image_id = _extract_image(client, sun, image_extractor, FLIGHT)
 
     body = client.post(f"/received/images/import/{image_id}", headers=sun).json()
@@ -237,8 +250,8 @@ def test_import_no_matching_trip_stays_extracted(client, make_user, image_extrac
     assert session.get(ImageReceipt, image_id).status is EmailReceiptStatus.EXTRACTED
 
 
-def test_reimport_is_a_noop(client, make_user, make_trip, image_extractor):
-    sun = make_user("sun")
+def test_reimport_is_a_noop(client, make_user, make_admin, make_trip, image_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     image_id = _extract_image(client, sun, image_extractor, FLIGHT)
 
@@ -247,8 +260,8 @@ def test_reimport_is_a_noop(client, make_user, make_trip, image_extractor):
     assert again["outcome"] == "skipped"  # already processed, not re-created
 
 
-def test_import_batch_places_only_extracted(client, make_user, make_trip, image_extractor):
-    sun = make_user("sun")
+def test_import_batch_places_only_extracted(client, make_user, make_admin, make_trip, image_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     _extract_image(client, sun, image_extractor, FLIGHT, "a.png")
     # An uploaded-but-not-extracted image is skipped by the import backlog.
@@ -258,8 +271,8 @@ def test_import_batch_places_only_extracted(client, make_user, make_trip, image_
     assert outcomes == ["placed"]  # only the single `extracted` image was imported
 
 
-def test_import_unknown_id_is_404(client, make_user):
-    sun = make_user("sun")
+def test_import_unknown_id_is_404(client, make_user, make_admin):
+    sun = make_admin(make_user("sun"))
     assert client.post(f"/received/images/import/{NIL_UUID}", headers=sun).status_code == 404
 
 
@@ -272,8 +285,8 @@ def test_process_requires_auth(client):
     ).status_code == 401
 
 
-def test_process_uploads_extracts_and_imports(client, make_user, make_trip, image_extractor):
-    sun = make_user("sun")
+def test_process_uploads_extracts_and_imports(client, make_user, make_admin, make_trip, image_extractor):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     image_extractor.result = FLIGHT
     resp = client.post(
@@ -291,8 +304,8 @@ def test_process_uploads_extracts_and_imports(client, make_user, make_trip, imag
     assert len(client.get(f"/trips/{trip['id']}/items", headers=sun).json()) == 1
 
 
-def test_process_not_a_booking_never_imports(client, make_user, make_trip, image_extractor):
-    sun = make_user("sun")
+def test_process_not_a_booking_never_imports(client, make_user, make_admin, make_trip, image_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     image_extractor.result = Extraction(
         category="not_a_booking", confidence=0.99, summary="A meme", items=[]

@@ -42,8 +42,8 @@ def test_extract_endpoints_require_auth(client):
     assert client.post("/received/mail/extract/re_1").status_code == 401
 
 
-def test_extract_one_processes_a_matched_booking(client, make_user, resend, mail_extractor, session):
-    sun = make_user("sun")  # sun@example.com
+def test_extract_one_processes_a_matched_booking(client, make_user, make_admin, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))  # sun@example.com
     _retrieve_list(client, sun, resend, [_email("re_1", "sun@example.com")])
 
     body = client.post("/received/mail/extract/re_1", headers=sun).json()
@@ -59,8 +59,8 @@ def test_extract_one_processes_a_matched_booking(client, make_user, resend, mail
     assert "re_1" in resend.fetched
 
 
-def test_extract_uses_stored_raw_without_refetching(client, make_user, resend, mail_extractor):
-    sun = make_user("sun")
+def test_extract_uses_stored_raw_without_refetching(client, make_user, make_admin, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     resend.received = [_email("re_1", "sun@example.com")]
     client.post("/received/mail/re_1", headers=sun)  # by-id retrieve stores raw
     assert resend.fetched == ["re_1"]
@@ -70,8 +70,8 @@ def test_extract_uses_stored_raw_without_refetching(client, make_user, resend, m
     assert resend.fetched == ["re_1"]
 
 
-def test_extract_unmatched_sender_is_ignored(client, make_user, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_extract_unmatched_sender_is_ignored(client, make_user, make_admin, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(client, sun, resend, [_email("re_2", "stranger@nowhere.example")])
 
     body = client.post("/received/mail/extract/re_2", headers=sun).json()
@@ -81,8 +81,8 @@ def test_extract_unmatched_sender_is_ignored(client, make_user, resend, mail_ext
     assert resend.fetched == []  # ...and never fetches the body
 
 
-def test_extract_not_a_booking_is_rejected(client, make_user, resend, mail_extractor):
-    sun = make_user("sun")
+def test_extract_not_a_booking_is_rejected(client, make_user, make_admin, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(client, sun, resend, [_email("re_3", "sun@example.com")])
     mail_extractor.result = Extraction(
         category="not_a_booking", confidence=0.99, summary="Newsletter", items=[]
@@ -92,15 +92,15 @@ def test_extract_not_a_booking_is_rejected(client, make_user, resend, mail_extra
     assert body["extracted"]["category"] == "not_a_booking"
 
 
-def test_extract_low_confidence_is_rejected(client, make_user, resend, mail_extractor):
-    sun = make_user("sun")
+def test_extract_low_confidence_is_rejected(client, make_user, make_admin, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(client, sun, resend, [_email("re_4", "sun@example.com")])
     mail_extractor.result = Extraction(category="flight", confidence=0.2, summary="?", items=[])
     assert client.post("/received/mail/extract/re_4", headers=sun).json()["status"] == "rejected"
 
 
-def test_extract_error_goes_pending_with_failure_logged(client, make_user, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_extract_error_goes_pending_with_failure_logged(client, make_user, make_admin, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(client, sun, resend, [_email("re_5", "sun@example.com")])
     mail_extractor.error = MailExtractionError("Claude extraction failed: boom")
 
@@ -110,8 +110,8 @@ def test_extract_error_goes_pending_with_failure_logged(client, make_user, resen
     assert body["failures"][0]["step"] == "extract"
 
 
-def test_extract_batch_processes_only_the_worklist(client, make_user, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_extract_batch_processes_only_the_worklist(client, make_user, make_admin, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(
         client, sun, resend,
         [_email("re_1", "sun@example.com"), _email("re_2", "stranger@x.example")],
@@ -128,8 +128,8 @@ def test_extract_batch_processes_only_the_worklist(client, make_user, resend, ma
     assert len(mail_extractor.calls) == 1
 
 
-def test_extract_single_terminal_needs_force(client, make_user, resend, mail_extractor):
-    sun = make_user("sun")
+def test_extract_single_terminal_needs_force(client, make_user, make_admin, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     _retrieve_list(client, sun, resend, [_email("re_1", "sun@example.com")])
 
     client.post("/received/mail/extract/re_1", headers=sun)  # → extracted
@@ -140,6 +140,6 @@ def test_extract_single_terminal_needs_force(client, make_user, resend, mail_ext
     assert len(mail_extractor.calls) == 2
 
 
-def test_extract_unknown_id_is_404(client, make_user, resend):
-    sun = make_user("sun")
+def test_extract_unknown_id_is_404(client, make_user, make_admin, resend):
+    sun = make_admin(make_user("sun"))
     assert client.post("/received/mail/extract/nope", headers=sun).status_code == 404

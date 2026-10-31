@@ -90,8 +90,8 @@ def test_import_requires_auth(client):
     assert client.post("/received/mail/import/re_1").status_code == 401
 
 
-def test_import_places_flight_into_matching_trip(client, make_user, make_trip, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_import_places_flight_into_matching_trip(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)  # 2026-04-09 .. 04-15, overlaps the flight
     _make_extracted(client, sun, resend, mail_extractor, "re_1", "sun@example.com", FLIGHT)
 
@@ -118,8 +118,8 @@ def test_import_places_flight_into_matching_trip(client, make_user, make_trip, r
     assert lax.google_place_id is None
 
 
-def test_import_places_lodging_with_item_level_times(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_import_places_lodging_with_item_level_times(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_2", "sun@example.com", LODGING)
 
@@ -131,8 +131,8 @@ def test_import_places_lodging_with_item_level_times(client, make_user, make_tri
     assert item["place"]["name"] == "Hotel Tokyo"  # resolved (created)
 
 
-def test_import_no_matching_trip_stays_extracted(client, make_user, resend, mail_extractor, session):
-    sun = make_user("sun")  # no trips at all
+def test_import_no_matching_trip_stays_extracted(client, make_user, make_admin, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))  # no trips at all
     _make_extracted(client, sun, resend, mail_extractor, "re_3", "sun@example.com", FLIGHT)
 
     body = client.post("/received/mail/import/re_3", headers=sun).json()
@@ -140,8 +140,8 @@ def test_import_no_matching_trip_stays_extracted(client, make_user, resend, mail
     assert _receipt(session, "re_3").status is EmailReceiptStatus.EXTRACTED
 
 
-def test_import_ambiguous_when_two_trips_overlap(client, make_user, make_trip, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_import_ambiguous_when_two_trips_overlap(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     t1, t2 = make_trip(sun), make_trip(sun)  # two trips over the same dates
     _make_extracted(client, sun, resend, mail_extractor, "re_4", "sun@example.com", FLIGHT)
 
@@ -151,8 +151,8 @@ def test_import_ambiguous_when_two_trips_overlap(client, make_user, make_trip, r
     assert _receipt(session, "re_4").status is EmailReceiptStatus.EXTRACTED
 
 
-def test_import_ignores_trips_the_sender_isnt_on(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_import_ignores_trips_the_sender_isnt_on(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     bob = make_user("bob")
     make_trip(bob)  # covers the dates, but belongs to bob
     _make_extracted(client, sun, resend, mail_extractor, "re_5", "sun@example.com", FLIGHT)
@@ -160,8 +160,8 @@ def test_import_ignores_trips_the_sender_isnt_on(client, make_user, make_trip, r
     assert client.post("/received/mail/import/re_5", headers=sun).json()["outcome"] == "no_match"
 
 
-def test_reimport_is_a_noop(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_reimport_is_a_noop(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_6", "sun@example.com", FLIGHT)
 
@@ -171,8 +171,8 @@ def test_reimport_is_a_noop(client, make_user, make_trip, resend, mail_extractor
     assert len(client.get(f"/trips/{trip['id']}/items", headers=sun).json()) == 1  # not doubled
 
 
-def test_import_batch_places_only_unambiguous(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_import_batch_places_only_unambiguous(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     # re_a matches uniquely; re_b has no dates in the extraction → no_match.
     _make_extracted(client, sun, resend, mail_extractor, "re_a", "sun@example.com", FLIGHT)
@@ -185,8 +185,8 @@ def test_import_batch_places_only_unambiguous(client, make_user, make_trip, rese
     assert results == {"re_a": "placed", "re_b": "no_match"}
 
 
-def test_import_resolves_layover_airport_and_dedupes_it(client, make_user, make_trip, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_import_resolves_layover_airport_and_dedupes_it(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     _make_extracted(client, sun, resend, mail_extractor, "re_7", "sun@example.com", FLIGHT_2LEG)
     client.post("/received/mail/import/re_7", headers=sun)
@@ -203,8 +203,8 @@ def test_import_resolves_layover_airport_and_dedupes_it(client, make_user, make_
     assert len(session.scalars(select(Place).where(Place.name == "HND")).all()) == 1
 
 
-def test_import_reuses_place_on_name_and_address_match(client, make_user, make_trip, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_import_reuses_place_on_name_and_address_match(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     existing = Place(name="Hotel Tokyo", address="1-1 Chiyoda")
     session.add(existing)
@@ -219,8 +219,8 @@ def test_import_reuses_place_on_name_and_address_match(client, make_user, make_t
     assert item["place"]["id"] == str(existing.id)
 
 
-def test_import_does_not_merge_on_name_alone(client, make_user, make_trip, resend, mail_extractor, session):
-    sun = make_user("sun")
+def test_import_does_not_merge_on_name_alone(client, make_user, make_admin, make_trip, resend, mail_extractor, session):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     session.add(Place(name="LAX"))  # same name, but no address to match on
     session.commit()
@@ -232,8 +232,8 @@ def test_import_does_not_merge_on_name_alone(client, make_user, make_trip, resen
     assert len(session.scalars(select(Place).where(Place.name == "LAX")).all()) == 2
 
 
-def test_import_unknown_id_is_404(client, make_user):
-    sun = make_user("sun")
+def test_import_unknown_id_is_404(client, make_user, make_admin):
+    sun = make_admin(make_user("sun"))
     assert client.post("/received/mail/import/nope", headers=sun).status_code == 404
 
 
@@ -244,8 +244,8 @@ def test_process_requires_auth(client):
     assert client.post("/received/mail/process").status_code == 401
 
 
-def test_process_pulls_and_runs_recent_mail(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_process_pulls_and_runs_recent_mail(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     trip = make_trip(sun)
     resend.received = [_email("re_1", "sun@example.com")]
     mail_extractor.result = FLIGHT
@@ -257,8 +257,8 @@ def test_process_pulls_and_runs_recent_mail(client, make_user, make_trip, resend
     assert results[0]["receipt"]["status"] == "processed"
 
 
-def test_process_limit_bounds_the_page(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_process_limit_bounds_the_page(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     resend.received = [_email(f"re_{i}", "sun@example.com") for i in range(3)]
     mail_extractor.result = FLIGHT
@@ -268,8 +268,8 @@ def test_process_limit_bounds_the_page(client, make_user, make_trip, resend, mai
     assert len(mail_extractor.calls) == 2
 
 
-def test_process_is_idempotent(client, make_user, make_trip, resend, mail_extractor):
-    sun = make_user("sun")
+def test_process_is_idempotent(client, make_user, make_admin, make_trip, resend, mail_extractor):
+    sun = make_admin(make_user("sun"))
     make_trip(sun)
     resend.received = [_email("re_x", "sun@example.com")]
     mail_extractor.result = FLIGHT

@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import AdminUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
 from app.schemas import ImageImportResult, ImageReceiptRead
 from app.services.image_extraction import (
@@ -64,9 +64,14 @@ def _store_upload(session: SessionDep, user_id: uuid.UUID, file: UploadFile) -> 
     return image
 
 
-@router.post("/upload", response_model=ImageReceiptRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/upload",
+    response_model=ImageReceiptRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Upload image",
+)
 def upload_image(
-    user: CurrentUser, session: SessionDep, file: UploadFile = File(...)
+    user: AdminUser, session: SessionDep, file: UploadFile = File(...)
 ) -> ImageReceipt:
     """Upload one image (e.g. a booking screenshot) into the received-item
     pipeline. Stores the bytes and records it as `received`, owned by the
@@ -80,9 +85,13 @@ def upload_image(
 # --- extract ---
 
 
-@router.post("/extract", response_model=list[ImageReceiptRead])
+@router.post(
+    "/extract",
+    response_model=list[ImageReceiptRead],
+    summary="[admin] Extract image backlog",
+)
 def extract_recent(
-    _: CurrentUser,
+    _: AdminUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
@@ -104,10 +113,14 @@ def extract_recent(
     return images
 
 
-@router.post("/extract/{image_id}", response_model=ImageReceiptRead)
+@router.post(
+    "/extract/{image_id}",
+    response_model=ImageReceiptRead,
+    summary="[admin] Extract one image",
+)
 def extract_one(
     image_id: uuid.UUID,
-    _: CurrentUser,
+    _: AdminUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     force: Annotated[bool, Query(description="re-extract even a terminal image")] = False,
@@ -126,9 +139,13 @@ def extract_one(
 # --- import ---
 
 
-@router.post("/import", response_model=list[ImageImportResult])
+@router.post(
+    "/import",
+    response_model=list[ImageImportResult],
+    summary="[admin] Import image backlog",
+)
 def import_recent(
-    _: CurrentUser,
+    _: AdminUser,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[ImportOutcome]:
@@ -146,8 +163,12 @@ def import_recent(
     return results
 
 
-@router.post("/import/{image_id}", response_model=ImageImportResult)
-def import_one(image_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> ImportOutcome:
+@router.post(
+    "/import/{image_id}",
+    response_model=ImageImportResult,
+    summary="[admin] Import one image",
+)
+def import_one(image_id: uuid.UUID, _: AdminUser, session: SessionDep) -> ImportOutcome:
     """Import one extracted image into its matching trip. An image that isn't
     `extracted` comes back `skipped` (no double-create of an already-processed one)."""
     image = session.get(ImageReceipt, image_id)
@@ -162,10 +183,13 @@ def import_one(image_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Impo
 
 
 @router.post(
-    "/process", response_model=ImageImportResult, status_code=status.HTTP_201_CREATED
+    "/process",
+    response_model=ImageImportResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Process upload",
 )
 def process_upload(
-    user: CurrentUser,
+    user: AdminUser,
     session: SessionDep,
     extractor: ImageExtractorDep,
     file: UploadFile = File(...),

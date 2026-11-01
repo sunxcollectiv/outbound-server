@@ -21,13 +21,13 @@ def _rsvps(item: dict) -> dict[str, str | None]:
 def _place(client, headers, name):
     stub = client.post("/places", json={"google_place_id": f"g-{name}"}, headers=headers)
     assert stub.status_code == 201, stub.text
-    return client.patch(f"/places/{stub.json()['id']}", json={"name": name}, headers=headers).json()
+    return client.patch(f"/admin/places/{stub.json()['id']}", json={"name": name}, headers=headers).json()
 
 
 @pytest.fixture
-def wedding(client, make_user, make_trip):
+def wedding(client, make_user, make_admin, make_trip):
     """Sun organizes; Sean and Amy are on the trip, and Grandma has no account."""
-    sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
+    sun, sean, amy = make_admin(make_user("sun")), make_user("sean"), make_user("amy")
     trip = make_trip(
         sun,
         title="Wedding",

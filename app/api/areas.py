@@ -23,6 +23,10 @@ from app.services.unsplash import (
 )
 
 router = APIRouter(prefix="/areas", tags=["areas"])
+# Curation of the global area taxonomy. Mounted under /admin (app/api/admin.py),
+# which applies the admin gate, so these resolve at /admin/areas and need no
+# per-endpoint check. Client-facing reads/search stay on `router` at /areas.
+admin_router = APIRouter(prefix="/areas", tags=["areas"])
 
 UnsplashDep = Annotated[UnsplashClient, Depends(get_unsplash_client)]
 
@@ -42,10 +46,13 @@ def _get_area(session: SessionDep, area_id: uuid.UUID) -> Area:
     return area
 
 
-@router.post("", response_model=AreaRead, status_code=status.HTTP_201_CREATED)
-def create_area(
-    payload: AreaCreate, _: CurrentUser, session: SessionDep
-) -> Area:
+@admin_router.post(
+    "",
+    response_model=AreaRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Create area",
+)
+def create_area(payload: AreaCreate, session: SessionDep) -> Area:
     """Create an area. The taxonomy is free-form: `kind` (country/territory/
     city/…) plus a numeric `level`, with an optional `parent_id` for nesting."""
     area = Area(**payload.model_dump())
@@ -136,9 +143,9 @@ def read_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Area:
     return area
 
 
-@router.patch("/{area_id}", response_model=AreaRead)
+@admin_router.patch("/{area_id}", response_model=AreaRead, summary="[admin] Update area")
 def update_area(
-    area_id: uuid.UUID, payload: AreaUpdate, _: CurrentUser, session: SessionDep
+    area_id: uuid.UUID, payload: AreaUpdate, session: SessionDep
 ) -> Area:
     """Edit an area's fields (only those sent are changed)."""
     area = _get_area(session, area_id)
@@ -151,8 +158,10 @@ def update_area(
     return area
 
 
-@router.delete("/{area_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> None:
+@admin_router.delete(
+    "/{area_id}", status_code=status.HTTP_204_NO_CONTENT, summary="[admin] Delete area"
+)
+def delete_area(area_id: uuid.UUID, session: SessionDep) -> None:
     """Delete an area. Trips that referenced it simply drop the id on their
     next read (area_ids holds no foreign key)."""
     session.delete(_get_area(session, area_id))

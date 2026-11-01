@@ -161,9 +161,9 @@ def test_same_photo_twice_violates_unique_constraint(session):
 # --- exposure through the areas API ---
 
 
-def test_area_read_exposes_photos(client, make_user, session):
-    sun = make_user("sun")
-    area = client.post("/areas", json={"name": "Paris", "kind": "city"}, headers=sun).json()
+def test_area_read_exposes_photos(client, make_user, make_admin, session):
+    sun = make_admin(make_user("sun"))
+    area = client.post("/admin/areas", json={"name": "Paris", "kind": "city"}, headers=sun).json()
 
     session.add(
         AreaPhoto(

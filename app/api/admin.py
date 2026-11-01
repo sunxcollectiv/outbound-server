@@ -15,10 +15,12 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 
-from app.api import announcements, received_images, received_mail
+from app.api import announcements, areas, places, received_images, received_mail
 from app.api.deps import SessionDep
-from app.models import Trip, TripItem, User
+from app.models import Trip, TripItem, TripMember, User
 from app.schemas import (
+    AdminTripPage,
+    AdminTripRead,
     AdminUserPage,
     AdminUserRead,
     NotificationSend,
@@ -64,6 +66,49 @@ def list_users(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/trips", response_model=AdminTripPage, tags=["admin"], summary="[admin] List trips")
+def list_trips(
+    session: SessionDep,
+    q: Annotated[
+        str | None, Query(description="filter by trip title (case-insensitive substring)")
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminTripPage:
+    """Browse every trip for the management dashboard, newest first, with each
+    trip's owner email and member count. Optional `q` filters by title
+    (case-insensitive substring). `total` is the count across all pages."""
+    title_filter = [Trip.title.icontains(q.strip(), autoescape=True)] if q and q.strip() else []
+    total = session.scalar(select(func.count()).select_from(Trip).where(*title_filter)) or 0
+    member_counts = (
+        select(TripMember.trip_id, func.count(TripMember.id).label("n"))
+        .group_by(TripMember.trip_id)
+        .subquery()
+    )
+    stmt = (
+        select(Trip, User.email, func.coalesce(member_counts.c.n, 0))
+        .join(User, User.id == Trip.owner_id)
+        .outerjoin(member_counts, member_counts.c.trip_id == Trip.id)
+        .where(*title_filter)
+        .order_by(Trip.created_at.desc(), Trip.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    items = [
+        AdminTripRead(
+            id=trip.id,
+            title=trip.title,
+            owner_email=email,
+            start_date=trip.start_date,
+            end_date=trip.end_date,
+            member_count=count,
+            created_at=trip.created_at,
+        )
+        for trip, email, count in session.execute(stmt)
+    ]
+    return AdminTripPage(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post(
@@ -116,3 +161,5 @@ def send_notification(payload: NotificationSend, session: SessionDep) -> Notific
 router.include_router(announcements.router)
 router.include_router(received_mail.router)
 router.include_router(received_images.router)
+router.include_router(areas.admin_router)
+router.include_router(places.admin_router)

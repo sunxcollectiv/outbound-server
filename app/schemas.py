@@ -93,6 +93,29 @@ class AdminUserPage(BaseModel):
     offset: int
 
 
+class AdminTripRead(ReadModel):
+    """A trip row for the admin management dashboard: the trip, its owner's
+    email, and how many people are on it."""
+
+    id: uuid.UUID
+    title: str
+    owner_email: str
+    start_date: date
+    end_date: date
+    member_count: int
+    created_at: datetime
+
+
+class AdminTripPage(BaseModel):
+    """A page of trips for the admin dashboard, newest first, plus the total
+    across all pages for the pager."""
+
+    items: list[AdminTripRead]
+    total: int
+    limit: int
+    offset: int
+
+
 # --- auth ---
 
 

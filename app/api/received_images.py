@@ -16,11 +16,14 @@ from app.services.image_extraction import (
 from app.services.image_processing import EXTRACTABLE_STATUSES, extract_image
 from app.services.receipt_import import ImportOutcome, import_receipt, process_receipt
 
-# The image pipeline mirrors the mail one (received → extracted → processed), but
-# images arrive by upload instead of being fetched, so the retrieve stage is a
-# single /upload endpoint. Extract (Claude vision) and import come next, mirroring
-# mail; when the /extract and /import routes land, declare them before any /{id}.
+# The image pipeline mirrors the mail one (received → extracted → processed).
+# `router` is the one user-facing endpoint — POST /received/images/process, the
+# screenshot-to-trip flow a signed-in user runs on their own trips. The
+# step-by-step stages (upload / extract / import) are admin/dev tooling and live
+# on `admin_router`, mounted under /admin (service-token only, no user behind
+# them), so a dev can walk a receipt through the pipeline.
 router = APIRouter(prefix="/received/images", tags=["received-images"])
+admin_router = APIRouter(prefix="/received/images", tags=["received-images"])
 
 ImageExtractorDep = Annotated[ImageExtractor, Depends(get_image_extractor)]
 
@@ -38,9 +41,13 @@ def _extract(session: SessionDep, image: ImageReceipt, extractor: ImageExtractor
         ) from None
 
 
-def _store_upload(session: SessionDep, user_id: uuid.UUID, file: UploadFile) -> ImageReceipt:
-    """Validate an upload and persist it as a `received` image owned by the
-    uploader. Shared by /upload and /process. Does NOT commit."""
+def _store_upload(
+    session: SessionDep, user_id: uuid.UUID | None, file: UploadFile
+) -> ImageReceipt:
+    """Validate an upload and persist it as a `received` image. `user_id` is the
+    uploader (whose trips import matches against) for the user-facing /process,
+    or None for the admin dev endpoints. Shared by /upload and /process; does
+    NOT commit."""
     data = file.file.read()
     if not data:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "The upload is empty")
@@ -64,28 +71,55 @@ def _store_upload(session: SessionDep, user_id: uuid.UUID, file: UploadFile) -> 
     return image
 
 
+# --- user-facing: upload + extract + import in one call ---
+
+
 @router.post(
+    "/process",
+    response_model=ImageImportResult,
+    status_code=status.HTTP_201_CREATED,
+    summary="Process a booking screenshot",
+)
+def process_upload(
+    user: CurrentUser,
+    session: SessionDep,
+    extractor: ImageExtractorDep,
+    file: UploadFile = File(...),
+) -> ImportOutcome:
+    """Upload a screenshot and run the whole pipeline in one call — store,
+    extract (Claude vision), and import into the caller's matching trip. Returns
+    the final outcome (`placed`/`no_match`/`ambiguous`, or `skipped` with a
+    `rejected` receipt when it isn't a confident booking) so the client can
+    update its progress pill and refresh the itinerary in one round-trip."""
+    image = _store_upload(session, user.id, file)
+    session.flush()  # assign the id before we process
+    result = process_receipt(
+        session, image, extract=lambda: _extract(session, image, extractor)
+    )
+    session.commit()
+    return result
+
+
+# --- admin/dev: the pipeline stages, one at a time (no user behind them) ---
+
+
+@admin_router.post(
     "/upload",
     response_model=ImageReceiptRead,
     status_code=status.HTTP_201_CREATED,
     summary="[admin] Upload image",
 )
-def upload_image(
-    user: CurrentUser, session: SessionDep, file: UploadFile = File(...)
-) -> ImageReceipt:
-    """Upload one image (e.g. a booking screenshot) into the received-item
-    pipeline. Stores the bytes and records it as `received`, owned by the
-    uploader; extraction happens in a later call."""
-    image = _store_upload(session, user.id, file)
+def upload_image(session: SessionDep, file: UploadFile = File(...)) -> ImageReceipt:
+    """Upload one image into the received-item pipeline and record it as
+    `received` (no uploader — import won't match a trip without one; use
+    /received/images/process for the real user flow). Extraction is a later call."""
+    image = _store_upload(session, None, file)
     session.commit()
     session.refresh(image)
     return image
 
 
-# --- extract ---
-
-
-@router.post(
+@admin_router.post(
     "/extract",
     response_model=list[ImageReceiptRead],
     summary="[admin] Extract image backlog",
@@ -112,7 +146,7 @@ def extract_recent(
     return images
 
 
-@router.post(
+@admin_router.post(
     "/extract/{image_id}",
     response_model=ImageReceiptRead,
     summary="[admin] Extract one image",
@@ -134,10 +168,7 @@ def extract_one(
     return image
 
 
-# --- import ---
-
-
-@router.post(
+@admin_router.post(
     "/import",
     response_model=list[ImageImportResult],
     summary="[admin] Import image backlog",
@@ -160,7 +191,7 @@ def import_recent(
     return results
 
 
-@router.post(
+@admin_router.post(
     "/import/{image_id}",
     response_model=ImageImportResult,
     summary="[admin] Import one image",
@@ -172,34 +203,5 @@ def import_one(image_id: uuid.UUID, session: SessionDep) -> ImportOutcome:
     if image is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Image not found")
     result = import_receipt(session, image)
-    session.commit()
-    return result
-
-
-# --- process (upload + extract + import in one call) ---
-
-
-@router.post(
-    "/process",
-    response_model=ImageImportResult,
-    status_code=status.HTTP_201_CREATED,
-    summary="[admin] Process upload",
-)
-def process_upload(
-    user: CurrentUser,
-    session: SessionDep,
-    extractor: ImageExtractorDep,
-    file: UploadFile = File(...),
-) -> ImportOutcome:
-    """Upload an image and run the whole pipeline in one call — store, extract
-    (Claude vision), and import into the matching trip. Returns the final outcome
-    (`placed`/`no_match`/`ambiguous`, or `skipped` with a `rejected` receipt when
-    it isn't a confident booking) so the client can update its progress pill and
-    refresh the itinerary in one round-trip."""
-    image = _store_upload(session, user.id, file)
-    session.flush()  # assign the id before we process
-    result = process_receipt(
-        session, image, extract=lambda: _extract(session, image, extractor)
-    )
     session.commit()
     return result

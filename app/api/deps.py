@@ -1,5 +1,4 @@
 import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -51,33 +50,15 @@ def get_current_user(access_token: CurrentAccessToken) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def get_admin_user(user: CurrentUser) -> User:
-    if not user.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
-    return user
-
-
-AdminUser = Annotated[User, Depends(get_admin_user)]
-
-
-@dataclass
-class AdminPrincipal:
-    """Who is calling an admin API: either an admin `user` (via a user bearer
-    token) or a `service` token (machine-to-machine, no user behind it).
-    Exactly one is set."""
-
-    user: User | None
-    service: ServiceToken | None
-
-
 def get_admin_principal(
     session: SessionDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> AdminPrincipal:
-    """Gate for the /admin APIs: accepts either a service token (ServiceToken)
-    or an admin user's bearer token. A service token is checked first since the
-    two live in separate tables. 401 when the token is missing/unknown/expired,
-    403 when it's valid but not an admin."""
+) -> ServiceToken:
+    """Gate for the /admin APIs. Admin access is machine-to-machine only: the
+    caller must present a valid admin service token (see ServiceToken,
+    scripts/issue_service_token.py). There are no human admins. 401 when the
+    token is missing/unknown/expired, 403 when it's a valid token but not an
+    admin service token (e.g. an ordinary user's bearer token)."""
     if credentials is None:
         raise _unauthorized("Not authenticated")
     token_hash = hash_token(credentials.credentials)
@@ -92,31 +73,18 @@ def get_admin_principal(
     if service is not None:
         if not service.is_admin:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
-        return AdminPrincipal(user=None, service=service)
+        return service
 
-    access_token = session.scalar(
+    # A valid user token is authenticated but never an admin, so it's a 403;
+    # anything else is an unknown/expired token.
+    user_token = session.scalar(
         select(AccessToken).where(
             AccessToken.token_hash == token_hash, AccessToken.expires_at > now
         )
     )
-    if access_token is None:
-        raise _unauthorized("Invalid or expired token")
-    if not access_token.user.is_admin:
+    if user_token is not None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
-    return AdminPrincipal(user=access_token.user, service=None)
-
-
-AdminPrincipalDep = Annotated[AdminPrincipal, Depends(get_admin_principal)]
-
-
-def get_admin_acting_user(principal: AdminPrincipalDep) -> User | None:
-    """The human behind an admin request, or None for a service token. For
-    admin endpoints that attribute a row to whoever acted (e.g. the announcement
-    author) but can also run under a service token."""
-    return principal.user
-
-
-AdminActingUser = Annotated[User | None, Depends(get_admin_acting_user)]
+    raise _unauthorized("Invalid or expired token")
 
 
 def _trip_role(session: Session, trip: Trip, user: User) -> TripRole | None:

@@ -23,17 +23,17 @@ class ImageReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     lifecycle and the ``extracted``/import fields.
 
     The image bytes live inline in ``data`` (bytea) — fine for screenshots;
-    object storage is a later swap. There's no sender/account step: the "sender"
-    is simply the authenticated uploader (``user_id``, set at upload), so an
-    image never goes ``ignored``. The extract stage (Claude vision) and the
+    object storage is a later swap. The extract stage (Claude vision) and the
     import stage are the same shape as email's.
     """
 
     # "r_" groups the received-source tables (r_email_receipts, r_images, …).
     __tablename__ = "r_images"
 
-    # The uploader — the owner of this image; always set.
-    user_id: Mapped[uuid.UUID] = mapped_column(
+    # The uploader, whose trips import matches against. Set when a user uploads
+    # via POST /received/images/process; null for the admin (service-token) dev
+    # endpoints, which have no user behind them.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     # The trip it was imported into (set when status reaches `processed`).
@@ -58,4 +58,4 @@ class ImageReceipt(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
 
-    user: Mapped[User] = relationship()
+    user: Mapped[User | None] = relationship()

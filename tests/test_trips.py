@@ -5,8 +5,8 @@ from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_cl
 from tests.conftest import JAPAN_TRIP
 
 
-def _make_area(client, headers, name, **extra):
-    resp = client.post("/admin/areas", json={"name": name, **extra}, headers=headers)
+def _make_area(client, admin, name, **extra):
+    resp = client.post("/admin/areas", json={"name": name, **extra}, headers=admin)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -24,15 +24,15 @@ def _photo(id_: str) -> UnsplashPhoto:
     )
 
 
-def test_trip_validation(client, make_user, make_admin):
-    sun = make_admin(make_user("sun"))
+def test_trip_validation(client, make_user, admin):
+    sun = make_user("sun")
 
     backwards = {**JAPAN_TRIP, "end_date": "2026-04-01"}
     assert client.post("/trips", json=backwards, headers=sun).status_code == 422
 
 
-def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_admin, make_trip):
-    sun, stranger = make_admin(make_user("sun")), make_user("stranger")
+def test_trip_is_invisible_to_people_not_on_it(client, make_user, admin, make_trip):
+    sun, stranger = make_user("sun"), make_user("stranger")
     trip = make_trip(sun)
 
     assert client.get(f"/trips/{trip['id']}", headers=stranger).status_code == 404
@@ -40,8 +40,8 @@ def test_trip_is_invisible_to_people_not_on_it(client, make_user, make_admin, ma
     assert [t["id"] for t in client.get("/trips", headers=sun).json()] == [trip["id"]]
 
 
-def test_member_roles(client, make_user, make_admin, make_trip, add_member, set_role):
-    sun, sean, amy = make_admin(make_user("sun")), make_user("sean"), make_user("amy")
+def test_member_roles(client, make_user, admin, make_trip, add_member, set_role):
+    sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     item = {
@@ -107,8 +107,8 @@ def test_member_roles(client, make_user, make_admin, make_trip, add_member, set_
     assert client.delete(sean_url, headers=sun).status_code == 404
 
 
-def test_update_cannot_put_end_before_start(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_update_cannot_put_end_before_start(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
 
     response = client.patch(
@@ -117,10 +117,10 @@ def test_update_cannot_put_end_before_start(client, make_user, make_admin, make_
     assert response.status_code == 422
 
 
-def test_trip_can_be_created_with_areas(client, make_user, make_admin):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
-    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+def test_trip_can_be_created_with_areas(client, make_user, admin):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
+    tokyo = _make_area(client, admin, "Tokyo", kind="city", parent_id=japan["id"])
 
     created = client.post(
         "/trips",
@@ -140,10 +140,10 @@ def test_trip_can_be_created_with_areas(client, make_user, make_admin):
     assert {a["name"] for a in listed["areas"]} == {"Japan", "Tokyo"}
 
 
-def test_trip_flags_areas_missing_photos_without_fetching(client, make_user, make_admin, unsplash):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
-    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+def test_trip_flags_areas_missing_photos_without_fetching(client, make_user, admin, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
+    tokyo = _make_area(client, admin, "Tokyo", kind="city", parent_id=japan["id"])
     unsplash.results = [_photo("a")]  # available, but reads must NOT fetch
 
     created = client.post(
@@ -162,18 +162,18 @@ def test_trip_flags_areas_missing_photos_without_fetching(client, make_user, mak
     assert unsplash.queries == []
 
 
-def test_trip_returns_area_cover_with_attribution(client, make_user, make_admin):
-    sun = make_admin(make_user("sun"))
+def test_trip_returns_area_cover_with_attribution(client, make_user, admin):
+    sun = make_user("sun")
     japan = _make_area(
         client,
-        sun,
+        admin,
         "Japan",
         kind="country",
         default_photo_url="https://u/jp",
         default_photo_attribution="Jane Doe",
         default_photo_attribution_url="https://unsplash.com/@jane",
     )
-    tokyo = _make_area(client, sun, "Tokyo", kind="city")  # no cover yet
+    tokyo = _make_area(client, admin, "Tokyo", kind="city")  # no cover yet
     trip = client.post(
         "/trips", json={**JAPAN_TRIP, "area_ids": [japan["id"], tokyo["id"]]}, headers=sun
     ).json()
@@ -194,10 +194,10 @@ def test_trip_returns_area_cover_with_attribution(client, make_user, make_admin)
     assert jp["default_photo_attribution"] == "Jane Doe"
 
 
-def test_refresh_photos_fills_covers_and_clears_the_flag(client, make_user, make_admin, unsplash):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
-    tokyo = _make_area(client, sun, "Tokyo", kind="city", parent_id=japan["id"])
+def test_refresh_photos_fills_covers_and_clears_the_flag(client, make_user, admin, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
+    tokyo = _make_area(client, admin, "Tokyo", kind="city", parent_id=japan["id"])
     trip = client.post(
         "/trips", json={**JAPAN_TRIP, "area_ids": [tokyo["id"], japan["id"]]}, headers=sun
     ).json()
@@ -226,9 +226,9 @@ def test_refresh_photos_fills_covers_and_clears_the_flag(client, make_user, make
     assert {a["default_photo_url"] for a in fetched["areas"]} == {"https://u/a"}
 
 
-def test_refresh_photos_is_best_effort_when_unsplash_has_nothing(client, make_user, make_admin, unsplash):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
+def test_refresh_photos_is_best_effort_when_unsplash_has_nothing(client, make_user, admin, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
     unsplash.results = []  # no match / rate-limited
 
     refreshed = client.post("/areas/refresh-photos", json={"area_ids": [japan["id"]]}, headers=sun)
@@ -236,9 +236,9 @@ def test_refresh_photos_is_best_effort_when_unsplash_has_nothing(client, make_us
     assert refreshed.json()["areas"][japan["id"]]["default_photo_url"] is None
 
 
-def test_refresh_photos_503s_when_unsplash_is_not_configured(client, make_user, make_admin):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
+def test_refresh_photos_503s_when_unsplash_is_not_configured(client, make_user, admin):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
     # A real client with no key: a missing key must surface, not look like "no match".
     app.dependency_overrides[get_unsplash_client] = lambda: UnsplashClient(None)
 
@@ -246,9 +246,9 @@ def test_refresh_photos_503s_when_unsplash_is_not_configured(client, make_user, 
     assert resp.status_code == 503, resp.text
 
 
-def test_refresh_photos_omits_unknown_ids(client, make_user, make_admin, unsplash):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
+def test_refresh_photos_omits_unknown_ids(client, make_user, admin, unsplash):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
     unsplash.results = [_photo("a")]
     missing = str(uuid.uuid4())
 
@@ -258,18 +258,18 @@ def test_refresh_photos_omits_unknown_ids(client, make_user, make_admin, unsplas
     assert set(refreshed["areas"]) == {japan["id"]}
 
 
-def test_trip_area_ids_must_exist(client, make_user, make_admin):
-    sun = make_admin(make_user("sun"))
+def test_trip_area_ids_must_exist(client, make_user, admin):
+    sun = make_user("sun")
     resp = client.post(
         "/trips", json={**JAPAN_TRIP, "area_ids": [str(uuid.uuid4())]}, headers=sun
     )
     assert resp.status_code == 404
 
 
-def test_patch_replaces_trip_areas(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
-    korea = _make_area(client, sun, "South Korea", kind="country")
+def test_patch_replaces_trip_areas(client, make_user, admin, make_trip):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
+    korea = _make_area(client, admin, "South Korea", kind="country")
     trip = make_trip(sun, area_ids=[japan["id"]])
     url = f"/trips/{trip['id']}"
     assert [a["id"] for a in trip["areas"]] == [japan["id"]]
@@ -287,14 +287,14 @@ def test_patch_replaces_trip_areas(client, make_user, make_admin, make_trip):
     assert patched["areas"] == []
 
 
-def test_trip_get_prunes_deleted_area_ids(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
-    japan = _make_area(client, sun, "Japan", kind="country")
-    tokyo = _make_area(client, sun, "Tokyo", kind="city")
+def test_trip_get_prunes_deleted_area_ids(client, make_user, admin, make_trip):
+    sun = make_user("sun")
+    japan = _make_area(client, admin, "Japan", kind="country")
+    tokyo = _make_area(client, admin, "Tokyo", kind="city")
     trip = make_trip(sun, area_ids=[japan["id"], tokyo["id"]])
 
     # Delete an area out from under the trip; the stale id must not surface.
-    assert client.delete(f"/admin/areas/{japan['id']}", headers=sun).status_code == 204
+    assert client.delete(f"/admin/areas/{japan['id']}", headers=admin).status_code == 204
     fetched = client.get(f"/trips/{trip['id']}", headers=sun).json()
     assert [a["id"] for a in fetched["areas"]] == [tokyo["id"]]  # japan dropped, order kept
     # Pruned from storage, so a repeat read is consistent.
@@ -302,8 +302,8 @@ def test_trip_get_prunes_deleted_area_ids(client, make_user, make_admin, make_tr
     assert [a["id"] for a in again["areas"]] == [tokyo["id"]]
 
 
-def test_deleting_a_trip_removes_its_items_and_members(client, make_user, make_admin, make_trip, add_member):
-    sun, sean = make_admin(make_user("sun")), make_user("sean")
+def test_deleting_a_trip_removes_its_items_and_members(client, make_user, admin, make_trip, add_member):
+    sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     add_member(trip["id"], sun, sean)

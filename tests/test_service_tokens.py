@@ -33,9 +33,11 @@ def test_unknown_and_missing_tokens_are_rejected(client):
     assert client.get("/admin/users", headers={"Authorization": "Bearer nope"}).status_code == 401
 
 
-def test_admin_user_token_still_works(client, make_user, make_admin):
-    boss = make_admin(make_user("boss"))
-    assert client.get("/admin/users", headers=boss).status_code == 200
+def test_user_token_is_not_admin(client, make_user):
+    # Admin is service-token-only now: an ordinary user's bearer token is
+    # authenticated but forbidden from /admin.
+    boss = make_user("boss")
+    assert client.get("/admin/users", headers=boss).status_code == 403
 
 
 def test_service_token_posts_announcement_with_null_author(client, make_service_token, session):

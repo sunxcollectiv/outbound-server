@@ -191,11 +191,11 @@ def test_other_peoples_notifications_are_not_found(client, session, sun, sean):
 # --- sending by hand ---
 
 
-def test_admins_send_to_people_by_id_or_email(client, make_user, make_admin, sun, sean):
-    admin = make_admin(make_user("admin"))
+def test_admins_send_to_people_by_id_or_email(client, make_user, admin, sun, sean):
+    cass = make_user("cass")
     payload = {
         "user_ids": [sun.user_id],
-        "emails": [sean.email.upper(), admin.email],
+        "emails": [sean.email.upper(), cass.email],
         "category": "travel_alert",
         "title": "Your import failed",
         "data": {"receipt_id": "r1"},
@@ -203,7 +203,7 @@ def test_admins_send_to_people_by_id_or_email(client, make_user, make_admin, sun
     sent = client.post("/admin/notifications", json=payload, headers=admin)
     assert sent.status_code == 201, sent.text
     assert sent.json() == {"recipients": 3, "sent": 3}
-    for who in (sun, sean, admin):
+    for who in (sun, sean, cass):
         [entry] = _inbox(client, who)
         assert entry["title"] == "Your import failed"
         assert entry["type"] == "message"
@@ -217,11 +217,10 @@ def test_admins_send_to_people_by_id_or_email(client, make_user, make_admin, sun
     assert sorted(_titles(client, sun)) == ["Import fixed", "Your import failed"]
 
 
-def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, make_admin, sun):
+def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, admin, sun):
     payload = {"user_ids": [sun.user_id], "category": "travel_alert", "title": "Hi"}
     assert client.post("/admin/notifications", json=payload, headers=sun).status_code == 403
 
-    admin = make_admin(make_user("admin"))
     nobody = {**payload, "emails": ["nobody@example.com"]}
     assert client.post("/admin/notifications", json=nobody, headers=admin).status_code == 422
     stranger = {**payload, "user_ids": [str(uuid.uuid4())]}
@@ -254,17 +253,10 @@ def _announce(client, admin, **fields) -> dict:
     return response.json()
 
 
-@pytest.fixture
-def admin(make_user, make_admin):
-    return make_admin(make_user("admin"))
-
-
 def test_only_admins_manage_announcements(client, sun, admin):
     payload = {"category": "announcement", "title": "Hi"}
     assert client.post("/admin/announcements", json=payload, headers=sun).status_code == 403
     assert client.get("/admin/announcements", headers=sun).status_code == 403
-    assert client.get("/users/me", headers=sun).json()["is_admin"] is False
-    assert client.get("/users/me", headers=admin).json()["is_admin"] is True
 
 
 def test_announcements_reach_everyone_including_later_signups(

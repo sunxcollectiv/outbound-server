@@ -311,17 +311,10 @@ def make_trip(client: TestClient) -> Callable[..., dict[str, Any]]:
 
 
 @pytest.fixture
-def make_admin(session: Session) -> Callable[[AuthHeaders], AuthHeaders]:
-    """Makes an existing user an admin, the way scripts/make_admin.py does."""
-
-    def _make(headers: AuthHeaders) -> AuthHeaders:
-        user = session.get(User, uuid.UUID(headers.user_id))
-        assert user is not None
-        user.is_admin = True
-        session.flush()
-        return headers
-
-    return _make
+def admin(make_service_token) -> AuthHeaders:
+    """Bearer headers for an admin service token — how admin APIs are reached
+    now that admin is machine-to-machine only (no human admins)."""
+    return make_service_token("test-admin")
 
 
 @pytest.fixture

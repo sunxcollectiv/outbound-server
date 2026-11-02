@@ -12,24 +12,25 @@ from app.models import (
 )
 
 
-def _place(client, headers, **fields):
-    """Register a stub from a Google id, then fill in the given fields (name,
-    timezone, ...) the way the later enrichment/review step would."""
+def _place(client, headers, admin, **fields):
+    """Register a stub from a Google id (as the user), then fill in the given
+    fields (name, timezone, ...) via the admin endpoint the way the later
+    enrichment/review step would."""
     stub = client.post(
         "/places", json={"google_place_id": f"g-{fields['name']}"}, headers=headers
     )
     assert stub.status_code == 201, stub.text
-    enriched = client.patch(f"/admin/places/{stub.json()['id']}", json=fields, headers=headers)
+    enriched = client.patch(f"/admin/places/{stub.json()['id']}", json=fields, headers=admin)
     assert enriched.status_code == 200, enriched.text
     return enriched.json()
 
 
-def test_itinerary_flags_stale_places_for_followup_refresh(client, make_user, make_admin, make_trip, session):
-    sun = make_admin(make_user("sun"))
+def test_itinerary_flags_stale_places_for_followup_refresh(client, make_user, admin, make_trip, session):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
 
-    spot = _place(client, sun, name="Blue Bottle", timezone="America/Los_Angeles")
+    spot = _place(client, sun, admin, name="Blue Bottle", timezone="America/Los_Angeles")
     created = client.post(
         url,
         json={
@@ -58,12 +59,12 @@ def test_itinerary_flags_stale_places_for_followup_refresh(client, make_user, ma
     assert itinerary["stale_place_ids"] == []
 
 
-def test_item_round_trip_with_places(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_item_round_trip_with_places(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    kyoto = _place(client, sun, name="Kyoto Station", timezone="Asia/Tokyo")
-    osaka = _place(client, sun, name="Shin-Osaka Station", timezone="Asia/Tokyo")
+    kyoto = _place(client, sun, admin, name="Kyoto Station", timezone="Asia/Tokyo")
+    osaka = _place(client, sun, admin, name="Shin-Osaka Station", timezone="Asia/Tokyo")
 
     # Wall times only; both zones come from the places.
     created = client.post(
@@ -117,8 +118,8 @@ def test_item_round_trip_with_places(client, make_user, make_admin, make_trip):
     assert client.get(f"{url}/{item['id']}", headers=sun).status_code == 404
 
 
-def test_item_validation(client, make_user, make_admin, make_trip):
-    sun, stranger = make_admin(make_user("sun")), make_user("stranger")
+def test_item_validation(client, make_user, admin, make_trip):
+    sun, stranger = make_user("sun"), make_user("stranger")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     base = {
@@ -173,10 +174,10 @@ def test_item_validation(client, make_user, make_admin, make_trip):
     assert cleared.json()["requirement"] is None
 
 
-def test_items_without_a_zone_float(client, make_user, make_admin, make_trip):
+def test_items_without_a_zone_float(client, make_user, admin, make_trip):
     """'Dinner at my place at 7 on the 17th' needs no zone: it's kept as
     written, with no instant, and the client reads it in whatever zone fits."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     created = client.post(
@@ -219,13 +220,13 @@ def test_items_without_a_zone_float(client, make_user, make_admin, make_trip):
     assert floating.json()["ends_at_utc"] is None
 
     # A floating item that gets a located place takes the place's zone.
-    hnd = _place(client, sun, name="HND", timezone="Asia/Tokyo")
+    hnd = _place(client, sun, admin, name="HND", timezone="Asia/Tokyo")
     located = client.patch(item_url, json={"place_id": hnd["id"]}, headers=sun)
     assert located.json()["start_timezone"] == "Asia/Tokyo"
 
 
-def test_aware_times_are_converted_into_the_resolved_zone(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_aware_times_are_converted_into_the_resolved_zone(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     created = client.post(
         f"/trips/{trip['id']}/items",
@@ -243,9 +244,9 @@ def test_aware_times_are_converted_into_the_resolved_zone(client, make_user, mak
     assert created.json()["starts_at_utc"] == "2026-04-14T00:00:00Z"
 
 
-def test_patching_only_the_timezone_keeps_the_wall_time(client, make_user, make_admin, make_trip):
+def test_patching_only_the_timezone_keeps_the_wall_time(client, make_user, admin, make_trip):
     """The 'right time, wrong zone' fix: 09:00 stays 09:00, the instant moves."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     item = client.post(
@@ -278,8 +279,8 @@ def test_patching_only_the_timezone_keeps_the_wall_time(client, make_user, make_
     assert aware.json()["start_timezone"] == "Europe/London"
 
 
-def test_clearing_ends_at_clears_its_timezone(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_clearing_ends_at_clears_its_timezone(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     item = client.post(
@@ -312,8 +313,8 @@ def test_clearing_ends_at_clears_its_timezone(client, make_user, make_admin, mak
     assert restored.json()["ends_at_utc"] == "2026-04-12T02:00:00Z"
 
 
-def test_cross_zone_transit_may_arrive_at_an_earlier_wall_time(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_cross_zone_transit_may_arrive_at_an_earlier_wall_time(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     flight = {
@@ -354,8 +355,8 @@ def test_sync_instants():
         item.sync_instants()
 
 
-def test_items_are_scoped_to_their_trip(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_items_are_scoped_to_their_trip(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     japan, other = make_trip(sun), make_trip(sun, title="Other")
     item = client.post(
         f"/trips/{japan['id']}/items",
@@ -372,9 +373,9 @@ def test_items_are_scoped_to_their_trip(client, make_user, make_admin, make_trip
     assert client.get(f"/trips/{other['id']}/items", headers=sun).json() == []
 
 
-def test_itinerary_groups_items_into_local_days(client, make_user, make_admin, make_trip, add_member):
+def test_itinerary_groups_items_into_local_days(client, make_user, admin, make_trip, add_member):
     """Day 1 of the design: land, check in, Sean arrives, dinner."""
-    sun, sean = make_admin(make_user("sun")), make_user("sean")
+    sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     add_member(trip["id"], sun, sean)
@@ -447,9 +448,9 @@ def test_itinerary_groups_items_into_local_days(client, make_user, make_admin, m
     assert days[0]["items"][0]["item"]["start_timezone"] == "Asia/Tokyo"
 
 
-def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make_user, make_admin, make_trip):
+def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make_user, admin, make_trip):
     """A day reads like a diary page: by the clock, whatever zone each entry is in."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
 
@@ -496,13 +497,13 @@ def test_itinerary_days_are_ordered_by_wall_time_regardless_of_zone(client, make
 
 
 def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
-    client, make_user, make_admin, make_trip
+    client, make_user, admin, make_trip
 ):
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    lax = _place(client, sun, name="LAX", timezone="America/Los_Angeles")
-    hnd = _place(client, sun, name="HND", timezone="Asia/Tokyo")
+    lax = _place(client, sun, admin, name="LAX", timezone="America/Los_Angeles")
+    hnd = _place(client, sun, admin, name="HND", timezone="Asia/Tokyo")
 
     # Sent as instants with no zones: each end takes its airport's. Leaves LA
     # on the afternoon of the 8th; lands at 22:00 UTC on the 9th, which is
@@ -552,15 +553,15 @@ def test_itinerary_uses_place_timezones_and_keeps_out_of_range_items(
     assert len(days) == 8
 
 
-def test_multi_leg_transit_shows_layovers(client, make_user, make_admin, make_trip):
+def test_multi_leg_transit_shows_layovers(client, make_user, admin, make_trip):
     """A flight with a stop is one booking of ordered legs; the itinerary shows
     a departure, a server-made layover at the airport in between, and an arrival."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
-    lax = _place(client, sun, name="LAX", timezone="America/Los_Angeles")
-    hnd = _place(client, sun, name="HND", timezone="Asia/Tokyo")
-    itm = _place(client, sun, name="ITM", timezone="Asia/Tokyo")
+    lax = _place(client, sun, admin, name="LAX", timezone="America/Los_Angeles")
+    hnd = _place(client, sun, admin, name="HND", timezone="Asia/Tokyo")
+    itm = _place(client, sun, admin, name="ITM", timezone="Asia/Tokyo")
 
     created = client.post(
         f"{url}/items",
@@ -630,10 +631,10 @@ def test_multi_leg_transit_shows_layovers(client, make_user, make_admin, make_tr
     assert [e["phase"] for e in again["2026-04-10"]["items"]] == ["arrival"]  # no layover now
 
 
-def test_layover_timezone_comes_from_segments_without_places(client, make_user, make_admin, make_trip):
+def test_layover_timezone_comes_from_segments_without_places(client, make_user, admin, make_trip):
     """Even with no resolved place at the stop (the mail/image-import case), the
     layover carries its zone when the arriving and departing legs agree on it."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     url = f"/trips/{make_trip(sun)['id']}"
     created = client.post(
         f"{url}/items",
@@ -655,10 +656,10 @@ def test_layover_timezone_comes_from_segments_without_places(client, make_user, 
     assert layover["layover_timezone"] == "Asia/Tokyo"  # ...the zone still comes through
 
 
-def test_layover_timezone_null_when_legs_disagree(client, make_user, make_admin, make_trip):
+def test_layover_timezone_null_when_legs_disagree(client, make_user, admin, make_trip):
     """If the arriving end zone and the next departure zone don't match, we don't
     guess — the layover zone is null."""
-    sun = make_admin(make_user("sun"))
+    sun = make_user("sun")
     url = f"/trips/{make_trip(sun)['id']}"
     created = client.post(
         f"{url}/items",
@@ -679,8 +680,8 @@ def test_layover_timezone_null_when_legs_disagree(client, make_user, make_admin,
     assert layover["layover_timezone"] is None
 
 
-def test_transit_segment_validation(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_transit_segment_validation(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     leg = {"starts_at": "2026-04-10T09:00:00", "start_timezone": "Asia/Tokyo"}
@@ -720,8 +721,8 @@ def test_transit_segment_validation(client, make_user, make_admin, make_trip):
     assert moved.status_code == 422
 
 
-def test_transit_mode_rolls_up_from_legs(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_transit_mode_rolls_up_from_legs(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
 
@@ -771,8 +772,8 @@ def test_transit_mode_rolls_up_from_legs(client, make_user, make_admin, make_tri
     assert hop["segments"][0]["transit_mode"] == "train"
 
 
-def test_transit_mode_validation(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_transit_mode_validation(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
 
@@ -796,12 +797,12 @@ def test_transit_mode_validation(client, make_user, make_admin, make_trip):
 
 
 def test_deleting_an_item_cascades_its_segments_and_rsvps(
-    client, make_user, make_admin, make_trip, add_member, session
+    client, make_user, admin, make_trip, add_member, session
 ):
     """Deleting an item must take its child rows with it — the transit legs and
     the RSVPs — not just the item row. Guards the ON DELETE CASCADE / delete-orphan
     on trip_item_transit_segments and trip_item_participants."""
-    sun, sean = make_admin(make_user("sun")), make_user("sean")
+    sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
     add_member(trip["id"], sun, sean)
@@ -834,13 +835,13 @@ def test_deleting_an_item_cascades_its_segments_and_rsvps(
     assert _count(TripItemParticipant, TripItemParticipant.item_id) == 0
 
 
-def test_an_item_goes_by_its_title_or_its_place(client, make_user, make_admin, make_trip):
-    sun = make_admin(make_user("sun"))
+def test_an_item_goes_by_its_title_or_its_place(client, make_user, admin, make_trip):
+    sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    ramen = _place(client, sun, name="Ichiran Shibuya", timezone="Asia/Tokyo")
-    narita = _place(client, sun, name="Narita", timezone="Asia/Tokyo")
-    itami = _place(client, sun, name="Itami", timezone="Asia/Tokyo")
+    ramen = _place(client, sun, admin, name="Ichiran Shibuya", timezone="Asia/Tokyo")
+    narita = _place(client, sun, admin, name="Narita", timezone="Asia/Tokyo")
+    itami = _place(client, sun, admin, name="Itami", timezone="Asia/Tokyo")
     when = {"starts_at": "2026-04-10T19:00:00"}
 
     # Neither: nothing to call it.

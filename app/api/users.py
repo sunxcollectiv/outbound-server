@@ -5,18 +5,18 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import User
-from app.schemas import AccountRead, UserRead, UserUpdate
+from app.schemas import UserRead, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("/me", response_model=AccountRead)
+@router.get("/me", response_model=UserRead)
 def read_me(user: CurrentUser) -> User:
-    """The signed-in account, including fields only the owner sees (e.g. `is_admin`)."""
+    """The signed-in account."""
     return user
 
 
-@router.patch("/me", response_model=AccountRead)
+@router.patch("/me", response_model=UserRead)
 def update_me(payload: UserUpdate, user: CurrentUser, session: SessionDep) -> User:
     """Update the signed-in account's own profile (display name, avatar)."""
     changes = payload.model_dump(exclude_unset=True)

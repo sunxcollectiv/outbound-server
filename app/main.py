@@ -6,6 +6,7 @@ from app.api import (
     areas,
     notifications,
     places,
+    received_images,
     trip_items,
     trips,
     users,
@@ -16,9 +17,10 @@ DESCRIPTION = """
 Backend for Outbound, a collaborative trip-itinerary app.
 
 Authenticate at `/auth`, then send the returned token as
-`Authorization: Bearer <token>` on every other call. Endpoints whose
-description starts with **[admin]** require an admin account (`is_admin`,
-granted out of band via `scripts/make_admin.py`) and 403 otherwise.
+`Authorization: Bearer <token>` on every other call. The **[admin]** APIs under
+`/admin/*` require a service (machine-to-machine) token — minted with
+`scripts/issue_service_token.py`; an ordinary user token gets 403 there. There
+are no human admins.
 """
 
 # Section descriptions shown in the Swagger UI. Tag names must match the
@@ -51,6 +53,7 @@ app.include_router(trips.router)
 app.include_router(trip_items.router)
 app.include_router(places.router)
 app.include_router(areas.router)
+app.include_router(received_images.router)  # user-facing POST /received/images/process
 app.include_router(notifications.router)
 # Everything privileged lives under /admin/* (management endpoints + the
 # announcements and received-mail/images routers, included inside admin.router).

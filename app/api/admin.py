@@ -2,9 +2,10 @@
 
 This is the single home for everything privileged: the management endpoints
 defined here (users, broadcast) plus the fully-admin resource routers included
-at the bottom (announcements, received mail/images). The admin gate is applied
-once, where this router is mounted (`app.include_router(admin.router,
-dependencies=[Depends(get_admin_user)])` in app/main.py), so every route under
+at the bottom (announcements, received mail, received-images admin ops). The
+admin gate is applied once, where this router is mounted
+(`app.include_router(admin.router, dependencies=[Depends(get_admin_principal)])`
+in app/main.py) and accepts an admin service token only, so every route under
 `/admin/*` is admin-only by construction — no per-endpoint check to forget.
 Included routers keep their own resource tags, so the Swagger grouping stays
 intact while the path prefix makes the locked-down surface obvious."""
@@ -22,9 +23,9 @@ from app.schemas import (
     AdminTripPage,
     AdminTripRead,
     AdminUserPage,
-    AdminUserRead,
     NotificationSend,
     NotificationSendResult,
+    UserRead,
 )
 from app.services.notifications import notify
 
@@ -61,7 +62,7 @@ def list_users(
         .offset(offset)
     )
     return AdminUserPage(
-        items=[AdminUserRead.model_validate(user) for user in rows],
+        items=[UserRead.model_validate(user) for user in rows],
         total=total,
         limit=limit,
         offset=offset,
@@ -160,6 +161,6 @@ def send_notification(payload: NotificationSend, session: SessionDep) -> Notific
 # prefixes and tags). The admin gate is applied where this router is included.
 router.include_router(announcements.router)
 router.include_router(received_mail.router)
-router.include_router(received_images.router)
+router.include_router(received_images.admin_router)
 router.include_router(areas.admin_router)
 router.include_router(places.admin_router)

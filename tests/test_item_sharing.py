@@ -18,16 +18,18 @@ def _rsvps(item: dict) -> dict[str, str | None]:
     return {p["member"]["email"]: p["status"] for p in item["participants"]}
 
 
-def _place(client, headers, name):
+def _place(client, headers, admin, name):
     stub = client.post("/places", json={"google_place_id": f"g-{name}"}, headers=headers)
     assert stub.status_code == 201, stub.text
-    return client.patch(f"/admin/places/{stub.json()['id']}", json={"name": name}, headers=headers).json()
+    return client.patch(
+        f"/admin/places/{stub.json()['id']}", json={"name": name}, headers=admin
+    ).json()
 
 
 @pytest.fixture
-def wedding(client, make_user, make_admin, make_trip):
+def wedding(client, make_user, admin, make_trip):
     """Sun organizes; Sean and Amy are on the trip, and Grandma has no account."""
-    sun, sean, amy = make_admin(make_user("sun")), make_user("sean"), make_user("amy")
+    sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(
         sun,
         title="Wedding",
@@ -108,9 +110,9 @@ def test_open_items_show_everything_to_everyone(client, wedding):
     assert _rsvps(spa) == {"sun@example.com": None}
 
 
-def test_closed_items_show_only_what_and_when_to_non_participants(client, wedding):
+def test_closed_items_show_only_what_and_when_to_non_participants(client, wedding, admin):
     url, sun, sean, amy, add = (wedding[k] for k in ("url", "sun", "sean", "amy", "add"))
-    tokyo, seoul = _place(client, sun, "Haneda"), _place(client, sun, "Incheon")
+    tokyo, seoul = _place(client, sun, admin, "Haneda"), _place(client, sun, admin, "Incheon")
     flight = add(
         sean,
         participants=["sean"],
@@ -206,9 +208,9 @@ def test_removing_a_member_takes_them_off_items(client, wedding):
     assert _rsvps(after) == {"sun@example.com": None}
 
 
-def test_an_untitled_item_is_named_by_what_the_reader_can_see(client, wedding):
+def test_an_untitled_item_is_named_by_what_the_reader_can_see(client, wedding, admin):
     url, sun, amy, add = (wedding[k] for k in ("url", "sun", "amy", "add"))
-    spa = _place(client, sun, "Thermae")
+    spa = _place(client, sun, admin, "Thermae")
     add(sun, participants=["sun"], place_id=spa["id"], visibility="closed")
     add(sun, participants=["sun"], title="Massage", place_id=spa["id"], visibility="closed")
 

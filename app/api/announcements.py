@@ -10,7 +10,7 @@ from app.services.notifications import propagate_announcement
 
 # Managing broadcasts. Mounted under /admin, which applies the admin gate to
 # every route here (see app/api/admin.py), so no per-endpoint check is needed.
-router = APIRouter(prefix="/announcements", tags=["announcements"])
+router = APIRouter(prefix="/announcements", tags=["admin/announcements"])
 
 
 def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announcement:

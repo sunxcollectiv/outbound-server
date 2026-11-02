@@ -31,7 +31,7 @@ router = APIRouter(prefix="/places", tags=["places"])
 # force a Google refresh). Mounted under /admin (app/api/admin.py), which applies
 # the admin gate, so these resolve at /admin/places. Client-facing create / read
 # / itinerary-driven batch refresh stay on `router` at /places.
-admin_router = APIRouter(prefix="/places", tags=["places"])
+admin_router = APIRouter(prefix="/places", tags=["admin/places"])
 
 PlacesDep = Annotated[GooglePlacesClient, Depends(get_google_places_client)]
 NOT_NULLABLE = ("name",)

@@ -23,7 +23,7 @@ from app.services.receipt_import import ImportOutcome, import_receipt, process_r
 # on `admin_router`, mounted under /admin (service-token only, no user behind
 # them), so a dev can walk a receipt through the pipeline.
 router = APIRouter(prefix="/received/images", tags=["received-images"])
-admin_router = APIRouter(prefix="/received/images", tags=["received-images"])
+admin_router = APIRouter(prefix="/received/images", tags=["admin/received-images"])
 
 ImageExtractorDep = Annotated[ImageExtractor, Depends(get_image_extractor)]
 

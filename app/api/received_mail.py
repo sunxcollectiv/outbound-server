@@ -26,7 +26,7 @@ from app.services.resend import (
 # "/extract/{id}") runs the sender check + Claude classify/extract on stored
 # rows. The /extract routes are declared BEFORE /{email_id} so "extract" isn't
 # captured as an email id.
-router = APIRouter(prefix="/received/mail", tags=["received-mail"])
+router = APIRouter(prefix="/received/mail", tags=["admin/received-mail"])
 
 ResendDep = Annotated[ResendClient, Depends(get_resend_client)]
 MailExtractorDep = Annotated[MailExtractor, Depends(get_mail_extractor)]

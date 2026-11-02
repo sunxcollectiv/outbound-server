@@ -26,7 +26,7 @@ router = APIRouter(prefix="/areas", tags=["areas"])
 # Curation of the global area taxonomy. Mounted under /admin (app/api/admin.py),
 # which applies the admin gate, so these resolve at /admin/areas and need no
 # per-endpoint check. Client-facing reads/search stay on `router` at /areas.
-admin_router = APIRouter(prefix="/areas", tags=["areas"])
+admin_router = APIRouter(prefix="/areas", tags=["admin/areas"])
 
 UnsplashDep = Annotated[UnsplashClient, Depends(get_unsplash_client)]
 

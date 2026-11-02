@@ -32,7 +32,7 @@ from app.services.notifications import notify
 router = APIRouter(prefix="/admin")
 
 
-@router.get("/users", response_model=AdminUserPage, tags=["admin"], summary="[admin] List users")
+@router.get("/users", response_model=AdminUserPage, tags=["admin/users"], summary="[admin] List users")
 def list_users(
     session: SessionDep,
     q: Annotated[
@@ -69,7 +69,7 @@ def list_users(
     )
 
 
-@router.get("/trips", response_model=AdminTripPage, tags=["admin"], summary="[admin] List trips")
+@router.get("/trips", response_model=AdminTripPage, tags=["admin/trips"], summary="[admin] List trips")
 def list_trips(
     session: SessionDep,
     q: Annotated[
@@ -116,7 +116,7 @@ def list_trips(
     "/notifications",
     response_model=NotificationSendResult,
     status_code=status.HTTP_201_CREATED,
-    tags=["admin"],
+    tags=["admin/notifications"],
     summary="[admin] Send notification",
 )
 def send_notification(payload: NotificationSend, session: SessionDep) -> NotificationSendResult:

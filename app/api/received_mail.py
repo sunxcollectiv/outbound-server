@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import SessionDep
 from app.models import EmailReceipt, EmailReceiptStatus
 from app.schemas import ImportResult, ReceivedMailRead
 from app.services.mail_extraction import (
@@ -26,7 +26,7 @@ from app.services.resend import (
 # "/extract/{id}") runs the sender check + Claude classify/extract on stored
 # rows. The /extract routes are declared BEFORE /{email_id} so "extract" isn't
 # captured as an email id.
-router = APIRouter(prefix="/received/mail", tags=["received-mail"])
+router = APIRouter(prefix="/received/mail", tags=["admin/received-mail"])
 
 ResendDep = Annotated[ResendClient, Depends(get_resend_client)]
 MailExtractorDep = Annotated[MailExtractor, Depends(get_mail_extractor)]
@@ -59,9 +59,10 @@ def _extract(session: SessionDep, receipt: EmailReceipt, resend, extractor) -> N
 # --- retrieve ---
 
 
-@router.post("", response_model=list[ReceivedMailRead])
+@router.post(
+    "", response_model=list[ReceivedMailRead], summary="[admin] Retrieve recent mail"
+)
 def retrieve_recent(
-    _: CurrentUser,
     session: SessionDep,
     resend: ResendDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
@@ -80,9 +81,12 @@ def retrieve_recent(
 # --- extract (declared before /{email_id}) ---
 
 
-@router.post("/extract", response_model=list[ReceivedMailRead])
+@router.post(
+    "/extract",
+    response_model=list[ReceivedMailRead],
+    summary="[admin] Extract mail backlog",
+)
 def extract_recent(
-    _: CurrentUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -105,10 +109,13 @@ def extract_recent(
     return receipts
 
 
-@router.post("/extract/{email_id}", response_model=ReceivedMailRead)
+@router.post(
+    "/extract/{email_id}",
+    response_model=ReceivedMailRead,
+    summary="[admin] Extract one email",
+)
 def extract_one(
     email_id: str,
-    _: CurrentUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -131,9 +138,10 @@ def extract_one(
 # --- import (declared before /{email_id}) ---
 
 
-@router.post("/import", response_model=list[ImportResult])
+@router.post(
+    "/import", response_model=list[ImportResult], summary="[admin] Import mail backlog"
+)
 def import_recent(
-    _: CurrentUser,
     session: SessionDep,
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[ImportResult]:
@@ -151,8 +159,10 @@ def import_recent(
     return results
 
 
-@router.post("/import/{email_id}", response_model=ImportResult)
-def import_one(email_id: str, _: CurrentUser, session: SessionDep) -> ImportResult:
+@router.post(
+    "/import/{email_id}", response_model=ImportResult, summary="[admin] Import one email"
+)
+def import_one(email_id: str, session: SessionDep) -> ImportResult:
     """Import one extracted email into its matching trip. A receipt that isn't
     `extracted` comes back `skipped` (no double-create of an already-processed one)."""
     receipt = session.scalar(
@@ -168,9 +178,10 @@ def import_one(email_id: str, _: CurrentUser, session: SessionDep) -> ImportResu
 # --- process (pull new mail from Resend + extract + import; before /{email_id}) ---
 
 
-@router.post("/process", response_model=list[ImportResult])
+@router.post(
+    "/process", response_model=list[ImportResult], summary="[admin] Process new mail"
+)
 def process_new_mail(
-    _: CurrentUser,
     session: SessionDep,
     resend: ResendDep,
     extractor: MailExtractorDep,
@@ -199,9 +210,11 @@ def process_new_mail(
 # --- retrieve one (the catch-all /{email_id}, declared last) ---
 
 
-@router.post("/{email_id}", response_model=ReceivedMailRead)
+@router.post(
+    "/{email_id}", response_model=ReceivedMailRead, summary="[admin] Retrieve one email"
+)
 def retrieve_one(
-    email_id: str, _: CurrentUser, session: SessionDep, resend: ResendDep
+    email_id: str, session: SessionDep, resend: ResendDep
 ) -> EmailReceipt:
     """Retrieve one received email by id and store it, body and all (in `raw`)."""
     email = _resend(lambda: resend.get_received_email(email_id))

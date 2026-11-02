@@ -49,16 +49,16 @@ def _paris_poi(place_id: str, name: str) -> dict:
     }
 
 
-def _enrich(client, headers, google_place_id):
+def _enrich(client, headers, admin, google_place_id):
     """Stub + refresh-google: the two steps that replaced POST /places/from-google."""
     stub = client.post("/places", json={"google_place_id": google_place_id}, headers=headers)
     assert stub.status_code in (200, 201), stub.text
-    refreshed = client.post(f"/places/{stub.json()['id']}/refresh-google", headers=headers)
+    refreshed = client.post(f"/admin/places/{stub.json()['id']}/refresh-google", headers=admin)
     assert refreshed.status_code == 200, refreshed.text
     return refreshed.json()
 
 
-def test_create_auto_enriches_a_known_place(client, make_user, google_places):
+def test_create_auto_enriches_a_known_place(client, make_user, admin, google_places):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
 
@@ -75,7 +75,7 @@ def test_create_auto_enriches_a_known_place(client, make_user, google_places):
     assert google_places.calls == [HOTEL_PLACE_ID]  # enriched exactly once, at creation
 
 
-def test_create_leaves_a_stub_when_google_cant_answer(client, make_user, google_places):
+def test_create_leaves_a_stub_when_google_cant_answer(client, make_user, admin, google_places):
     sun = make_user("sun")  # HOTEL_PLACE_ID deliberately not registered in the fake
 
     created = client.post("/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun)
@@ -84,27 +84,27 @@ def test_create_leaves_a_stub_when_google_cant_answer(client, make_user, google_
 
     # Once Google knows it, refresh-google enriches the existing stub.
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
-    refreshed = client.post(f"/places/{created.json()['id']}/refresh-google", headers=sun)
+    refreshed = client.post(f"/admin/places/{created.json()['id']}/refresh-google", headers=admin)
     assert refreshed.status_code == 200, refreshed.text
     assert refreshed.json()["name"] == "Hotel Kanade Shinjuku"
 
 
-def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, google_places, session):
+def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, admin, google_places, session):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
     place = client.post(
         "/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun
     ).json()
-    url = f"/places/{place['id']}"
+    url = f"/admin/places/{place['id']}"
 
     ours = {"name": "Our hotel", "notes": "Ask for a high floor"}
-    assert client.patch(url, json=ours, headers=sun).status_code == 200
+    assert client.patch(url, json=ours, headers=admin).status_code == 200
 
     google_places.places[HOTEL_PLACE_ID] = {
         **HOTEL_PLACE,
         "displayName": {"text": "Hotel Kanade (renamed)"},
     }
-    refreshed = client.post(f"{url}/refresh-google", headers=sun)
+    refreshed = client.post(f"{url}/refresh-google", headers=admin)
     assert refreshed.status_code == 200
     body = refreshed.json()
     assert body["name"] == "Our hotel"
@@ -114,7 +114,7 @@ def test_refresh_updates_the_cache_but_not_our_own_fields(client, make_user, goo
     assert cached["displayName"]["text"] == "Hotel Kanade (renamed)"
 
 
-def test_create_place_is_a_get_or_create_stub(client, make_user):
+def test_create_place_is_a_get_or_create_stub(client, make_user, admin):
     sun = make_user("sun")
     created = client.post("/places", json={"google_place_id": "ChIJ-stub"}, headers=sun)
     assert created.status_code == 201, created.text
@@ -132,43 +132,43 @@ def test_create_place_is_a_get_or_create_stub(client, make_user):
 
 
 def test_google_place_id_is_unique_and_relinking_clears_the_cache(
-    client, make_user, google_places, session
+    client, make_user, admin, google_places, session
 ):
     sun = make_user("sun")
     google_places.places[HOTEL_PLACE_ID] = HOTEL_PLACE
-    linked = _enrich(client, sun, HOTEL_PLACE_ID)
+    linked = _enrich(client, sun, admin, HOTEL_PLACE_ID)
 
     # Relinking a different place onto an already-taken google_place_id conflicts.
     other = client.post("/places", json={"google_place_id": "ChIJ-other"}, headers=sun).json()
     duplicate = client.patch(
-        f"/places/{other['id']}", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun
+        f"/admin/places/{other['id']}", json={"google_place_id": HOTEL_PLACE_ID}, headers=admin
     )
     assert duplicate.status_code == 409
 
     # The failed update must not have poisoned the session for later requests.
     relinked = client.patch(
-        f"/places/{linked['id']}", json={"google_place_id": "ChIJ-fresh"}, headers=sun
+        f"/admin/places/{linked['id']}", json={"google_place_id": "ChIJ-fresh"}, headers=admin
     )
     assert relinked.status_code == 200
     assert relinked.json()["google_fetched_at"] is None
     assert session.get(Place, uuid.UUID(linked["id"])).google_data is None
 
 
-def test_google_failures_map_to_http_errors(client, make_user, session):
+def test_google_failures_map_to_http_errors(client, make_user, admin, session):
     sun = make_user("sun")
 
     # A Google id nobody knows -> 404 when we try to pull its details.
     missing_stub = client.post(
         "/places", json={"google_place_id": "ChIJ-missing"}, headers=sun
     ).json()
-    missing = client.post(f"/places/{missing_stub['id']}/refresh-google", headers=sun)
+    missing = client.post(f"/admin/places/{missing_stub['id']}/refresh-google", headers=admin)
     assert missing.status_code == 404
 
     # A place with no Google link (e.g. inserted directly) can't be refreshed.
     manual = Place(name="Secret ramen spot")
     session.add(manual)
     session.commit()
-    unlinked = client.post(f"/places/{manual.id}/refresh-google", headers=sun)
+    unlinked = client.post(f"/admin/places/{manual.id}/refresh-google", headers=admin)
     assert unlinked.status_code == 409
 
     # Google not configured -> 503.
@@ -176,67 +176,67 @@ def test_google_failures_map_to_http_errors(client, make_user, session):
         "/places", json={"google_place_id": HOTEL_PLACE_ID}, headers=sun
     ).json()
     app.dependency_overrides[get_google_places_client] = lambda: GooglePlacesClient(api_key=None)
-    unconfigured = client.post(f"/places/{linked_stub['id']}/refresh-google", headers=sun)
+    unconfigured = client.post(f"/admin/places/{linked_stub['id']}/refresh-google", headers=admin)
     assert unconfigured.status_code == 503
 
 
-def test_search_by_name(client, make_user, session):
+def test_search_by_name(client, make_user, admin, session):
     sun = make_user("sun")
     for name in ("Osaka Castle", "Kuromon Market", "Hotel Hanare Namba"):
         session.add(Place(name=name))
     session.commit()
 
-    found = client.get("/places", params={"q": "osaka"}, headers=sun)
+    found = client.get("/admin/places", params={"q": "osaka"}, headers=admin)
     assert [place["name"] for place in found.json()] == ["Osaka Castle"]
     # % is matched literally, not as a wildcard.
-    assert client.get("/places", params={"q": "%"}, headers=sun).json() == []
+    assert client.get("/admin/places", params={"q": "%"}, headers=admin).json() == []
 
 
-def test_refresh_links_an_area_and_dedupes_it(client, make_user, google_places):
+def test_refresh_links_an_area_and_dedupes_it(client, make_user, admin, google_places):
     sun = make_user("sun")
     google_places.places["ChIJ-louvre"] = _paris_poi("ChIJ-louvre", "Louvre Museum")
     google_places.places["ChIJ-eiffel"] = _paris_poi("ChIJ-eiffel", "Eiffel Tower")
 
-    louvre = _enrich(client, sun, "ChIJ-louvre")
+    louvre = _enrich(client, sun, admin, "ChIJ-louvre")
     assert louvre["area"]["name"] == "Paris"
     assert louvre["area_id"] == louvre["area"]["id"]
 
     # A second Paris place reuses the one Paris area rather than making another.
-    eiffel = _enrich(client, sun, "ChIJ-eiffel")
+    eiffel = _enrich(client, sun, admin, "ChIJ-eiffel")
     assert eiffel["area_id"] == louvre["area_id"]
 
 
-def test_a_city_place_gets_no_area_of_its_own(client, make_user, google_places):
+def test_a_city_place_gets_no_area_of_its_own(client, make_user, admin, google_places):
     sun = make_user("sun")
     paris_city = _paris_poi("ChIJ-paris", "Paris")
     paris_city["primaryType"] = "locality"
     paris_city["types"] = ["locality", "political"]
     google_places.places["ChIJ-paris"] = paris_city
 
-    city = _enrich(client, sun, "ChIJ-paris")
+    city = _enrich(client, sun, admin, "ChIJ-paris")
     assert city["area"] is None
 
 
-def test_manual_area_link(client, make_user):
+def test_manual_area_link(client, make_user, admin):
     sun = make_user("sun")
-    paris = client.post("/areas", json={"name": "Paris"}, headers=sun).json()
+    paris = client.post("/admin/areas", json={"name": "Paris"}, headers=admin).json()
 
     poi = client.post("/places", json={"google_place_id": "ChIJ-champs"}, headers=sun).json()
     linked = client.patch(
-        f"/places/{poi['id']}",
+        f"/admin/places/{poi['id']}",
         json={"name": "Champs-Élysées", "area_id": paris["id"]},
-        headers=sun,
+        headers=admin,
     )
     assert linked.status_code == 200, linked.text
     assert linked.json()["area"]["name"] == "Paris"
 
     unknown = client.patch(
-        f"/places/{poi['id']}", json={"area_id": str(uuid.uuid4())}, headers=sun
+        f"/admin/places/{poi['id']}", json={"area_id": str(uuid.uuid4())}, headers=admin
     )
     assert unknown.status_code == 422
 
 
-def test_refresh_places_refreshes_only_stale_ones(client, make_user, google_places, session):
+def test_refresh_places_refreshes_only_stale_ones(client, make_user, admin, google_places, session):
     sun = make_user("sun")
     now = datetime.now(UTC)
     google_places.places["g-stale"] = {"id": "g-stale", "displayName": {"text": "Fresh Name"}}
@@ -264,7 +264,7 @@ def test_refresh_places_refreshes_only_stale_ones(client, make_user, google_plac
     assert places[fresh_id]["name"] == "Kept"  # left alone
 
 
-def test_refresh_places_zero_days_forces_a_fresh_place(client, make_user, google_places, session):
+def test_refresh_places_zero_days_forces_a_fresh_place(client, make_user, admin, google_places, session):
     sun = make_user("sun")
     google_places.places["g-fresh"] = {"id": "g-fresh", "displayName": {"text": "Renamed"}}
     fresh = Place(
@@ -289,7 +289,7 @@ def test_refresh_places_zero_days_forces_a_fresh_place(client, make_user, google
     assert resp.json()["places"][fresh_id]["name"] == "Renamed"
 
 
-def test_refresh_places_is_best_effort(client, make_user, google_places, session):
+def test_refresh_places_is_best_effort(client, make_user, admin, google_places, session):
     sun = make_user("sun")  # g-unknown deliberately absent from the fake
     orphan = Place(
         google_place_id="g-unknown",
@@ -403,3 +403,17 @@ def test_places_client_error_mapping():
         _client(lambda request: httpx.Response(404)).fetch_place("nope")
     with pytest.raises(GooglePlacesError):
         _client(lambda request: httpx.Response(500)).fetch_place(HOTEL_PLACE_ID)
+
+
+def test_place_admin_endpoints_are_admin_only(client, make_user):
+    """Browse/edit/force-refresh live under /admin; a normal user is forbidden,
+    but create and read stay open to any authenticated user."""
+    sun = make_user("sun")  # non-admin
+    some_id = uuid.uuid4()
+    assert client.get("/admin/places", headers=sun).status_code == 403
+    assert client.patch(f"/admin/places/{some_id}", json={"name": "x"}, headers=sun).status_code == 403
+    assert client.post(f"/admin/places/{some_id}/refresh-google", headers=sun).status_code == 403
+
+    created = client.post("/places", json={"google_place_id": "ChIJ-open"}, headers=sun)
+    assert created.status_code in (200, 201), created.text
+    assert client.get(f"/places/{created.json()['id']}", headers=sun).status_code == 200

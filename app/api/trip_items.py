@@ -252,6 +252,9 @@ def list_items(
     session: SessionDep,
     kind: TripItemKind | None = None,
 ) -> list[TripItemRead]:
+    """Every item on the trip the caller may see, in wall-clock order. Optional
+    `kind` filters to one type (lodging/transit/activity/…). Private items show
+    only to their participants; closed items are redacted for non-participants."""
     member = viewer(session, trip, user)
     # Wall-time order: floating items have no instant to sort by.
     query = with_item_details(visible_items(trip, member)).order_by(
@@ -310,6 +313,7 @@ def create_item(
 def read_item(
     item_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> TripItemRead:
+    """One item by id, as the caller is allowed to see it (404 if they can't)."""
     member = viewer(session, trip, user)
     return present_item(_get_item(session, trip, member, item_id), member.id)
 
@@ -393,6 +397,7 @@ def update_item(
 def delete_item(
     item_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
 ) -> None:
+    """Delete an item the caller can see. (Anyone who can see it may delete it, for now.)"""
     item = _get_item(session, trip, viewer(session, trip, user), item_id)
     session.delete(item)
     session.commit()

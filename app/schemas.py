@@ -69,11 +69,37 @@ class UserRead(ReadModel):
     created_at: datetime
 
 
-class AccountRead(UserRead):
-    """The signed-in user's own account: what anyone sees, plus flags only
-    they need."""
+class AdminUserPage(BaseModel):
+    """A page of users for the admin dashboard, newest first, plus the total
+    across all pages for the pager."""
 
-    is_admin: bool
+    items: list[UserRead]
+    total: int
+    limit: int
+    offset: int
+
+
+class AdminTripRead(ReadModel):
+    """A trip row for the admin management dashboard: the trip, its owner's
+    email, and how many people are on it."""
+
+    id: uuid.UUID
+    title: str
+    owner_email: str
+    start_date: date
+    end_date: date
+    member_count: int
+    created_at: datetime
+
+
+class AdminTripPage(BaseModel):
+    """A page of trips for the admin dashboard, newest first, plus the total
+    across all pages for the pager."""
+
+    items: list[AdminTripRead]
+    total: int
+    limit: int
+    offset: int
 
 
 # --- auth ---
@@ -90,7 +116,7 @@ class TokenRead(BaseModel):
 
     token: str
     expires_at: datetime
-    user: AccountRead
+    user: UserRead
 
 
 # --- areas (the place-on-the-map a place sits in) ---
@@ -674,7 +700,7 @@ class ImageReceiptRead(ReadModel):
     stages (null until then)."""
 
     id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: uuid.UUID | None = None
     trip_id: uuid.UUID | None = None
     status: EmailReceiptStatus
     content_type: str

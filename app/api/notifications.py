@@ -7,14 +7,12 @@ from sqlalchemy import func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.api.deps import AdminUser, CurrentUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep
 from app.models import (
     Notification,
     NotificationCategory,
     NotificationPreference,
     PushDevice,
-    Trip,
-    TripItem,
     User,
 )
 from app.schemas import (
@@ -22,8 +20,6 @@ from app.schemas import (
     NotificationPreferenceRead,
     NotificationPreferenceSet,
     NotificationRead,
-    NotificationSend,
-    NotificationSendResult,
     PushDeviceCreate,
     PushDeviceRead,
     UnreadCount,
@@ -32,7 +28,6 @@ from app.services.notifications import (
     LOCKED,
     in_inbox,
     inbox_query,
-    notify,
     preference_matrix,
     sync_announcements,
     unread_count,
@@ -97,47 +92,6 @@ def list_notifications(
         items=[NotificationRead.model_validate(row) for row in page],
         next_cursor=page[-1].id if more else None,
     )
-
-
-@router.post("", response_model=NotificationSendResult, status_code=status.HTTP_201_CREATED)
-def send_notification(
-    payload: NotificationSend, _: AdminUser, session: SessionDep
-) -> NotificationSendResult:
-    """Admins only: put a notification in particular people's inboxes, e.g. a
-    support message or to try out how one looks. Unknown ids or emails are a
-    422 and nothing is sent."""
-    recipients: set[uuid.UUID] = set()
-    if payload.user_ids:
-        found = set(session.scalars(select(User.id).where(User.id.in_(payload.user_ids))))
-        if missing := [str(i) for i in payload.user_ids if i not in found]:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, f"No account with id: {', '.join(missing)}"
-            )
-        recipients |= found
-    if payload.emails:
-        by_email = {
-            email: user_id
-            for email, user_id in session.execute(
-                select(User.email, User.id).where(User.email.in_(payload.emails))
-            )
-        }
-        if missing := [e for e in payload.emails if e not in by_email]:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"No account with email: {', '.join(missing)}",
-            )
-        recipients |= set(by_email.values())
-    for field, model in (("trip_id", Trip), ("trip_item_id", TripItem)):
-        value = getattr(payload, field)
-        if value is not None and session.get(model, value) is None:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} does not match anything"
-            )
-
-    content = payload.model_dump(exclude={"user_ids", "emails"})
-    sent = notify(session, user_ids=recipients, **content)
-    session.commit()
-    return NotificationSendResult(recipients=len(recipients), sent=sent)
 
 
 @router.get("/unread-count", response_model=UnreadCount)
@@ -214,6 +168,7 @@ def set_preferences(
 
 @router.get("/devices", response_model=list[PushDeviceRead])
 def list_devices(user: CurrentUser, session: SessionDep) -> list[PushDevice]:
+    """The caller's registered push devices, oldest first."""
     return list(
         session.scalars(
             select(PushDevice).where(PushDevice.user_id == user.id).order_by(PushDevice.created_at)
@@ -258,6 +213,7 @@ def unregister_device(device_id: uuid.UUID, user: CurrentUser, session: SessionD
 
 @router.post("/{notification_id}/read", response_model=NotificationRead)
 def mark_read(notification_id: uuid.UUID, user: CurrentUser, session: SessionDep) -> Notification:
+    """Mark one of the caller's notifications read."""
     notification = _get_notification(session, user, notification_id)
     if notification.read_at is None:
         notification.read_at = datetime.now(UTC)
@@ -269,6 +225,7 @@ def mark_read(notification_id: uuid.UUID, user: CurrentUser, session: SessionDep
 def mark_unread(
     notification_id: uuid.UUID, user: CurrentUser, session: SessionDep
 ) -> Notification:
+    """Mark one of the caller's notifications unread again."""
     notification = _get_notification(session, user, notification_id)
     notification.read_at = None
     session.commit()

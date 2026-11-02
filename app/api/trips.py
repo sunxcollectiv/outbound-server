@@ -176,6 +176,7 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
 
 @router.get("/{trip_id}", response_model=TripRead)
 def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
+    """One trip by id, with its members and resolved areas. Any member may view."""
     attach_areas(session, [trip])
     return trip
 
@@ -217,6 +218,7 @@ def update_trip(
 
 @router.delete("/{trip_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
+    """Delete a trip and everything on it (items, days, membership). Owner only."""
     session.delete(trip)
     session.commit()
 

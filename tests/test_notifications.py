@@ -191,19 +191,19 @@ def test_other_peoples_notifications_are_not_found(client, session, sun, sean):
 # --- sending by hand ---
 
 
-def test_admins_send_to_people_by_id_or_email(client, make_user, make_admin, sun, sean):
-    admin = make_admin(make_user("admin"))
+def test_admins_send_to_people_by_id_or_email(client, make_user, admin, sun, sean):
+    cass = make_user("cass")
     payload = {
         "user_ids": [sun.user_id],
-        "emails": [sean.email.upper(), admin.email],
+        "emails": [sean.email.upper(), cass.email],
         "category": "travel_alert",
         "title": "Your import failed",
         "data": {"receipt_id": "r1"},
     }
-    sent = client.post("/notifications", json=payload, headers=admin)
+    sent = client.post("/admin/notifications", json=payload, headers=admin)
     assert sent.status_code == 201, sent.text
     assert sent.json() == {"recipients": 3, "sent": 3}
-    for who in (sun, sean, admin):
+    for who in (sun, sean, cass):
         [entry] = _inbox(client, who)
         assert entry["title"] == "Your import failed"
         assert entry["type"] == "message"
@@ -212,24 +212,23 @@ def test_admins_send_to_people_by_id_or_email(client, make_user, make_admin, sun
 
     # Same key again: rewritten, not added.
     again = {**payload, "title": "Import fixed", "dedupe_key": "import:r1"}
-    client.post("/notifications", json=again, headers=admin)
-    client.post("/notifications", json=again, headers=admin)
+    client.post("/admin/notifications", json=again, headers=admin)
+    client.post("/admin/notifications", json=again, headers=admin)
     assert sorted(_titles(client, sun)) == ["Import fixed", "Your import failed"]
 
 
-def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, make_admin, sun):
+def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, admin, sun):
     payload = {"user_ids": [sun.user_id], "category": "travel_alert", "title": "Hi"}
-    assert client.post("/notifications", json=payload, headers=sun).status_code == 403
+    assert client.post("/admin/notifications", json=payload, headers=sun).status_code == 403
 
-    admin = make_admin(make_user("admin"))
     nobody = {**payload, "emails": ["nobody@example.com"]}
-    assert client.post("/notifications", json=nobody, headers=admin).status_code == 422
+    assert client.post("/admin/notifications", json=nobody, headers=admin).status_code == 422
     stranger = {**payload, "user_ids": [str(uuid.uuid4())]}
-    assert client.post("/notifications", json=stranger, headers=admin).status_code == 422
+    assert client.post("/admin/notifications", json=stranger, headers=admin).status_code == 422
     bad_trip = {**payload, "trip_id": str(uuid.uuid4())}
-    assert client.post("/notifications", json=bad_trip, headers=admin).status_code == 422
+    assert client.post("/admin/notifications", json=bad_trip, headers=admin).status_code == 422
     empty = {"category": "travel_alert", "title": "Hi"}
-    assert client.post("/notifications", json=empty, headers=admin).status_code == 422
+    assert client.post("/admin/notifications", json=empty, headers=admin).status_code == 422
     assert _inbox(client, sun) == []
 
     client.put(
@@ -238,7 +237,7 @@ def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, make_
         headers=sun,
     )
     muted = {**payload, "category": "promotion"}
-    assert client.post("/notifications", json=muted, headers=admin).json() == {
+    assert client.post("/admin/notifications", json=muted, headers=admin).json() == {
         "recipients": 1,
         "sent": 0,
     }
@@ -249,22 +248,15 @@ def test_sending_by_hand_is_for_admins_and_known_people(client, make_user, make_
 
 def _announce(client, admin, **fields) -> dict:
     payload = {"category": "announcement", "title": "Hello everyone", **fields}
-    response = client.post("/announcements", json=payload, headers=admin)
+    response = client.post("/admin/announcements", json=payload, headers=admin)
     assert response.status_code == 201, response.text
     return response.json()
 
 
-@pytest.fixture
-def admin(make_user, make_admin):
-    return make_admin(make_user("admin"))
-
-
 def test_only_admins_manage_announcements(client, sun, admin):
     payload = {"category": "announcement", "title": "Hi"}
-    assert client.post("/announcements", json=payload, headers=sun).status_code == 403
-    assert client.get("/announcements", headers=sun).status_code == 403
-    assert client.get("/users/me", headers=sun).json()["is_admin"] is False
-    assert client.get("/users/me", headers=admin).json()["is_admin"] is True
+    assert client.post("/admin/announcements", json=payload, headers=sun).status_code == 403
+    assert client.get("/admin/announcements", headers=sun).status_code == 403
 
 
 def test_announcements_reach_everyone_including_later_signups(
@@ -294,14 +286,14 @@ def test_announcements_only_show_while_running(client, sun, admin):
     )
     _announce(client, admin, title="Soon", starts_at=(now + timedelta(hours=1)).isoformat())
     assert _inbox(client, sun) == []
-    assert len(client.get("/announcements", headers=admin).json()) == 2
+    assert len(client.get("/admin/announcements", headers=admin).json()) == 2
 
 
 def test_ending_an_announcement_takes_it_out_of_inboxes(client, sun, admin):
     announcement = _announce(client, admin)
     assert _titles(client, sun) == ["Hello everyone"]
     ended = client.patch(
-        f"/announcements/{announcement['id']}",
+        f"/admin/announcements/{announcement['id']}",
         json={"ends_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat()},
         headers=admin,
     )
@@ -312,7 +304,7 @@ def test_ending_an_announcement_takes_it_out_of_inboxes(client, sun, admin):
     )
     assert "Sale" in _titles(client, sun)
     ended = client.patch(
-        f"/announcements/{announcement['id']}",
+        f"/admin/announcements/{announcement['id']}",
         json={"ends_at": (datetime.now(UTC) - timedelta(minutes=30)).isoformat()},
         headers=admin,
     )
@@ -324,12 +316,12 @@ def test_edits_and_deletes_follow_into_inboxes(client, sun, admin):
     announcement = _announce(client, admin, title="Typo")
     assert _titles(client, sun) == ["Typo"]
     fixed = client.patch(
-        f"/announcements/{announcement['id']}", json={"title": "Fixed"}, headers=admin
+        f"/admin/announcements/{announcement['id']}", json={"title": "Fixed"}, headers=admin
     )
     assert fixed.status_code == 200, fixed.text
     assert _titles(client, sun) == ["Fixed"]
 
-    gone = client.delete(f"/announcements/{announcement['id']}", headers=admin)
+    gone = client.delete(f"/admin/announcements/{announcement['id']}", headers=admin)
     assert gone.status_code == 204
     assert _inbox(client, sun) == []
 
@@ -361,7 +353,7 @@ def test_promotions_can_be_switched_off_but_announcements_cannot(client, sun, ad
 
 def test_broadcasts_are_announcements_or_promotions(client, admin):
     bad = client.post(
-        "/announcements",
+        "/admin/announcements",
         json={"category": "trip_activity", "title": "Nope"},
         headers=admin,
     )

@@ -27,6 +27,11 @@ from app.services.google_places import (
 )
 
 router = APIRouter(prefix="/places", tags=["places"])
+# Management of the shared place catalogue (browse all, edit a shared record,
+# force a Google refresh). Mounted under /admin (app/api/admin.py), which applies
+# the admin gate, so these resolve at /admin/places. Client-facing create / read
+# / itinerary-driven batch refresh stay on `router` at /places.
+admin_router = APIRouter(prefix="/places", tags=["admin/places"])
 
 PlacesDep = Annotated[GooglePlacesClient, Depends(get_google_places_client)]
 NOT_NULLABLE = ("name",)
@@ -130,14 +135,15 @@ def refresh_places(
     return PlacesRefreshResponse(places={place.id: PlaceRead.model_validate(place) for place in found})
 
 
-@router.get("", response_model=list[PlaceRead])
+@admin_router.get("", response_model=list[PlaceRead], summary="[admin] List places")
 def list_places(
-    _: CurrentUser,
     session: SessionDep,
     q: str | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[Place]:
+    """List saved places alphabetically by name. Optional `q` filters by name
+    (case-insensitive substring); paged with `limit`/`offset`."""
     query = (
         select(Place)
         .options(selectinload(Place.area))
@@ -152,13 +158,16 @@ def list_places(
 
 @router.get("/{place_id}", response_model=PlaceRead)
 def read_place(place_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Place:
+    """One saved place by id, with its cached Google details."""
     return _get_place(session, place_id)
 
 
-@router.patch("/{place_id}", response_model=PlaceRead)
+@admin_router.patch("/{place_id}", response_model=PlaceRead, summary="[admin] Update place")
 def update_place(
-    place_id: uuid.UUID, payload: PlaceUpdate, _: CurrentUser, session: SessionDep
+    place_id: uuid.UUID, payload: PlaceUpdate, session: SessionDep
 ) -> Place:
+    """Edit a place. Changing `google_place_id` clears the cached Google data,
+    since the cache belonged to the old link."""
     place = _get_place(session, place_id)
     changes = payload.model_dump(exclude_unset=True)
     for field in NOT_NULLABLE:
@@ -176,10 +185,16 @@ def update_place(
     return place
 
 
-@router.post("/{place_id}/refresh-google", response_model=PlaceRead)
+@admin_router.post(
+    "/{place_id}/refresh-google",
+    response_model=PlaceRead,
+    summary="[admin] Refresh place from Google",
+)
 def refresh_place_from_google(
-    place_id: uuid.UUID, _: CurrentUser, session: SessionDep, places: PlacesDep
+    place_id: uuid.UUID, session: SessionDep, places: PlacesDep
 ) -> Place:
+    """Re-fetch this place's details from Google now, ignoring the refresh TTL.
+    409 if the place isn't linked to a Google place."""
     place = _get_place(session, place_id)
     if place.google_place_id is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Place is not linked to a Google place")

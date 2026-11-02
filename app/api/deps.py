@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.models import AccessToken, Trip, TripMember, TripRole, User
+from app.models import AccessToken, ServiceToken, Trip, TripMember, TripRole, User
 from app.security import hash_token
 
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -50,13 +50,41 @@ def get_current_user(access_token: CurrentAccessToken) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
-def get_admin_user(user: CurrentUser) -> User:
-    if not user.is_admin:
+def get_admin_principal(
+    session: SessionDep,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> ServiceToken:
+    """Gate for the /admin APIs. Admin access is machine-to-machine only: the
+    caller must present a valid admin service token (see ServiceToken,
+    scripts/issue_service_token.py). There are no human admins. 401 when the
+    token is missing/unknown/expired, 403 when it's a valid token but not an
+    admin service token (e.g. an ordinary user's bearer token)."""
+    if credentials is None:
+        raise _unauthorized("Not authenticated")
+    token_hash = hash_token(credentials.credentials)
+    now = datetime.now(UTC)
+
+    service = session.scalar(
+        select(ServiceToken).where(
+            ServiceToken.token_hash == token_hash,
+            (ServiceToken.expires_at.is_(None)) | (ServiceToken.expires_at > now),
+        )
+    )
+    if service is not None:
+        if not service.is_admin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
+        return service
+
+    # A valid user token is authenticated but never an admin, so it's a 403;
+    # anything else is an unknown/expired token.
+    user_token = session.scalar(
+        select(AccessToken).where(
+            AccessToken.token_hash == token_hash, AccessToken.expires_at > now
+        )
+    )
+    if user_token is not None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
-    return user
-
-
-AdminUser = Annotated[User, Depends(get_admin_user)]
+    raise _unauthorized("Invalid or expired token")
 
 
 def _trip_role(session: Session, trip: Trip, user: User) -> TripRole | None:

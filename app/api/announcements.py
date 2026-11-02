@@ -3,13 +3,14 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
-from app.api.deps import AdminUser, SessionDep
+from app.api.deps import SessionDep
 from app.models import Announcement
 from app.schemas import AnnouncementCreate, AnnouncementRead, AnnouncementUpdate
 from app.services.notifications import propagate_announcement
 
-# Managing broadcasts; every route is for admins only.
-router = APIRouter(prefix="/announcements", tags=["announcements"])
+# Managing broadcasts. Mounted under /admin, which applies the admin gate to
+# every route here (see app/api/admin.py), so no per-endpoint check is needed.
+router = APIRouter(prefix="/announcements", tags=["admin/announcements"])
 
 
 def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announcement:
@@ -19,34 +20,43 @@ def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announ
     return announcement
 
 
-@router.post("", response_model=AnnouncementRead, status_code=status.HTTP_201_CREATED)
-def create_announcement(
-    payload: AnnouncementCreate, admin: AdminUser, session: SessionDep
-) -> Announcement:
-    """Broadcast to every user. It reaches each inbox the next time that
-    inbox is read."""
+@router.post(
+    "",
+    response_model=AnnouncementRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="[admin] Create announcement",
+)
+def create_announcement(payload: AnnouncementCreate, session: SessionDep) -> Announcement:
+    """Broadcast to every user. It reaches each inbox the next time that inbox
+    is read. Admin is service-token-only, so `created_by_id` is always null (no
+    user behind the call)."""
     values = payload.model_dump(exclude_none=True)
     values.setdefault("type", payload.category.value)
-    announcement = Announcement(**values, created_by_id=admin.id)
+    announcement = Announcement(**values, created_by_id=None)
     session.add(announcement)
     session.commit()
     session.refresh(announcement)
     return announcement
 
 
-@router.get("", response_model=list[AnnouncementRead])
-def list_announcements(_: AdminUser, session: SessionDep) -> list[Announcement]:
+@router.get(
+    "", response_model=list[AnnouncementRead], summary="[admin] List announcements"
+)
+def list_announcements(session: SessionDep) -> list[Announcement]:
     """All announcements, past, running and scheduled; newest start first."""
     return list(
         session.scalars(select(Announcement).order_by(Announcement.starts_at.desc()))
     )
 
 
-@router.patch("/{announcement_id}", response_model=AnnouncementRead)
+@router.patch(
+    "/{announcement_id}",
+    response_model=AnnouncementRead,
+    summary="[admin] Update announcement",
+)
 def update_announcement(
     announcement_id: uuid.UUID,
     payload: AnnouncementUpdate,
-    _: AdminUser,
     session: SessionDep,
 ) -> Announcement:
     """Edit an announcement; the copies already in inboxes follow."""
@@ -70,8 +80,12 @@ def update_announcement(
     return announcement
 
 
-@router.delete("/{announcement_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_announcement(announcement_id: uuid.UUID, _: AdminUser, session: SessionDep) -> None:
+@router.delete(
+    "/{announcement_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="[admin] Delete announcement",
+)
+def delete_announcement(announcement_id: uuid.UUID, session: SessionDep) -> None:
     """Delete an announcement and take it out of every inbox. To stop it
     without erasing it, PATCH `ends_at` instead."""
     session.delete(_get_announcement(session, announcement_id))

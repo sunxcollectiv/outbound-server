@@ -21,7 +21,7 @@ def _bodies(client, headers) -> list[str]:
 
 
 @pytest.fixture
-def wedding(client, make_user, make_trip):
+def wedding(client, make_user, admin, make_trip):
     """Sun organizes; Sean and Amy are on the trip, and Grandma has no account."""
     sun, sean, amy = make_user("sun"), make_user("sean"), make_user("amy")
     trip = make_trip(
@@ -170,12 +170,12 @@ def test_times_read_naturally():
     assert day_and_time(datetime(2026, 11, 12, 12, 0)) == "Nov 12 at 12 PM"
 
 
-def test_untitled_items_are_called_by_their_place(client, wedding):
+def test_untitled_items_are_called_by_their_place(client, wedding, admin):
     sun = wedding["sun"]
 
     def place(name):
         stub = client.post("/places", json={"google_place_id": f"g-{name}"}, headers=sun)
-        return client.patch(f"/places/{stub.json()['id']}", json={"name": name}, headers=sun).json()
+        return client.patch(f"/admin/places/{stub.json()['id']}", json={"name": name}, headers=admin).json()
 
     ramen, sushi = place("Ichiran"), place("Sushi Dai")
     item = wedding["add"](title=None, place_id=ramen["id"], notify_members=True)
@@ -190,10 +190,10 @@ def test_untitled_items_are_called_by_their_place(client, wedding):
     }
 
 
-def test_outsiders_hear_of_an_untitled_closed_item_by_its_kind(client, wedding):
+def test_outsiders_hear_of_an_untitled_closed_item_by_its_kind(client, wedding, admin):
     sun = wedding["sun"]
     stub = client.post("/places", json={"google_place_id": "g-Thermae"}, headers=sun)
-    spa = client.patch(f"/places/{stub.json()['id']}", json={"name": "Thermae"}, headers=sun).json()
+    spa = client.patch(f"/admin/places/{stub.json()['id']}", json={"name": "Thermae"}, headers=admin).json()
 
     item = wedding["add"](
         title=None, place_id=spa["id"], visibility="closed",

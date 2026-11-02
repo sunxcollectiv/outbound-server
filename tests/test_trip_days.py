@@ -12,7 +12,7 @@ def _days(client, trip, headers):
     return response.json()
 
 
-def test_days_follow_the_trip_dates(client, make_user, make_trip):
+def test_days_follow_the_trip_dates(client, make_user, admin, make_trip):
     sun = make_user("sun")
     trip = make_trip(sun, timezone="Asia/Tokyo")
     url = f"/trips/{trip['id']}"
@@ -54,20 +54,20 @@ def test_days_follow_the_trip_dates(client, make_user, make_trip):
     assert all(d["timezones"] == ["Asia/Tokyo"] for d in days)
 
 
-def test_a_trip_without_a_zone_has_empty_days(client, make_user, make_trip):
+def test_a_trip_without_a_zone_has_empty_days(client, make_user, admin, make_trip):
     sun = make_user("sun")
     trip = make_trip(sun)
     assert all(d["timezones"] == [] for d in _days(client, trip, sun))
     assert client.post("/trips", json={**JAPAN_TRIP, "timezone": "Asia/Tokio"}, headers=sun).status_code == 422
 
 
-def test_editing_a_day(client, make_user, make_trip, add_member):
+def test_editing_a_day(client, make_user, admin, make_trip, add_member):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}"
     add_member(trip["id"], sun, sean)
     stub = client.post("/places", json={"google_place_id": "g-flagstaff"}, headers=sun).json()
-    client.patch(f"/places/{stub['id']}", json={"name": "Flagstaff"}, headers=sun)
+    client.patch(f"/admin/places/{stub['id']}", json={"name": "Flagstaff"}, headers=admin)
 
     # Duplicate zones collapse, order is kept, the place is embedded.
     changed = client.patch(
@@ -108,7 +108,7 @@ def test_editing_a_day(client, make_user, make_trip, add_member):
     assert client.get(f"{url}/days", headers=sean).status_code == 200
 
 
-def test_deleting_a_trip_removes_its_days(client, session, make_user, make_trip):
+def test_deleting_a_trip_removes_its_days(client, session, make_user, admin, make_trip):
     sun = make_user("sun")
     trip = make_trip(sun)
     count = select(func.count()).select_from(TripDay)

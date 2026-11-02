@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 
 from sqlalchemy import func, select
 
@@ -29,44 +30,74 @@ def _count(session) -> int:
     return session.scalar(select(func.count()).select_from(ImageReceipt))
 
 
-def _upload(client, headers, image_id="ticket.png", data=PNG, content_type="image/png") -> str:
-    """Upload an image and return its id."""
+# The step-by-step endpoints are admin (service-token) dev tooling, so an admin
+# upload has no user behind it; the one-shot /received/images/process is the
+# real user flow and owns its receipt.
+
+
+def _upload(client, admin, image_id="ticket.png", data=PNG, content_type="image/png") -> str:
+    """Upload an image via the admin endpoint and return its id (no uploader)."""
     resp = client.post(
-        "/received/images/upload",
+        "/admin/received/images/upload",
         files={"file": (image_id, data, content_type)},
-        headers=headers,
+        headers=admin,
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
 
-def _extract_image(client, headers, image_extractor, extraction, filename="ticket.png") -> str:
-    """Drive an image to `extracted` via the upload + extract endpoints."""
+def _extract_image(client, admin, image_extractor, extraction, filename="ticket.png") -> str:
+    """Drive an image to `extracted` via the admin upload + extract endpoints."""
     image_extractor.result = extraction
-    image_id = _upload(client, headers, filename)
-    r = client.post(f"/received/images/extract/{image_id}", headers=headers)
+    image_id = _upload(client, admin, filename)
+    r = client.post(f"/admin/received/images/extract/{image_id}", headers=admin)
     assert r.status_code == 200 and r.json()["status"] == "extracted", r.text
     return image_id
 
 
+def _extracted_for(client, admin, session, image_extractor, extraction, user) -> str:
+    """An `extracted` image attributed to `user` — upload+extract via admin (no
+    uploader), then point the receipt at the user so admin import can match
+    their trips. Stands in for a receipt a user owns."""
+    image_id = _extract_image(client, admin, image_extractor, extraction)
+    session.get(ImageReceipt, uuid.UUID(image_id)).user_id = uuid.UUID(user.user_id)
+    session.flush()
+    return image_id
+
+
+# --- upload (admin) ---
+
+
 def test_upload_requires_auth(client):
     assert client.post(
-        "/received/images/upload", files={"file": ("x.png", PNG, "image/png")}
+        "/admin/received/images/upload", files={"file": ("x.png", PNG, "image/png")}
     ).status_code == 401
 
 
-def test_upload_stores_the_image(client, make_user, session):
+def test_received_images_admin_ops_are_admin_only(client, make_user):
+    """The step-by-step endpoints are admin-only; a normal user is forbidden."""
     sun = make_user("sun")
-    resp = client.post(
-        "/received/images/upload",
-        files={"file": ("ticket.png", PNG, "image/png")},
+    upload = client.post(
+        "/admin/received/images/upload",
+        files={"file": ("x.png", PNG, "image/png")},
         headers=sun,
+    )
+    assert upload.status_code == 403
+    assert client.post("/admin/received/images/extract", headers=sun).status_code == 403
+    assert client.post("/admin/received/images/import", headers=sun).status_code == 403
+
+
+def test_upload_stores_the_image(client, admin, session):
+    resp = client.post(
+        "/admin/received/images/upload",
+        files={"file": ("ticket.png", PNG, "image/png")},
+        headers=admin,
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
 
     assert body["status"] == "received"
-    assert body["user_id"] == sun.user_id
+    assert body["user_id"] is None  # an admin upload has no uploader
     assert body["content_type"] == "image/png"
     assert body["filename"] == "ticket.png"
     assert body["byte_size"] == len(PNG)
@@ -74,143 +105,133 @@ def test_upload_stores_the_image(client, make_user, session):
     assert body["trip_id"] is None and body["extracted"] is None
     assert "data" not in body  # the bytes aren't echoed back
 
-    # The bytes are persisted on the row.
     row = session.scalar(select(ImageReceipt).where(ImageReceipt.id == body["id"]))
     assert row.data == PNG
     assert row.status is EmailReceiptStatus.RECEIVED
 
 
-def test_upload_rejects_non_image(client, make_user, session):
-    sun = make_user("sun")
+def test_upload_rejects_non_image(client, admin, session):
     resp = client.post(
-        "/received/images/upload",
+        "/admin/received/images/upload",
         files={"file": ("notes.txt", b"just text", "text/plain")},
-        headers=sun,
+        headers=admin,
     )
     assert resp.status_code == 415
     assert _count(session) == 0
 
 
-def test_upload_rejects_empty_file(client, make_user, session):
-    sun = make_user("sun")
+def test_upload_rejects_empty_file(client, admin, session):
     resp = client.post(
-        "/received/images/upload",
+        "/admin/received/images/upload",
         files={"file": ("empty.png", b"", "image/png")},
-        headers=sun,
+        headers=admin,
     )
     assert resp.status_code == 422
     assert _count(session) == 0
 
 
-# --- extract ---
+# --- extract (admin) ---
 
 
 def test_extract_endpoints_require_auth(client):
-    assert client.post("/received/images/extract").status_code == 401
+    assert client.post("/admin/received/images/extract").status_code == 401
     assert (
-        client.post("/received/images/extract/00000000-0000-0000-0000-000000000000").status_code
+        client.post("/admin/received/images/extract/00000000-0000-0000-0000-000000000000").status_code
         == 401
     )
 
 
-def test_extract_one_processes_a_booking(client, make_user, image_extractor, session):
-    sun = make_user("sun")
-    image_id = _upload(client, sun)
+def test_extract_one_processes_a_booking(client, admin, image_extractor, session):
+    image_id = _upload(client, admin)
 
-    body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/extract/{image_id}", headers=admin).json()
     assert body["status"] == "extracted"
     assert body["extracted"]["category"] == "flight"
     assert body["extracted_at"] is not None
     assert image_extractor.calls == [(PNG, "image/png")]  # the stored bytes were sent
 
-    row = session.get(ImageReceipt, image_id)
+    row = session.get(ImageReceipt, uuid.UUID(image_id))
     assert row.status is EmailReceiptStatus.EXTRACTED
 
 
-def test_extract_not_a_booking_is_rejected(client, make_user, image_extractor):
-    sun = make_user("sun")
-    image_id = _upload(client, sun)
+def test_extract_not_a_booking_is_rejected(client, admin, image_extractor):
+    image_id = _upload(client, admin)
     image_extractor.result = Extraction(
         category="not_a_booking", confidence=0.99, summary="A meme", items=[]
     )
-    body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/extract/{image_id}", headers=admin).json()
     assert body["status"] == "rejected"
     assert body["extracted"]["category"] == "not_a_booking"
 
 
-def test_extract_low_confidence_is_rejected(client, make_user, image_extractor):
-    sun = make_user("sun")
-    image_id = _upload(client, sun)
+def test_extract_low_confidence_is_rejected(client, admin, image_extractor):
+    image_id = _upload(client, admin)
     image_extractor.result = Extraction(category="flight", confidence=0.2, summary="?", items=[])
-    body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/extract/{image_id}", headers=admin).json()
     assert body["status"] == "rejected"
 
 
-def test_extract_error_goes_pending_with_failure_logged(client, make_user, image_extractor):
-    sun = make_user("sun")
-    image_id = _upload(client, sun)
+def test_extract_error_goes_pending_with_failure_logged(client, admin, image_extractor):
+    image_id = _upload(client, admin)
     image_extractor.error = ImageExtractionError("Claude extraction failed: boom")
 
-    body = client.post(f"/received/images/extract/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/extract/{image_id}", headers=admin).json()
     assert body["status"] == "pending"
     assert len(body["failures"]) == 1
     assert body["failures"][0]["step"] == "extract"
 
 
-def test_extract_batch_processes_only_the_worklist(client, make_user, image_extractor):
-    sun = make_user("sun")
-    _upload(client, sun, "a.png")
-    _upload(client, sun, "b.png")
+def test_extract_batch_processes_only_the_worklist(client, admin, image_extractor):
+    _upload(client, admin, "a.png")
+    _upload(client, admin, "b.png")
 
-    body = client.post("/received/images/extract", headers=sun).json()
+    body = client.post("/admin/received/images/extract", headers=admin).json()
     assert [r["status"] for r in body] == ["extracted", "extracted"]
     assert len(image_extractor.calls) == 2
 
     # Both terminal now → re-running the batch is a no-op.
-    again = client.post("/received/images/extract", headers=sun).json()
+    again = client.post("/admin/received/images/extract", headers=admin).json()
     assert again == []
     assert len(image_extractor.calls) == 2
 
 
-def test_extract_single_terminal_needs_force(client, make_user, image_extractor):
-    sun = make_user("sun")
-    image_id = _upload(client, sun)
+def test_extract_single_terminal_needs_force(client, admin, image_extractor):
+    image_id = _upload(client, admin)
 
-    client.post(f"/received/images/extract/{image_id}", headers=sun)  # → extracted
+    client.post(f"/admin/received/images/extract/{image_id}", headers=admin)  # → extracted
     assert len(image_extractor.calls) == 1
-    client.post(f"/received/images/extract/{image_id}", headers=sun)  # terminal, no re-run
+    client.post(f"/admin/received/images/extract/{image_id}", headers=admin)  # terminal, no re-run
     assert len(image_extractor.calls) == 1
-    client.post(f"/received/images/extract/{image_id}?force=true", headers=sun)  # forced
+    client.post(f"/admin/received/images/extract/{image_id}?force=true", headers=admin)  # forced
     assert len(image_extractor.calls) == 2
 
 
-def test_extract_unknown_id_is_404(client, make_user):
-    sun = make_user("sun")
+def test_extract_unknown_id_is_404(client, admin):
     assert (
-        client.post("/received/images/extract/00000000-0000-0000-0000-000000000000", headers=sun)
+        client.post("/admin/received/images/extract/00000000-0000-0000-0000-000000000000", headers=admin)
         .status_code
         == 404
     )
 
 
-# --- import ---
+# --- import (admin) ---
 
 NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
 
 def test_import_endpoints_require_auth(client):
-    assert client.post("/received/images/import").status_code == 401
-    assert client.post(f"/received/images/import/{NIL_UUID}").status_code == 401
+    assert client.post("/admin/received/images/import").status_code == 401
+    assert client.post(f"/admin/received/images/import/{NIL_UUID}").status_code == 401
 
 
 def test_import_places_flight_into_matching_trip(
-    client, make_user, make_trip, image_extractor, session
+    client, make_user, admin, make_trip, image_extractor, session
 ):
     sun = make_user("sun")
     trip = make_trip(sun)  # 2026-04-09 .. 04-15, overlaps the flight
-    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+    image_id = _extracted_for(client, admin, session, image_extractor, FLIGHT, sun)
 
-    body = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/import/{image_id}", headers=admin).json()
     assert body["outcome"] == "placed"
     assert body["trip_id"] == trip["id"]
     assert body["item_count"] == 1
@@ -224,46 +245,45 @@ def test_import_places_flight_into_matching_trip(
     assert item["confirmation_number"] == "IMG123"
     assert item["place"]["name"] == "LAX" and item["end_place"]["name"] == "HND"
 
-    row = session.get(ImageReceipt, image_id)
+    row = session.get(ImageReceipt, uuid.UUID(image_id))
     assert row.status is EmailReceiptStatus.PROCESSED and row.trip_id is not None
 
 
-def test_import_no_matching_trip_stays_extracted(client, make_user, image_extractor, session):
-    sun = make_user("sun")  # no trips at all
-    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+def test_import_no_owner_or_trip_stays_extracted(client, admin, image_extractor, session):
+    # An admin upload has no user, so there are no trips to match.
+    image_id = _extract_image(client, admin, image_extractor, FLIGHT)
 
-    body = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    body = client.post(f"/admin/received/images/import/{image_id}", headers=admin).json()
     assert body["outcome"] == "no_match"
-    assert session.get(ImageReceipt, image_id).status is EmailReceiptStatus.EXTRACTED
+    assert session.get(ImageReceipt, uuid.UUID(image_id)).status is EmailReceiptStatus.EXTRACTED
 
 
-def test_reimport_is_a_noop(client, make_user, make_trip, image_extractor):
+def test_reimport_is_a_noop(client, make_user, admin, make_trip, image_extractor, session):
     sun = make_user("sun")
     make_trip(sun)
-    image_id = _extract_image(client, sun, image_extractor, FLIGHT)
+    image_id = _extracted_for(client, admin, session, image_extractor, FLIGHT, sun)
 
-    assert client.post(f"/received/images/import/{image_id}", headers=sun).json()["outcome"] == "placed"
-    again = client.post(f"/received/images/import/{image_id}", headers=sun).json()
+    assert client.post(f"/admin/received/images/import/{image_id}", headers=admin).json()["outcome"] == "placed"
+    again = client.post(f"/admin/received/images/import/{image_id}", headers=admin).json()
     assert again["outcome"] == "skipped"  # already processed, not re-created
 
 
-def test_import_batch_places_only_extracted(client, make_user, make_trip, image_extractor):
+def test_import_batch_places_only_extracted(client, make_user, admin, make_trip, image_extractor, session):
     sun = make_user("sun")
     make_trip(sun)
-    _extract_image(client, sun, image_extractor, FLIGHT, "a.png")
+    _extracted_for(client, admin, session, image_extractor, FLIGHT, sun)
     # An uploaded-but-not-extracted image is skipped by the import backlog.
-    _upload(client, sun, "b.png")
+    _upload(client, admin, "b.png")
 
-    outcomes = [r["outcome"] for r in client.post("/received/images/import", headers=sun).json()]
+    outcomes = [r["outcome"] for r in client.post("/admin/received/images/import", headers=admin).json()]
     assert outcomes == ["placed"]  # only the single `extracted` image was imported
 
 
-def test_import_unknown_id_is_404(client, make_user):
-    sun = make_user("sun")
-    assert client.post(f"/received/images/import/{NIL_UUID}", headers=sun).status_code == 404
+def test_import_unknown_id_is_404(client, admin):
+    assert client.post(f"/admin/received/images/import/{NIL_UUID}", headers=admin).status_code == 404
 
 
-# --- process (upload + extract + import in one call) ---
+# --- process (user-facing: upload + extract + import in one call) ---
 
 
 def test_process_requires_auth(client):
@@ -302,5 +322,5 @@ def test_process_not_a_booking_never_imports(client, make_user, make_trip, image
         files={"file": ("x.png", PNG, "image/png")},
         headers=sun,
     ).json()
+    assert body["outcome"] == "skipped"
     assert body["receipt"]["status"] == "rejected"
-    assert body["outcome"] == "skipped"  # extract rejected it; import never ran

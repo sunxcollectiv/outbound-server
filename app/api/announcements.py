@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import AdminActingUser, SessionDep
 from app.models import Announcement
 from app.schemas import AnnouncementCreate, AnnouncementRead, AnnouncementUpdate
 from app.services.notifications import propagate_announcement
@@ -27,13 +27,14 @@ def _get_announcement(session: SessionDep, announcement_id: uuid.UUID) -> Announ
     summary="[admin] Create announcement",
 )
 def create_announcement(
-    payload: AnnouncementCreate, admin: CurrentUser, session: SessionDep
+    payload: AnnouncementCreate, author: AdminActingUser, session: SessionDep
 ) -> Announcement:
     """Broadcast to every user. It reaches each inbox the next time that
-    inbox is read."""
+    inbox is read. `created_by_id` is the acting admin, or null when posted by
+    a service token (no user behind it)."""
     values = payload.model_dump(exclude_none=True)
     values.setdefault("type", payload.category.value)
-    announcement = Announcement(**values, created_by_id=admin.id)
+    announcement = Announcement(**values, created_by_id=author.id if author else None)
     session.add(announcement)
     session.commit()
     session.refresh(announcement)

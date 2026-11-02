@@ -325,6 +325,30 @@ def make_admin(session: Session) -> Callable[[AuthHeaders], AuthHeaders]:
 
 
 @pytest.fixture
+def make_service_token(session: Session) -> Callable[..., AuthHeaders]:
+    """Mints a ServiceToken (machine-to-machine credential, no user) and returns
+    bearer headers for it, the way scripts/issue_service_token.py does."""
+    from datetime import datetime
+
+    from app.models import ServiceToken
+    from app.security import hash_token, new_token
+
+    def _make(
+        name: str = "svc", *, is_admin: bool = True, expires_at: datetime | None = None
+    ) -> AuthHeaders:
+        raw = new_token()
+        session.add(
+            ServiceToken(
+                name=name, token_hash=hash_token(raw), is_admin=is_admin, expires_at=expires_at
+            )
+        )
+        session.flush()
+        return AuthHeaders(Authorization=f"Bearer {raw}")
+
+    return _make
+
+
+@pytest.fixture
 def add_member(client: TestClient) -> Callable[..., dict[str, Any]]:
     """Adds `guest` to a trip by email as `organizer`. Returns the membership."""
 

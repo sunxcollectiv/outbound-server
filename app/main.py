@@ -10,7 +10,7 @@ from app.api import (
     trips,
     users,
 )
-from app.api.deps import get_admin_user
+from app.api.deps import get_admin_principal
 
 DESCRIPTION = """
 Backend for Outbound, a collaborative trip-itinerary app.
@@ -55,8 +55,9 @@ app.include_router(notifications.router)
 # Everything privileged lives under /admin/* (management endpoints + the
 # announcements and received-mail/images routers, included inside admin.router).
 # The admin gate is applied once, here, so no route under /admin can be
-# non-admin by construction.
-app.include_router(admin.router, dependencies=[Depends(get_admin_user)])
+# non-admin by construction. It accepts an admin user's token or a service
+# (M2M) token.
+app.include_router(admin.router, dependencies=[Depends(get_admin_principal)])
 
 
 @app.get("/health", tags=["meta"])

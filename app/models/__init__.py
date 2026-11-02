@@ -13,6 +13,7 @@ from app.models.notification import (
     PushPlatform,
 )
 from app.models.place import Place
+from app.models.service_token import ServiceToken
 from app.models.trip import Trip, TripDay, TripMember, TripRole
 from app.models.trip_item import (
     RsvpStatus,
@@ -41,6 +42,7 @@ __all__ = [
     "Place",
     "PushDevice",
     "PushPlatform",
+    "ServiceToken",
     "RsvpStatus",
     "TransitMode",
     "Trip",

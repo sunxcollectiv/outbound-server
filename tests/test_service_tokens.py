@@ -18,6 +18,16 @@ def test_non_admin_service_token_is_forbidden(client, make_service_token):
     assert client.get("/admin/users", headers=svc).status_code == 403
 
 
+def test_service_token_cannot_act_as_a_user(client, make_service_token):
+    """A service token is admin-scoped only: it resolves to no user, so the
+    user-scoped endpoints (which need CurrentUser) reject it — no path from an
+    M2M key into a person's own data."""
+    svc = make_service_token("console")
+    trip = {"title": "Sneaky", "start_date": "2026-04-09", "end_date": "2026-04-10"}
+    assert client.post("/trips", json=trip, headers=svc).status_code == 401
+    assert client.get("/trips", headers=svc).status_code == 401
+
+
 def test_expired_service_token_is_rejected(client, make_service_token):
     svc = make_service_token("old", expires_at=datetime.now(UTC) - timedelta(seconds=1))
     assert client.get("/admin/users", headers=svc).status_code == 401

@@ -28,6 +28,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Restoring NOT NULL fails if any image receipts were uploaded via the admin
+    # (service-token) endpoints, which leave user_id null — clean those up by
+    # hand first if so (there's no user to backfill them to).
     op.alter_column('r_images', 'user_id', existing_type=sa.Uuid(), nullable=False)
     op.add_column(
         'users',

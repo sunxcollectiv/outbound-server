@@ -50,6 +50,14 @@ def get_current_user(access_token: CurrentAccessToken) -> User:
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def get_now() -> datetime:
+    """The clock, as a dependency so tests can set it."""
+    return datetime.now(UTC)
+
+
+Now = Annotated[datetime, Depends(get_now)]
+
+
 def get_admin_principal(
     session: SessionDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],

@@ -3,9 +3,11 @@ from fastapi import Depends, FastAPI
 from app.api import (
     admin,
     auth,
+    credits,
     areas,
     notifications,
     places,
+    pricing,
     received_images,
     trip_items,
     trips,
@@ -36,11 +38,14 @@ TAGS_METADATA = [
     {"name": "areas", "description": "The country / territory / city taxonomy trips are tagged with, and their cover photos."},
     {"name": "received-images", "description": "Importing a booking screenshot into your own trips in one call (POST /received/images/process)."},
     {"name": "notifications", "description": "The in-app inbox, per-category/channel preferences, and push-device registration."},
+    {"name": "pricing", "description": "The rate tables trips are priced from."},
+    {"name": "credits", "description": "The caller's credit balance and ledger; trips are paid for in credits."},
     {"name": "meta", "description": "Service health and metadata."},
     # --- admin (service-token only); one section per area ---
     {"name": "admin/users", "description": "[admin] Browse every user account (paginated)."},
     {"name": "admin/trips", "description": "[admin] Browse every trip (paginated), with owner and member count."},
     {"name": "admin/notifications", "description": "[admin] Send a notification to specific people by id or email."},
+    {"name": "admin/credits", "description": "[admin] Grant credits to a person and read their ledger."},
     {"name": "admin/announcements", "description": "[admin] Broadcast messages that fan out into every user's inbox."},
     {"name": "admin/areas", "description": "[admin] Curate the area taxonomy — create, edit, delete."},
     {"name": "admin/places", "description": "[admin] Manage the shared place catalogue — browse, edit, force a Google refresh."},
@@ -63,6 +68,8 @@ app.include_router(places.router)
 app.include_router(areas.router)
 app.include_router(received_images.router)  # user-facing POST /received/images/process
 app.include_router(notifications.router)
+app.include_router(pricing.router)
+app.include_router(credits.router)
 # Everything privileged lives under /admin/* (management endpoints + the
 # announcements and received-mail/images routers, included inside admin.router).
 # The admin gate is applied once, here, so no route under /admin can be

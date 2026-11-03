@@ -24,6 +24,7 @@ from app.db import Base
 from app.models.base import TimestampMixin, UUIDPrimaryKeyMixin, str_enum
 from app.models.place import Place
 from app.models.user import User
+from app.services.pricing import CURRENT_SCHEDULE, price, trip_days
 
 if TYPE_CHECKING:
     from app.models.trip_item import TripItem
@@ -92,6 +93,11 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     extends_trip_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("trips.id", ondelete="SET NULL"), index=True
     )
+    # Which rate table this trip is priced under (app.services.pricing). Set
+    # once at creation, so later rate changes don't reprice it.
+    price_schedule: Mapped[str] = mapped_column(
+        String(16), default=CURRENT_SCHEDULE, server_default=CURRENT_SCHEDULE
+    )
 
     owner: Mapped[User] = relationship()
     group: Mapped[TripGroup | None] = relationship(back_populates="trips")
@@ -119,6 +125,13 @@ class Trip(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         order_by="TripDay.date",
     )
+
+    @property
+    def price_cents(self) -> int:
+        """What the trip costs today under its schedule: its length and
+        roster. Not what has been paid for it (see app.services.credits)."""
+        days = trip_days(self.start_date, self.end_date)
+        return price(days, len(self.members), self.price_schedule)
 
 
 class TripDay(TimestampMixin, Base):

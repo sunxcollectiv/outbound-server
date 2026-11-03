@@ -15,6 +15,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from app.api import announcements, areas, places, received_images, received_mail
 from app.api.deps import SessionDep
@@ -23,10 +24,14 @@ from app.schemas import (
     AdminTripPage,
     AdminTripRead,
     AdminUserPage,
+    CreditGrant,
+    CreditGrantResult,
+    CreditsRead,
     NotificationSend,
     NotificationSendResult,
     UserRead,
 )
+from app.services import credits
 from app.services.notifications import notify
 
 router = APIRouter(prefix="/admin")
@@ -155,6 +160,61 @@ def send_notification(payload: NotificationSend, session: SessionDep) -> Notific
     sent = notify(session, user_ids=recipients, **content)
     session.commit()
     return NotificationSendResult(recipients=len(recipients), sent=sent)
+
+
+@router.post(
+    "/credits/grants",
+    response_model=CreditGrantResult,
+    status_code=status.HTTP_201_CREATED,
+    tags=["admin/credits"],
+    summary="[admin] Grant credits",
+)
+def grant_credits(payload: CreditGrant, session: SessionDep) -> CreditGrantResult:
+    """Put credits on one person's balance, by id or email. The only way
+    credits come in until store purchases are wired up. An unknown person is
+    a 422; a repeated `external_id` is a 409 and nothing is granted."""
+    if payload.user_id is not None:
+        user = session.get(User, payload.user_id)
+        if user is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"No account with id: {payload.user_id}"
+            )
+    else:
+        user = session.scalar(select(User).where(User.email == payload.email))
+        if user is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"No account with email: {payload.email}"
+            )
+    try:
+        entry = credits.grant(
+            session,
+            user.id,
+            payload.amount_cents,
+            description=payload.description,
+            external_id=payload.external_id,
+        )
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Credits with that external_id were already granted"
+        ) from None
+    return CreditGrantResult(entry=entry, balance_cents=credits.balance(session, user.id))
+
+
+@router.get(
+    "/users/{user_id}/credits",
+    response_model=CreditsRead,
+    tags=["admin/credits"],
+    summary="[admin] Read a user's credits",
+)
+def read_user_credits(user_id: uuid.UUID, session: SessionDep) -> CreditsRead:
+    """One person's balance and ledger, newest first."""
+    if session.get(User, user_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    return CreditsRead(
+        balance_cents=credits.balance(session, user_id), entries=credits.ledger(session, user_id)
+    )
 
 
 # Fully-admin resource routers, mounted under /admin/* (they keep their own

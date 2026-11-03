@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from app.models import (
+    CreditEntryKind,
     EmailReceiptStatus,
     NotificationCategory,
     NotificationChannel,
@@ -324,10 +325,13 @@ class TripCreate(BaseModel):
     # People to add besides the creator, who is always on as an organizer.
     members: TripMembersIn = Field(default_factory=list)
     # Make this trip an extension of one the caller is on: a full trip of
-    # its own (own roster, days, items) that joins the parent's group, or
-    # starts one. Its dates must touch or overlap the parent's: no gap, since
-    # a gap is just a separate trip. 404 if the caller isn't on the parent.
+    # its own (own roster, days, items, bill) that joins the parent's group,
+    # or starts one. Its dates are free. 404 if the caller isn't on the parent.
     extends_trip_id: uuid.UUID | None = None
+    # The charge POST /trips/quote showed the user. If the server would now
+    # charge something else, the trip isn't created (409) so nobody pays a
+    # price they didn't see.
+    expected_price_cents: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:
@@ -352,6 +356,8 @@ class TripUpdate(BaseModel):
     # Tell the trip's other members what changed: in their inbox, and as a
     # push if they allow it. Nothing is sent if the edit changes nothing.
     notify_members: bool = False
+    # The charge POST /trips/{id}/quote showed the user; 409 if it differs now.
+    expected_price_cents: int | None = Field(default=None, ge=0)
 
 
 class TripRead(ReadModel):
@@ -368,6 +374,9 @@ class TripRead(ReadModel):
     # trip. Read-only here: links are made by extending a trip.
     group_id: uuid.UUID | None = None
     extends_trip_id: uuid.UUID | None = None
+    # What the trip costs today, for its length and roster under the rate
+    # table it was created with. Not what has been paid for it: see /credits.
+    price_cents: int
     # Resolved from the stored area_ids, in order; ids that no longer match an
     # area are dropped (and pruned from storage) so none surface as blanks.
     areas: list[AreaRead] = Field(default_factory=list)
@@ -388,7 +397,10 @@ class TripListEntry(TripRead):
 
     Here `start_date`/`end_date` span the caller's whole journey, this trip
     and its extensions together, not the lead trip's own dates; those come
-    from GET /trips/{id}. Each extension keeps its own."""
+    from GET /trips/{id}. Each extension keeps its own.
+
+    `price_cents` is the lead trip's own price; extensions carry theirs.
+    """
 
     # The caller's other trips in this trip's group (its extensions, and
     # trips extended off those), by start date. Empty for a standalone trip.
@@ -782,6 +794,113 @@ class ImageImportResult(ReadModel):
     trip_id: uuid.UUID | None = None
     item_count: int = 0
     candidate_trip_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+# --- pricing & credits ---
+
+
+class BracketRead(BaseModel):
+    first_day: int
+    # Null: open-ended ("day 31 and beyond").
+    last_day: int | None
+    cents_per_day: int
+
+
+class PricingScheduleRead(BaseModel):
+    """The rate tables, for showing how pricing works. A trip day is charged
+    at the rate of the bracket it falls in; that covers up to
+    `included_members` people, and each person beyond adds the member rate."""
+
+    key: str
+    included_members: int
+    trip_brackets: list[BracketRead]
+    member_brackets: list[BracketRead]
+
+
+class BracketLineRead(BaseModel):
+    """One row of a price breakdown: the days that fell in one bracket."""
+
+    first_day: int
+    last_day: int
+    days: int
+    cents_per_day: int
+    cents: int
+
+
+class TripQuote(BaseModel):
+    """What a create or edit would cost. `price_cents` is what the caller
+    would be charged (0 if nothing is due); send it back as
+    `expected_price_cents` with the write. `refund_cents` is what would go
+    back to the trip's owner instead, if the edit lowers the price inside
+    the refund window."""
+
+    schedule: str
+    days: int
+    members: int
+    extra_members: int
+    owed_cents: int
+    paid_cents: int
+    price_cents: int
+    refund_cents: int
+    refund_window_open: bool
+    trip_lines: list[BracketLineRead]
+    member_lines: list[BracketLineRead]
+    balance_cents: int
+    shortfall_cents: int
+
+
+class CreditEntryRead(ReadModel):
+    id: uuid.UUID
+    kind: CreditEntryKind
+    # Positive when credits came in, negative when spent.
+    amount_cents: int
+    # Null for grants and purchases, and once a trip is deleted.
+    trip_id: uuid.UUID | None
+    description: str | None
+    created_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def title(self) -> str:
+        """A line for the ledger: "Unlocked Lisbon", "Refund: Lisbon"."""
+        match self.kind:
+            case CreditEntryKind.GRANT:
+                return self.description or "Credits added"
+            case CreditEntryKind.PURCHASE:
+                return "Credits purchased"
+            case CreditEntryKind.TRIP_CHARGE:
+                return f"Unlocked {self.description}" if self.description else "Unlocked a trip"
+            case CreditEntryKind.TRIP_REFUND:
+                return f"Refund: {self.description}" if self.description else "Refund"
+
+
+class CreditsRead(BaseModel):
+    balance_cents: int
+    # Newest first.
+    entries: list[CreditEntryRead]
+
+
+class CreditGrant(BaseModel):
+    """Credits for one person, by id or email (exactly one)."""
+
+    user_id: uuid.UUID | None = None
+    email: Email | None = None
+    amount_cents: int = Field(gt=0, le=10_000_000)
+    # Shown to them in their ledger.
+    description: str | None = Field(default=None, max_length=200)
+    # A receipt or reference, if any; the same one can't be granted twice.
+    external_id: str | None = Field(default=None, max_length=255)
+
+    @model_validator(mode="after")
+    def _one_recipient(self) -> Self:
+        if (self.user_id is None) == (self.email is None):
+            raise ValueError("give exactly one of user_id or email")
+        return self
+
+
+class CreditGrantResult(BaseModel):
+    entry: CreditEntryRead
+    balance_cents: int
 
 
 # --- notifications ---

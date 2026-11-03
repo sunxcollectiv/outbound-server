@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -10,9 +11,10 @@ from sqlalchemy import Engine, create_engine, make_url, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.api.deps import get_now
 from app.db import get_session
 from app.main import app
-from app.models import User
+from app.models import CreditEntry, CreditEntryKind, User
 from app.services import push
 from app.services.apns import ApnsClient, ApnsResponse
 from app.services.google_places import (
@@ -240,9 +242,23 @@ def apns() -> FakeApns:
     return FakeApns()
 
 
+class Clock:
+    """The server's idea of "now", pinned so tests don't rot: set `now` to
+    move it (e.g. past a trip's refund cutoff)."""
+
+    def __init__(self) -> None:
+        self.now = datetime(2026, 11, 3, 12, tzinfo=UTC)
+
+
+@pytest.fixture
+def clock() -> Clock:
+    return Clock()
+
+
 @pytest.fixture
 def client(
     session: Session,
+    clock: Clock,
     google_places: FakeGooglePlaces,
     unsplash: FakeUnsplash,
     resend: FakeResend,
@@ -250,6 +266,7 @@ def client(
     image_extractor: FakeImageExtractor,
 ) -> Iterator[TestClient]:
     app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_now] = lambda: clock.now
     app.dependency_overrides[get_google_places_client] = lambda: google_places
     app.dependency_overrides[get_unsplash_client] = lambda: unsplash
     app.dependency_overrides[get_resend_client] = lambda: resend
@@ -270,11 +287,17 @@ class AuthHeaders(dict[str, str]):
     email: str
 
 
-@pytest.fixture
-def make_user(client: TestClient) -> Callable[[str], AuthHeaders]:
-    """Registers a user and returns the auth headers for acting as them."""
+# Enough for any trip a test makes (a 7-day trip is $8), granted straight
+# into the ledger; pass credits=0 to get someone who can't afford one.
+STARTING_CREDITS = 100_000
 
-    def _make(name: str) -> AuthHeaders:
+
+@pytest.fixture
+def make_user(client: TestClient, session: Session) -> Callable[..., AuthHeaders]:
+    """Registers a user, with credits to spend, and returns the auth headers
+    for acting as them."""
+
+    def _make(name: str, *, credits: int = STARTING_CREDITS) -> AuthHeaders:
         response = client.post(
             "/auth/register",
             json={
@@ -288,9 +311,45 @@ def make_user(client: TestClient) -> Callable[[str], AuthHeaders]:
         headers = AuthHeaders(Authorization=f"Bearer {body['token']}")
         headers.user_id = body["user"]["id"]
         headers.email = body["user"]["email"]
+        if credits:
+            session.add(
+                CreditEntry(
+                    user_id=uuid.UUID(headers.user_id),
+                    kind=CreditEntryKind.GRANT,
+                    amount_cents=credits,
+                    description="Test credits",
+                )
+            )
+            session.flush()
         return headers
 
     return _make
+
+
+@pytest.fixture
+def grant_credits(client: TestClient, admin: AuthHeaders) -> Callable[..., dict[str, Any]]:
+    """Grants credits the way staff would, through the admin API."""
+
+    def _grant(headers: AuthHeaders, cents: int, **extra: Any) -> dict[str, Any]:
+        response = client.post(
+            "/admin/credits/grants",
+            json={"user_id": headers.user_id, "amount_cents": cents, **extra},
+            headers=admin,
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    return _grant
+
+
+@pytest.fixture
+def credits_of(client: TestClient) -> Callable[[AuthHeaders], dict[str, Any]]:
+    def _read(headers: AuthHeaders) -> dict[str, Any]:
+        response = client.get("/credits", headers=headers)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    return _read
 
 
 JAPAN_TRIP = {

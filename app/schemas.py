@@ -357,6 +357,12 @@ class TripRead(ReadModel):
     start_date: date
     end_date: date
     cover_image_url: str | None
+    # Set when this trip is linked to others. `group_id` is the cluster it
+    # belongs to; `extends_trip_id` is the trip it was created by extending
+    # (null if that trip has since been deleted). Both null for a standalone
+    # trip. Read-only here: links are made by extending a trip.
+    group_id: uuid.UUID | None = None
+    extends_trip_id: uuid.UUID | None = None
     # Resolved from the stored area_ids, in order; ids that no longer match an
     # area are dropped (and pruned from storage) so none surface as blanks.
     areas: list[AreaRead] = Field(default_factory=list)

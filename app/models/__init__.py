@@ -14,7 +14,7 @@ from app.models.notification import (
 )
 from app.models.place import Place
 from app.models.service_token import ServiceToken
-from app.models.trip import Trip, TripDay, TripMember, TripRole
+from app.models.trip import Trip, TripDay, TripGroup, TripMember, TripRole
 from app.models.trip_item import (
     RsvpStatus,
     TransitMode,
@@ -47,6 +47,7 @@ __all__ = [
     "TransitMode",
     "Trip",
     "TripDay",
+    "TripGroup",
     "TripItem",
     "TripItemKind",
     "TripItemParticipant",

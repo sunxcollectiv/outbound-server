@@ -384,14 +384,15 @@ class TripRead(ReadModel):
 class TripListEntry(TripRead):
     """One card in the caller's trip list: a trip, plus the caller's other
     trips in its group nested under it. The lead trip is the one none of the
-    others were extended from (the earliest, if links were broken)."""
+    others were extended from (the earliest, if links were broken).
+
+    Here `start_date`/`end_date` span the caller's whole journey, this trip
+    and its extensions together, not the lead trip's own dates; those come
+    from GET /trips/{id}. Each extension keeps its own."""
 
     # The caller's other trips in this trip's group (its extensions, and
     # trips extended off those), by start date. Empty for a standalone trip.
     extensions: list[TripRead] = Field(default_factory=list)
-    # The caller's whole journey across this trip and its extensions.
-    span_start_date: date
-    span_end_date: date
 
 
 class TripDayUpdate(BaseModel):

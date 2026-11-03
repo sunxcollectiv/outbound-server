@@ -197,7 +197,8 @@ def _extend(session: SessionDep, trip: Trip, parent_id: uuid.UUID, user: User) -
 def list_trips(user: CurrentUser, session: SessionDep) -> list[TripListEntry]:
     """Trips the caller is on, as owner or member, one entry per journey: the
     caller's trips in one group come as a single entry, the lead trip with the
-    others nested under it as `extensions`. Ordered by when each journey starts."""
+    others nested under it as `extensions`, and the entry's dates spanning
+    them all. Ordered by when each journey starts."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = (
         select(Trip)
@@ -220,12 +221,12 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[TripListEntry]:
                 {
                     **TripRead.model_validate(primary).model_dump(),
                     "extensions": [TripRead.model_validate(t) for t in extensions],
-                    "span_start_date": min(t.start_date for t in cluster),
-                    "span_end_date": max(t.end_date for t in cluster),
+                    "start_date": min(t.start_date for t in cluster),
+                    "end_date": max(t.end_date for t in cluster),
                 }
             )
         )
-    entries.sort(key=lambda entry: (entry.span_start_date, entry.id))
+    entries.sort(key=lambda entry: (entry.start_date, entry.id))
     return entries
 
 

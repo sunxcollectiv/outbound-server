@@ -190,13 +190,17 @@ def test_trip_list_nests_a_journey_under_its_lead_trip(client, make_user, make_t
     entries = _list(client, sun)
     assert [e["id"] for e in entries] == [korea["id"], japan["id"]]
     assert entries[0]["extensions"] == []
-    assert (entries[0]["span_start_date"], entries[0]["span_end_date"]) == (
-        "2026-04-01",
-        "2026-04-03",
-    )
+    assert (entries[0]["start_date"], entries[0]["end_date"]) == ("2026-04-01", "2026-04-03")
     journey = entries[1]
     assert [t["id"] for t in journey["extensions"]] == [early["id"], after["id"]]
-    assert (journey["span_start_date"], journey["span_end_date"]) == ("2026-04-07", "2026-04-17")
+    # The entry's dates span the journey; each trip keeps its own elsewhere.
+    assert (journey["start_date"], journey["end_date"]) == ("2026-04-07", "2026-04-17")
+    assert [(t["start_date"], t["end_date"]) for t in journey["extensions"]] == [
+        ("2026-04-07", "2026-04-09"),
+        ("2026-04-15", "2026-04-17"),
+    ]
+    single = client.get(f"/trips/{japan['id']}", headers=sun).json()
+    assert (single["start_date"], single["end_date"]) == ("2026-04-09", "2026-04-15")
     assert journey["extensions"][0]["members"][1]["email"] == amy.email
 
     # Amy is on the extension only: it stands alone for her, still naming its parent.

@@ -323,6 +323,11 @@ class TripCreate(BaseModel):
     area_ids: list[uuid.UUID] = Field(default_factory=list)
     # People to add besides the creator, who is always on as an organizer.
     members: TripMembersIn = Field(default_factory=list)
+    # Make this trip an extension of one the caller is on: a full trip of
+    # its own (own roster, days, items) that joins the parent's group, or
+    # starts one. Its dates must touch or overlap the parent's: no gap, since
+    # a gap is just a separate trip. 404 if the caller isn't on the parent.
+    extends_trip_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
     def _dates_ordered(self) -> Self:

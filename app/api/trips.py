@@ -11,6 +11,7 @@ from app.api.deps import (
     OwnedTrip,
     SessionDep,
     ViewableTrip,
+    get_viewable_trip,
     is_organizer,
 )
 from app.api.trip_items import check_places, viewer, with_item_details
@@ -19,6 +20,7 @@ from app.models import (
     Place,
     Trip,
     TripDay,
+    TripGroup,
     TripItemParticipant,
     TripMember,
     TripRole,
@@ -37,7 +39,12 @@ from app.schemas import (
 from app.services.item_visibility import visible_items
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
-from app.services.trip_notifications import TripSnapshot, notify_trip_updated
+from app.services.trip_notifications import (
+    TripSnapshot,
+    contiguous,
+    notify_trip_extended,
+    notify_trip_updated,
+)
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
@@ -148,15 +155,40 @@ def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> 
     values = payload.model_dump()
     seed_timezone = values.pop("timezone")
     del values["members"]
+    del values["extends_trip_id"]
     values["area_ids"] = _clean_area_ids(session, values["area_ids"])
     trip = Trip(**values, owner_id=user.id)
     trip.members.append(TripMember(user_id=user.id, email=user.email, role=TripRole.ORGANIZER))
     _set_members(session, trip, payload.members, replace=False)
     sync_trip_days(trip, seed_timezone)
+    parent = None
+    if payload.extends_trip_id is not None:
+        parent = _extend(session, trip, payload.extends_trip_id, user)
     session.add(trip)
+    if parent is not None:
+        notify_trip_extended(session, parent, trip, user)
     session.commit()
     attach_areas(session, [trip])
     return trip
+
+
+def _extend(session: SessionDep, trip: Trip, parent_id: uuid.UUID, user: User) -> Trip:
+    """Link a new trip as an extension of `parent_id`. Any member of the
+    parent may extend it (404 otherwise, like reading it). The two join one
+    group: the parent's if it has one, else a new one that the parent joins
+    too, so a standalone trip becomes a group's first member the moment it's
+    extended. Dates must be contiguous with the parent's."""
+    parent = get_viewable_trip(parent_id, session, user)
+    if not contiguous(trip, parent):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "An extension's dates must touch or overlap the trip it extends",
+        )
+    if parent.group is None:
+        parent.group = TripGroup()
+    trip.group = parent.group
+    trip.extends = parent
+    return parent
 
 
 @router.get("", response_model=list[TripRead])

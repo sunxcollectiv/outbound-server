@@ -8,7 +8,7 @@ edit added get "added you" instead, and people it removed hear nothing.
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 
 from sqlalchemy.orm import Session
 
@@ -127,14 +127,6 @@ def notify_trip_updated(
             **common,
         )
     return sent
-
-
-def contiguous(a: Trip, b: Trip) -> bool:
-    """Whether two trips' dates overlap or sit side by side with no day
-    between them (one ending the day before the other starts counts)."""
-    return a.start_date <= b.end_date + timedelta(days=1) and (
-        b.start_date <= a.end_date + timedelta(days=1)
-    )
 
 
 def notify_trip_extended(session: Session, parent: Trip, extension: Trip, actor: User) -> int:

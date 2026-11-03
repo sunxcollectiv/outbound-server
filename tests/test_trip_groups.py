@@ -133,16 +133,15 @@ def test_extensions_chain_and_reuse_the_group(client, make_user, make_trip):
     assert [t["id"] for t in client.get("/trips", headers=bo).json()] == [earlier["id"]]
 
 
-def test_extension_must_be_contiguous_with_its_parent(client, make_user, make_trip):
+def test_extension_dates_need_not_touch_its_parent(client, make_user, make_trip):
     sun = make_user("sun")
     japan = make_trip(sun)  # Apr 9 – 15
 
+    # A gap is allowed (a group can end up with one anyway once a trip is cut),
+    # and so is sharing days.
     gap = _extend(client, sun, japan, start_date="2026-04-01", end_date="2026-04-07")
-    assert gap.status_code == 422
-    assert "touch or overlap" in gap.json()["detail"]
-
-    # Ending the day before counts as touching; so does sharing days.
-    assert _extend(client, sun, japan, start_date="2026-04-06", end_date="2026-04-08").status_code == 201
+    assert gap.status_code == 201
+    assert gap.json()["extends_trip_id"] == japan["id"]
     assert _extend(client, sun, japan, start_date="2026-04-14", end_date="2026-04-20").status_code == 201
 
 

@@ -43,7 +43,6 @@ from app.services.trip_days import sync_trip_days
 from app.services.trip_groups import group_links, my_cluster, split_primary
 from app.services.trip_notifications import (
     TripSnapshot,
-    contiguous,
     notify_trip_extended,
     notify_trip_updated,
 )
@@ -179,13 +178,9 @@ def _extend(session: SessionDep, trip: Trip, parent_id: uuid.UUID, user: User) -
     parent may extend it (404 otherwise, like reading it). The two join one
     group: the parent's if it has one, else a new one that the parent joins
     too, so a standalone trip becomes a group's first member the moment it's
-    extended. Dates must be contiguous with the parent's."""
+    extended. Its dates are free: it may overlap the parent or leave a gap,
+    as a group can end up with one anyway once a trip's dates are cut."""
     parent = get_viewable_trip(parent_id, session, user)
-    if not contiguous(trip, parent):
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "An extension's dates must touch or overlap the trip it extends",
-        )
     if parent.group is None:
         parent.group = TripGroup()
     trip.group = parent.group

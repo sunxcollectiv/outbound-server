@@ -261,17 +261,23 @@ def test_itinerary_merges_the_callers_trips_in_the_group(client, make_user, make
     assert [e["item"]["title"] for e in hers["days"][0]["items"]] == ["Land at HND"]
 
 
-def test_itinerary_leaves_a_gap_day_unowned(client, make_user, make_trip):
+def test_itinerary_marks_an_empty_day_between_trips_as_a_gap(client, make_user, make_trip):
     sun = make_user("sun")
     japan = make_trip(sun)  # Apr 9 – 15
     early = _extend(client, sun, japan, start_date="2026-04-06", end_date="2026-04-08").json()
     earlier = _extend(client, sun, early, start_date="2026-04-04", end_date="2026-04-06").json()
     assert client.delete(f"/trips/{early['id']}", headers=sun).status_code == 204
 
+    # Something planned on a day no trip covers keeps that day out of the gap.
+    _add(client, sun, japan, "Ferry", "2026-04-08T09:00:00")
+
     days = {day["date"]: day for day in _itinerary(client, sun, japan)["days"]}
     assert days["2026-04-06"]["trip_id"] == earlier["id"]
     assert (days["2026-04-07"]["trip_id"], days["2026-04-07"]["trip_ids"]) == (None, [])
     assert days["2026-04-09"]["day_number"] == 6
+    gaps = [date for date, day in days.items() if day["is_gap"]]
+    assert gaps == ["2026-04-07"]
+    assert days["2026-04-08"]["trip_ids"] == []
 
 
 def test_merged_itinerary_keeps_each_trips_visibility(client, make_user, make_trip):

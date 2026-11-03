@@ -690,6 +690,12 @@ class ItineraryDay(BaseModel):
     # Every one of the caller's trips covering the date; more than one is an
     # overlap. Each item names its own trip by `item.trip_id`.
     trip_ids: list[uuid.UUID]
+    # A date between the caller's trips with nothing on it: none of them
+    # covers it and it has no items or lodging. Kept as a day so numbering
+    # and dates stay continuous; clients show it as a break, not a page.
+    # A date outside the trips that does have something on it (say, a
+    # flight the day before) is not a gap.
+    is_gap: bool
     lodging: list[LodgingStay]
     items: list[ItineraryEntry]
 

@@ -191,14 +191,18 @@ def build_itinerary(
     day = first
     while day <= last:
         owner = day_owner(day, trips, links)
+        covering = [t.id for t in trips if t.start_date <= day <= t.end_date]
+        lodging = lodging_by_day.get(day, [])
+        day_items = [entry for _, entry in sorted(items_by_day.get(day, []), key=_sort_key)]
         days.append(
             ItineraryDay(
                 date=day,
                 day_number=(day - journey_start).days + 1,
                 trip_id=owner.id if owner is not None else None,
-                trip_ids=[t.id for t in trips if t.start_date <= day <= t.end_date],
-                lodging=lodging_by_day.get(day, []),
-                items=[entry for _, entry in sorted(items_by_day.get(day, []), key=_sort_key)],
+                trip_ids=covering,
+                is_gap=not covering and not lodging and not day_items,
+                lodging=lodging,
+                items=day_items,
             )
         )
         day += timedelta(days=1)

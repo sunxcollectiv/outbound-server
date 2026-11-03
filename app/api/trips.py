@@ -33,12 +33,14 @@ from app.schemas import (
     TripDayUpdate,
     TripMemberCreate,
     TripMemberRead,
+    TripListEntry,
     TripRead,
     TripUpdate,
 )
-from app.services.item_visibility import visible_items
+from app.services.item_visibility import visible_items_for
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
+from app.services.trip_groups import group_links, my_cluster, split_primary
 from app.services.trip_notifications import (
     TripSnapshot,
     contiguous,
@@ -191,9 +193,11 @@ def _extend(session: SessionDep, trip: Trip, parent_id: uuid.UUID, user: User) -
     return parent
 
 
-@router.get("", response_model=list[TripRead])
-def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
-    """Trips the caller is on, as owner or member."""
+@router.get("", response_model=list[TripListEntry])
+def list_trips(user: CurrentUser, session: SessionDep) -> list[TripListEntry]:
+    """Trips the caller is on, as owner or member, one entry per journey: the
+    caller's trips in one group come as a single entry, the lead trip with the
+    others nested under it as `extensions`. Ordered by when each journey starts."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = (
         select(Trip)
@@ -203,7 +207,26 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
     )
     trips = list(session.scalars(query))
     attach_areas(session, trips)
-    return trips
+
+    clusters: dict[uuid.UUID, list[Trip]] = {}
+    for trip in trips:
+        clusters.setdefault(trip.group_id or trip.id, []).append(trip)
+    links = group_links(session, (trip.group_id for trip in trips))
+    entries = []
+    for cluster in clusters.values():
+        primary, extensions = split_primary(cluster, links)
+        entries.append(
+            TripListEntry.model_validate(
+                {
+                    **TripRead.model_validate(primary).model_dump(),
+                    "extensions": [TripRead.model_validate(t) for t in extensions],
+                    "span_start_date": min(t.start_date for t in cluster),
+                    "span_end_date": max(t.end_date for t in cluster),
+                }
+            )
+        )
+    entries.sort(key=lambda entry: (entry.span_start_date, entry.id))
+    return entries
 
 
 @router.get("/{trip_id}", response_model=TripRead)
@@ -258,10 +281,20 @@ def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
 @router.get("/{trip_id}/itinerary", response_model=Itinerary)
 def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -> Itinerary:
     """Everyone's plans in one view, each item as the caller gets to see it:
-    private items only if they're on them, closed ones cut down unless they are."""
-    member = viewer(session, trip, user)
-    items = session.scalars(with_item_details(visible_items(trip, member)))
-    return build_itinerary(trip, list(items), member.id)
+    private items only if they're on them, closed ones cut down unless they are.
+
+    Merged across the trip's group: every trip in it the caller is on, so any
+    of them gives the same days. Each day and item says which trip it's on."""
+    trips = my_cluster(session, trip, user)
+    members = [viewer(session, t, user) for t in trips]
+    items = session.scalars(with_item_details(visible_items_for(members)))
+    return build_itinerary(
+        trip,
+        trips,
+        list(items),
+        {member.trip_id: member.id for member in members},
+        group_links(session, [trip.group_id]),
+    )
 
 
 # --- days ---

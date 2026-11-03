@@ -34,10 +34,19 @@ _REDACTED: dict[str, object] = {
 def visible_items(trip: Trip, member: TripMember) -> Select[tuple[TripItem]]:
     """Items on the trip that `member` may see at all: anything not private,
     and private items they're a participant on."""
-    theirs = select(TripItemParticipant.item_id).where(TripItemParticipant.member_id == member.id)
+    return visible_items_for([member])
+
+
+def visible_items_for(members: list[TripMember]) -> Select[tuple[TripItem]]:
+    """The same across several trips at once, one member row per trip: items
+    on any of their trips that aren't private, and private ones they're on."""
+    member_ids = [member.id for member in members]
+    theirs = select(TripItemParticipant.item_id).where(
+        TripItemParticipant.member_id.in_(member_ids)
+    )
     return (
         select(TripItem)
-        .where(TripItem.trip_id == trip.id)
+        .where(TripItem.trip_id.in_([member.trip_id for member in members]))
         .where(
             or_(TripItem.visibility != TripItemVisibility.PRIVATE, TripItem.id.in_(theirs))
         )

@@ -381,6 +381,19 @@ class TripRead(ReadModel):
     updated_at: datetime
 
 
+class TripListEntry(TripRead):
+    """One card in the caller's trip list: a trip, plus the caller's other
+    trips in its group nested under it. The lead trip is the one none of the
+    others were extended from (the earliest, if links were broken)."""
+
+    # The caller's other trips in this trip's group (its extensions, and
+    # trips extended off those), by start date. Empty for a standalone trip.
+    extensions: list[TripRead] = Field(default_factory=list)
+    # The caller's whole journey across this trip and its extensions.
+    span_start_date: date
+    span_end_date: date
+
+
 class TripDayUpdate(BaseModel):
     """Days are made and removed with the trip's dates; this edits one."""
 
@@ -666,13 +679,29 @@ class ItineraryEntry(BaseModel):
 
 class ItineraryDay(BaseModel):
     date: date
+    # Counted from the first day of the caller's journey: the earliest start
+    # among the trips merged into the itinerary.
     day_number: int
+    # The trip this date belongs to. Where two of the caller's trips share
+    # it, the parent (the one the other was extended from). Null for a date
+    # none of them covers, e.g. one widened to show an item outside the trip.
+    trip_id: uuid.UUID | None
+    # Every one of the caller's trips covering the date; more than one is an
+    # overlap. Each item names its own trip by `item.trip_id`.
+    trip_ids: list[uuid.UUID]
     lodging: list[LodgingStay]
     items: list[ItineraryEntry]
 
 
 class Itinerary(BaseModel):
+    """The caller's merged day-by-day view of a trip and every other trip in
+    its group they're on: the same days whichever of those trips is asked for."""
+
+    # The trip asked for.
     trip: TripRead
+    # Every trip merged into this view, by start date (just `trip` when it
+    # stands alone).
+    trips: list[TripRead]
     days: list[ItineraryDay]
     # Deduped ids of places in this trip whose cached Google data is missing or
     # due a refresh. The client renders the itinerary immediately, then (only if

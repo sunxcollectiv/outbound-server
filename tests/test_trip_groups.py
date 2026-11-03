@@ -156,3 +156,144 @@ def test_only_members_of_the_parent_may_extend_it(client, make_user, make_trip):
 
     missing = _extend(client, sun, {"id": str(uuid.uuid4())})
     assert missing.status_code == 404
+
+
+# --- reading a group: the trip list and the merged itinerary ---
+
+
+def _list(client, headers):
+    response = client.get("/trips", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _itinerary(client, headers, trip):
+    response = client.get(f"/trips/{trip['id']}/itinerary", headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _add(client, headers, trip, title, starts_at, **fields):
+    payload = {"kind": "activity", "title": title, "starts_at": starts_at, **fields}
+    response = client.post(f"/trips/{trip['id']}/items", json=payload, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_trip_list_nests_a_journey_under_its_lead_trip(client, make_user, make_trip):
+    sun, amy = make_user("sun"), make_user("amy")
+    japan = make_trip(sun)  # Apr 9 – 15
+    early = _extend(client, sun, japan, members=[{"email": amy.email}]).json()  # Apr 7 – 9
+    after = _extend(client, sun, japan, start_date="2026-04-15", end_date="2026-04-17").json()
+    korea = make_trip(sun, title="Korea", start_date="2026-04-01", end_date="2026-04-03")
+
+    entries = _list(client, sun)
+    assert [e["id"] for e in entries] == [korea["id"], japan["id"]]
+    assert entries[0]["extensions"] == []
+    assert (entries[0]["span_start_date"], entries[0]["span_end_date"]) == (
+        "2026-04-01",
+        "2026-04-03",
+    )
+    journey = entries[1]
+    assert [t["id"] for t in journey["extensions"]] == [early["id"], after["id"]]
+    assert (journey["span_start_date"], journey["span_end_date"]) == ("2026-04-07", "2026-04-17")
+    assert journey["extensions"][0]["members"][1]["email"] == amy.email
+
+    # Amy is on the extension only: it stands alone for her, still naming its parent.
+    [hers] = _list(client, amy)
+    assert hers["id"] == early["id"] and hers["extensions"] == []
+    assert hers["extends_trip_id"] == japan["id"]
+
+
+def test_trip_list_nests_across_a_trip_the_caller_is_not_on(client, make_user, make_trip, session):
+    sun, amy = make_user("sun"), make_user("amy")
+    japan = make_trip(sun, members=[{"email": amy.email}])  # Apr 9 – 15
+    early = _extend(client, amy, japan).json()  # Apr 7 – 9, Amy's
+    earlier = _extend(
+        client, amy, early, start_date="2026-04-05", end_date="2026-04-07",
+        members=[{"email": sun.email}],
+    ).json()
+
+    # Sun is on japan and earlier but not early: earlier still descends from japan.
+    [entry] = _list(client, sun)
+    assert entry["id"] == japan["id"]
+    assert [t["id"] for t in entry["extensions"]] == [earlier["id"]]
+
+    # With the middle trip gone the two stay one journey (they share a group).
+    assert client.delete(f"/trips/{early['id']}", headers=amy).status_code == 204
+    [entry] = _list(client, sun)
+    assert [entry["id"], *(t["id"] for t in entry["extensions"])] == [earlier["id"], japan["id"]]
+
+
+def test_itinerary_merges_the_callers_trips_in_the_group(client, make_user, make_trip):
+    sun, amy = make_user("sun"), make_user("amy")
+    japan = make_trip(sun, members=[{"email": amy.email}])  # Apr 9 – 15
+    early = _extend(client, sun, japan).json()  # Apr 7 – 9, overlapping on the 9th
+    _add(client, sun, early, "Osaka castle", "2026-04-08T10:00:00")
+    _add(client, sun, japan, "Land at HND", "2026-04-09T11:00:00")
+    _add(client, sun, early, "Shinkansen to Tokyo", "2026-04-09T08:00:00")
+
+    merged = _itinerary(client, sun, japan)
+    assert merged == _itinerary(client, sun, early) | {"trip": merged["trip"]}
+    assert merged["trip"]["id"] == japan["id"]
+    assert [t["id"] for t in merged["trips"]] == [early["id"], japan["id"]]
+
+    days = {day["date"]: day for day in merged["days"]}
+    assert list(days) == [f"2026-04-{d:02d}" for d in range(7, 16)]
+    assert [day["day_number"] for day in merged["days"]] == list(range(1, 10))
+    assert days["2026-04-07"]["trip_id"] == early["id"]
+    # The shared day belongs to the parent, and says it's shared.
+    assert days["2026-04-09"]["trip_id"] == japan["id"]
+    assert days["2026-04-09"]["trip_ids"] == [early["id"], japan["id"]]
+    assert days["2026-04-10"]["trip_ids"] == [japan["id"]]
+    assert [(e["item"]["title"], e["item"]["trip_id"]) for e in days["2026-04-09"]["items"]] == [
+        ("Shinkansen to Tokyo", early["id"]),
+        ("Land at HND", japan["id"]),
+    ]
+
+    # Amy isn't on the extension: she gets the parent alone, as before.
+    hers = _itinerary(client, amy, japan)
+    assert [t["id"] for t in hers["trips"]] == [japan["id"]]
+    assert (hers["days"][0]["date"], hers["days"][0]["day_number"]) == ("2026-04-09", 1)
+    assert [e["item"]["title"] for e in hers["days"][0]["items"]] == ["Land at HND"]
+
+
+def test_itinerary_leaves_a_gap_day_unowned(client, make_user, make_trip):
+    sun = make_user("sun")
+    japan = make_trip(sun)  # Apr 9 – 15
+    early = _extend(client, sun, japan, start_date="2026-04-06", end_date="2026-04-08").json()
+    earlier = _extend(client, sun, early, start_date="2026-04-04", end_date="2026-04-06").json()
+    assert client.delete(f"/trips/{early['id']}", headers=sun).status_code == 204
+
+    days = {day["date"]: day for day in _itinerary(client, sun, japan)["days"]}
+    assert days["2026-04-06"]["trip_id"] == earlier["id"]
+    assert (days["2026-04-07"]["trip_id"], days["2026-04-07"]["trip_ids"]) == (None, [])
+    assert days["2026-04-09"]["day_number"] == 6
+
+
+def test_merged_itinerary_keeps_each_trips_visibility(client, make_user, make_trip):
+    sun, amy = make_user("sun"), make_user("amy")
+    japan = make_trip(sun, members=[{"email": amy.email}])
+    early = _extend(client, sun, japan, members=[{"email": amy.email}]).json()
+    amy_on_early = next(m["id"] for m in early["members"] if m["email"] == amy.email)
+
+    _add(client, sun, early, "Sun's spa", "2026-04-08T09:00:00", visibility="private")
+    _add(
+        client, sun, early, "Amy's birthday", "2026-04-08T10:00:00", visibility="private",
+        participants=[{"member_id": amy_on_early}],
+    )
+    _add(client, sun, early, "Sun's dinner", "2026-04-08T19:00:00", visibility="closed")
+    _add(
+        client, sun, japan, "Ramen", "2026-04-10T12:00:00", visibility="closed",
+        participants=[{"member_id": next(
+            m["id"] for m in japan["members"] if m["email"] == amy.email
+        )}],
+    )
+
+    days = {day["date"]: day for day in _itinerary(client, amy, japan)["days"]}
+    shown = {e["item"]["display_title"]: e["item"]["redacted"] for e in days["2026-04-08"]["items"]}
+    assert shown == {"Amy's birthday": False, "Sun's dinner": True}
+    # Her own member row on japan makes her a participant there, unredacted.
+    assert [(e["item"]["title"], e["item"]["redacted"]) for e in days["2026-04-10"]["items"]] == [
+        ("Ramen", False)
+    ]

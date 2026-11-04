@@ -382,6 +382,13 @@ def test_a_trip_keeps_the_rates_it_was_made_under(client, make_user, make_trip, 
 
     new = make_trip(sun)
     assert new["price_cents"] == 1600
+    # Each trip says which rate table it's on, so the app can price edits
+    # with that table's brackets.
+    assert (old["price_schedule"], new["price_schedule"]) == ("2026-11", "test-2x")
+    assert client.get(f"/trips/{old['id']}", headers=sun).json()["price_schedule"] == "2026-11"
+    assert {t["price_schedule"] for t in client.get("/trips", headers=sun).json()} == {"2026-11", "test-2x"}
+    table = client.get("/pricing/schedule", params={"key": new["price_schedule"]}).json()
+    assert table["trip_brackets"][0]["cents_per_day"] == 320
     assert client.post("/trips/quote", json=JAPAN_TRIP, headers=sun).json()["schedule"] == "test-2x"
     assert client.get(f"/trips/{old['id']}", headers=sun).json()["price_cents"] == 800
     quote = client.post(f"/trips/{old['id']}/quote", json={"end_date": "2026-04-16"}, headers=sun).json()

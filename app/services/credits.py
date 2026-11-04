@@ -7,9 +7,11 @@ difference. More owed than paid: the person making the change pays it from
 their balance, or the write fails. Less owed than paid: the difference is
 refunded to the trip's owner, whoever paid (so a co-organizer who chipped in
 a dollar doesn't walk off with the whole refund when the trip is cancelled;
-squaring that up between them is theirs to do, for now). Refunds stop at
-the cutoff, 24h after the trip starts; after that, cutting a trip down is
-free but gives nothing back.
+squaring that up between them is theirs to do, for now). Each refund row
+still records which charge it draws down, most recent first, so who paid
+what and how much of it came back is always on record. Refunds stop at the
+cutoff, 24h after the trip starts; after that, cutting a trip down is free
+but gives nothing back.
 
 Nothing here commits; the caller owns the transaction. `settle` locks the
 trip's row and then the payer's, in that order, so two edits of one trip or
@@ -205,14 +207,38 @@ def refund_all(session: Session, trip: Trip, *, now: datetime) -> int:
 
 
 def _refund(session: Session, trip: Trip, cents: int) -> None:
-    """Give `cents` back to the trip's owner. Callers only ask for what has
-    been paid, so the trip's net can't go below zero."""
-    session.add(
-        CreditEntry(
-            user_id=trip.owner_id,
-            trip_id=trip.id,
-            kind=CreditEntryKind.TRIP_REFUND,
-            amount_cents=cents,
-            description=trip.title,
-        )
+    """Give `cents` back to the trip's owner, as one row per charge drawn
+    down, most recent charge first. The money all goes to the owner; the
+    rows say whose charge each piece came out of."""
+    refunded = (
+        select(CreditEntry.refund_of_id, func.sum(CreditEntry.amount_cents).label("cents"))
+        .where(CreditEntry.refund_of_id.is_not(None))
+        .group_by(CreditEntry.refund_of_id)
+        .subquery()
     )
+    charges = session.execute(
+        select(CreditEntry, func.coalesce(refunded.c.cents, 0))
+        .outerjoin(refunded, refunded.c.refund_of_id == CreditEntry.id)
+        .where(CreditEntry.trip_id == trip.id, CreditEntry.kind == CreditEntryKind.TRIP_CHARGE)
+        .order_by(CreditEntry.seq.desc())
+    ).all()
+    left = cents
+    for charge, already in charges:
+        take = min(-charge.amount_cents - already, left)
+        if take <= 0:
+            continue
+        session.add(
+            CreditEntry(
+                user_id=trip.owner_id,
+                trip_id=trip.id,
+                kind=CreditEntryKind.TRIP_REFUND,
+                amount_cents=take,
+                refund_of_id=charge.id,
+                description=trip.title,
+            )
+        )
+        left -= take
+        if left == 0:
+            break
+    if left:
+        raise CreditsError("Refund exceeds what was paid")

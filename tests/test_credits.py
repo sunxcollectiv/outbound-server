@@ -4,6 +4,9 @@ here a 7-day trip is $8.00 (800) and a sixth person on it is $1.40 (140)."""
 
 from datetime import UTC, datetime
 
+from sqlalchemy import select
+
+from app.models import CreditEntry
 from app.services import pricing
 from app.services.pricing import Bracket, Schedule
 from tests.conftest import JAPAN_TRIP, STARTING_CREDITS
@@ -265,7 +268,7 @@ def test_shrinking_refunds_until_a_day_after_the_start(client, make_user, make_t
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 800
 
 
-def test_refunds_always_go_to_the_owner(client, make_user, make_trip, credits_of):
+def test_refunds_always_go_to_the_owner(client, make_user, make_trip, credits_of, session):
     sun, sean = make_user("sun"), make_user("sean")
     trip = make_trip(sun, **FUTURE_TRIP, members=[{"email": sean.email, "role": "organizer"}])
     url = f"/trips/{trip['id']}"
@@ -278,12 +281,29 @@ def test_refunds_always_go_to_the_owner(client, make_user, make_trip, credits_of
     assert credits_of(sean)["balance_cents"] == STARTING_CREDITS - 160
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 800 + 240
     assert _charges(credits_of, sean, "trip_refund") == []
-    assert _charges(credits_of, sun, "trip_refund") == [(240, "Refund: Lisbon")]
+    assert _charges(credits_of, sun, "trip_refund") == [(80, "Refund: Lisbon"), (160, "Refund: Lisbon")]
 
     # Cancelling gives the owner the rest, whoever paid it.
     assert client.delete(url, headers=sun).status_code == 204
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS + 160
     assert credits_of(sean)["balance_cents"] == STARTING_CREDITS - 160
+
+    # Yet every refund row says whose charge it came out of, latest charge
+    # first, so a fairer split can be worked out later.
+    rows = session.scalars(
+        select(CreditEntry).where(CreditEntry.trip_id == trip["id"]).order_by(CreditEntry.seq)
+    ).all()
+    by_id = {row.id: row for row in rows}
+    assert [
+        (str(r.user_id), r.kind.value, r.amount_cents, by_id[r.refund_of_id].amount_cents if r.refund_of_id else None)
+        for r in rows
+    ] == [
+        (sun.user_id, "trip_charge", -800, None),
+        (sean.user_id, "trip_charge", -160, None),
+        (sun.user_id, "trip_refund", 160, -160),  # 240 back: all of Sean's charge first...
+        (sun.user_id, "trip_refund", 80, -800),  # ...then 80 of Sun's
+        (sun.user_id, "trip_refund", 720, -800),  # cancellation: the rest of Sun's
+    ]
 
 
 def test_deleting_refunds_inside_the_window(client, make_user, make_trip, credits_of, clock):
@@ -292,10 +312,10 @@ def test_deleting_refunds_inside_the_window(client, make_user, make_trip, credit
     assert client.delete(f"/trips/{trip['id']}", headers=sun).status_code == 204
     ledger = credits_of(sun)
     assert ledger["balance_cents"] == STARTING_CREDITS
-    # The rows outlive the trip and still say what they were for.
+    # The rows outlive the trip, still keyed to it and saying what it was.
     assert [(e["kind"], e["amount_cents"], e["trip_id"], e["title"]) for e in ledger["entries"][:2]] == [
-        ("trip_refund", 800, None, "Refund: Lisbon"),
-        ("trip_charge", -800, None, "Unlocked Lisbon"),
+        ("trip_refund", 800, trip["id"], "Refund: Lisbon"),
+        ("trip_charge", -800, trip["id"], "Unlocked Lisbon"),
     ]
 
     clock.now = CUTOFF

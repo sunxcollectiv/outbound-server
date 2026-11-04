@@ -13,6 +13,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Uuid,
     func,
     text,
 )
@@ -31,10 +32,14 @@ class CreditEntryKind(StrEnum):
 
 class CreditEntry(UUIDPrimaryKeyMixin, Base):
     """One movement of credits for one user; a user's balance is the sum of
-    their rows. Credits are US cents. Rows are never edited or deleted: a
-    refund is its own row, and a charge keeps its trip's title so the history
-    still reads once the trip is gone (trip_id goes null then rather than
-    taking the row with it).
+    their rows. Credits are US cents. Rows are never edited or deleted, and
+    they outlive everything they refer to: `trip_id` is a plain id (no
+    foreign key) that stays once the trip is gone, with the trip's title
+    kept in `description`; `user_id` goes null if the account is deleted,
+    so the history of a trip's payments survives its payers. A refund is its
+    own row pointing at the charge it draws down (`refund_of_id`), so a
+    trip's charges and refunds can always be matched up per payer, whoever
+    the refund was paid to.
 
     `seq` is the insertion order, for listing; `created_at` can't do that,
     since rows written in one transaction share a timestamp. `external_id`
@@ -51,16 +56,21 @@ class CreditEntry(UUIDPrimaryKeyMixin, Base):
             "kind IN ('trip_charge', 'trip_refund') OR trip_id IS NULL",
             name="trip_only_on_trip_kinds",
         ),
+        CheckConstraint(
+            "refund_of_id IS NULL OR kind = 'trip_refund'", name="refund_of_only_on_refunds"
+        ),
         Index("ix_credit_entries_user_id_seq", "user_id", text("seq DESC")),
     )
 
     seq: Mapped[int] = mapped_column(BigInteger, Identity(always=True), unique=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    trip_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("trips.id", ondelete="SET NULL"), index=True
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
     )
+    trip_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
     kind: Mapped[CreditEntryKind] = mapped_column(str_enum(CreditEntryKind, "credit_entry_kind"))
     amount_cents: Mapped[int] = mapped_column(Integer)
+    # For a refund: the charge it draws down. Charges are never deleted.
+    refund_of_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("credit_entries.id"))
     external_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     # The trip's title at the time, or an admin's note on a grant.
     description: Mapped[str | None] = mapped_column(String(200))

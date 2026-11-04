@@ -81,7 +81,7 @@ def test_rate_tables_are_public(client):
     assert (body["key"], body["included_members"]) == ("2026-11", 5)
     assert body["trip_brackets"][0] == {"first_day": 1, "last_day": 3, "cents_per_day": 160}
     assert body["trip_brackets"][-1] == {"first_day": 31, "last_day": None, "cents_per_day": 20}
-    assert body["member_brackets"][0] == {"first_day": 1, "last_day": 7, "cents_per_day": 20}
+    assert body["member_brackets"][0] == {"first_day": 1, "last_day": 10, "cents_per_day": 20}
     assert client.get("/pricing/schedule", params={"key": "1999-01"}).status_code == 404
 
 
@@ -339,9 +339,10 @@ def test_people_beyond_five_cost_extra(client, make_user, make_trip, credits_of)
     assert sixth.status_code == 201, sixth.text
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 940
 
+    # The seventh is cheaper: extra member-days 8-14, partly at the 15c rate.
     seventh = client.post(url, json={"email": "seven@example.com"}, headers=broke)
     assert seventh.status_code == 402
-    assert seventh.json()["detail"]["shortfall_cents"] == 140
+    assert seventh.json()["detail"]["shortfall_cents"] == 120
     assert len(client.get(url, headers=sun).json()) == 6
 
     # Removing the sixth gives Sun's 140 back (the trip hasn't started).

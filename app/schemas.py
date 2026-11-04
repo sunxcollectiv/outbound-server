@@ -377,6 +377,9 @@ class TripRead(ReadModel):
     # What the trip costs today, for its length and roster under the rate
     # table it was created with. Not what has been paid for it: see /credits.
     price_cents: int
+    # That rate table's key: GET /pricing/schedule?key=... gives its brackets,
+    # for pricing an edit locally. New trips get the current one.
+    price_schedule: str
     # Resolved from the stored area_ids, in order; ids that no longer match an
     # area are dropped (and pruned from storage) so none surface as blanks.
     areas: list[AreaRead] = Field(default_factory=list)
@@ -800,6 +803,7 @@ class ImageImportResult(ReadModel):
 
 
 class BracketRead(BaseModel):
+    # Trip days in `trip_brackets`, extra member-days in `member_brackets`.
     first_day: int
     # Null: open-ended ("day 31 and beyond").
     last_day: int | None
@@ -809,7 +813,9 @@ class BracketRead(BaseModel):
 class PricingScheduleRead(BaseModel):
     """The rate tables, for showing how pricing works. A trip day is charged
     at the rate of the bracket it falls in; that covers up to
-    `included_members` people, and each person beyond adds the member rate."""
+    `included_members` people. People beyond are charged by the member-day
+    (one extra person for one day): all the trip's extra member-days
+    together, each at the rate of the `member_brackets` bracket it falls in."""
 
     key: str
     included_members: int
@@ -818,7 +824,9 @@ class PricingScheduleRead(BaseModel):
 
 
 class BracketLineRead(BaseModel):
-    """One row of a price breakdown: the days that fell in one bracket."""
+    """One row of a price breakdown: the days that fell in one bracket. In
+    `member_lines` the days are extra member-days, and `cents` is already
+    the total for everyone (not per person)."""
 
     first_day: int
     last_day: int
@@ -838,6 +846,8 @@ class TripQuote(BaseModel):
     days: int
     members: int
     extra_members: int
+    # extra_members × days: what `member_lines` breaks down.
+    member_days: int
     owed_cents: int
     paid_cents: int
     price_cents: int

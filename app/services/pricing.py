@@ -3,8 +3,12 @@
 Each day is charged at the rate of the bracket it falls in, like tax
 brackets: the first 3 days at $1.60, the next 6 at $0.80, and so on, down to
 $0.20 a day after day 30. That covers up to `included_members` people, owner
-included; each person beyond adds their own daily rate, from $0.20 down to
-$0.05. Amounts are whole USD cents, so nothing is ever rounded.
+included. People beyond that are charged by the member-day (one extra person
+for one day), bracketed the same way over all the trip's extra member-days
+together: the first 10 at $0.20, the next 15 at $0.15, the next 15 at $0.10,
+then $0.05. So a big group on a short trip gets cheaper per head, and one
+extra person on a 10-day trip costs the same as two on a 5-day trip. Amounts
+are whole USD cents, so nothing is ever rounded.
 
 Rates are versioned: each trip pins the schedule key it was created under
 (trips.price_schedule), so changing the rates later never reprices a trip
@@ -20,6 +24,8 @@ from datetime import date
 
 @dataclass(frozen=True)
 class Bracket:
+    """A run of days charged at one rate: trip days, or extra member-days."""
+
     first_day: int
     last_day: int | None  # None: open-ended
     cents_per_day: int
@@ -31,13 +37,14 @@ class Schedule:
     # How many people the trip's own rate covers, owner included.
     included_members: int
     trip_brackets: tuple[Bracket, ...]
-    # Per person beyond included_members, per trip day.
+    # Over the extra member-days: people beyond included_members × trip days.
     member_brackets: tuple[Bracket, ...]
 
 
 @dataclass(frozen=True)
 class BracketLine:
-    """One row of a price breakdown: the days of a trip that fell in one bracket."""
+    """One row of a price breakdown: the trip days, or extra member-days,
+    that fell in one bracket."""
 
     first_day: int
     last_day: int
@@ -59,19 +66,26 @@ class Quote:
     members: int
     extra_members: int
     trip_lines: tuple[BracketLine, ...]
+    # Over the extra member-days; empty when nobody's extra.
     member_lines: tuple[BracketLine, ...]
+
+    @property
+    def member_days(self) -> int:
+        """Extra people × trip days."""
+        return self.extra_members * self.days
 
     @property
     def base_cents(self) -> int:
         return sum(line.cents for line in self.trip_lines)
 
     @property
-    def per_extra_member_cents(self) -> int:
+    def member_cents(self) -> int:
+        """What everyone beyond the included people adds, together."""
         return sum(line.cents for line in self.member_lines)
 
     @property
     def total_cents(self) -> int:
-        return self.base_cents + self.extra_members * self.per_extra_member_cents
+        return self.base_cents + self.member_cents
 
 
 CURRENT_SCHEDULE = "2026-11"
@@ -89,10 +103,10 @@ SCHEDULES: dict[str, Schedule] = {
             Bracket(31, None, 20),
         ),
         member_brackets=(
-            Bracket(1, 7, 20),
-            Bracket(8, 14, 15),
-            Bracket(15, 30, 10),
-            Bracket(31, None, 5),
+            Bracket(1, 10, 20),
+            Bracket(11, 25, 15),
+            Bracket(26, 40, 10),
+            Bracket(41, None, 5),
         ),
     ),
 }
@@ -128,17 +142,18 @@ def quote(days: int, members: int, schedule_key: str = CURRENT_SCHEDULE) -> Quot
     if members < 1:
         raise ValueError("A trip has at least its owner")
     rates = schedule(schedule_key)
+    extra_members = max(members - rates.included_members, 0)
     return Quote(
         schedule=rates.key,
         days=days,
         members=members,
-        extra_members=max(members - rates.included_members, 0),
+        extra_members=extra_members,
         trip_lines=bracket_lines(rates.trip_brackets, days),
-        member_lines=bracket_lines(rates.member_brackets, days),
+        member_lines=bracket_lines(rates.member_brackets, extra_members * days),
     )
 
 
 def price(days: int, members: int, schedule_key: str = CURRENT_SCHEDULE) -> int:
-    """price = trip brackets over the days + (members beyond the included
-    count) × member brackets over the days."""
+    """price = trip brackets over the days + member brackets over the extra
+    member-days ((members beyond the included count) × days)."""
     return quote(days, members, schedule_key).total_cents

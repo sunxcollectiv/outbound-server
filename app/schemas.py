@@ -912,6 +912,13 @@ class CreditsRead(BaseModel):
     next_cursor: uuid.UUID | None
 
 
+class CreditPurchaseCreate(BaseModel):
+    """A completed App Store purchase of credits, as StoreKit signed it
+    (`VerificationResult.jwsRepresentation`)."""
+
+    signed_transaction: str = Field(min_length=1, max_length=16_384)
+
+
 class CreditGrant(BaseModel):
     """Credits for one person, by id or email (exactly one)."""
 

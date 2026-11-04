@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     # Debug builds (Xcode, the simulator) get sandbox tokens; TestFlight and
     # App Store builds get production ones. Each only works on its own host.
     apns_use_sandbox: bool = True
+    # StoreKit: credits bought in the app, verified against Apple's root
+    # certificate (app/certs) for this bundle id. Sandbox purchases (TestFlight,
+    # sandbox testers) are accepted by default, since App Review buys with
+    # sandbox accounts against the production server. Production purchases
+    # need the app's numeric App Store id (App Store Connect, App Information,
+    # Apple ID) and are refused until it's set. Purchases in Xcode (the
+    # simulator, against Outbound.storekit) aren't signed by Apple at all, so
+    # anyone could forge one: only allow them on a local server.
+    storekit_bundle_id: str = "earth.outbound"
+    storekit_app_apple_id: int | None = None
+    storekit_allow_sandbox: bool = True
+    storekit_allow_xcode: bool = False
 
 
 @lru_cache

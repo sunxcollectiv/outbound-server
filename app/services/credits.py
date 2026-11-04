@@ -254,6 +254,33 @@ def grant(
     )
 
 
+class PurchaseClaimed(CreditsError):
+    def __init__(self) -> None:
+        super().__init__("That purchase was credited to another account")
+
+
+def credit_purchase(
+    session: Session, user_id: uuid.UUID, *, external_id: str, amount_cents: int
+) -> bool:
+    """Credits a store purchase to the user, once: `external_id` is the
+    store's key for it. Returns whether it was credited now (False: it
+    already was, to them). Raises PurchaseClaimed if it went to someone else."""
+    lock_users(session, user_id)
+    existing = session.scalar(select(CreditEntry).where(CreditEntry.external_id == external_id))
+    if existing is not None:
+        if existing.user_id != user_id:
+            raise PurchaseClaimed()
+        return False
+    grant(
+        session,
+        user_id,
+        amount_cents,
+        kind=CreditEntryKind.PURCHASE,
+        external_id=external_id,
+    )
+    return True
+
+
 def settlement_for(
     session: Session, trip: Trip, *, days: int, members: int, now: datetime
 ) -> Settlement:

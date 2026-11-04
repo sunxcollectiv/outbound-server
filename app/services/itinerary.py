@@ -14,6 +14,7 @@ from app.schemas import (
 )
 from app.services.google_places import place_needs_refresh
 from app.services.item_visibility import present_item
+from app.services.trip_groups import Links, day_owner
 
 
 def _sort_key(entry: tuple[datetime, ItineraryEntry]) -> tuple[datetime, str]:
@@ -115,9 +116,19 @@ def _stale_place_ids(items: list[TripItem], now: datetime) -> list[object]:
     ]
 
 
-def build_itinerary(trip: Trip, items: list[TripItem], member_id: uuid.UUID) -> Itinerary:
-    """Group a trip's items into calendar days by their wall times, each as
-    the member `member_id` gets to see it (see item_visibility).
+def build_itinerary(
+    trip: Trip,
+    trips: list[Trip],
+    items: list[TripItem],
+    member_ids: dict[uuid.UUID, uuid.UUID],
+    links: Links,
+) -> Itinerary:
+    """Group the items of `trips` (the caller's trips in `trip`'s group, by
+    date; just `trip` when it stands alone) into calendar days by their wall
+    times, each as the caller gets to see it on its own trip (see
+    item_visibility). `member_ids` maps each trip to the caller's member row
+    on it. Each day says which trip it belongs to: on a date two trips share,
+    the parent (see trip_groups.day_owner).
 
     Most items appear once, on the day their start names. An item with distinct
     ends is split instead, each piece placed and sorted by the wall time of its
@@ -137,7 +148,7 @@ def build_itinerary(trip: Trip, items: list[TripItem], member_id: uuid.UUID) -> 
 
     for item in items:
         start_day = item.starts_at.date()
-        read = present_item(item, member_id)
+        read = present_item(item, member_ids[item.trip_id])
         if not read.redacted:
             detailed.append(item)
 
@@ -169,27 +180,36 @@ def build_itinerary(trip: Trip, items: list[TripItem], member_id: uuid.UUID) -> 
                 lodging_by_day[day].append(LodgingStay(item=read, phase=phase))
                 day += timedelta(days=1)
 
-    # Widen past the trip's own dates rather than silently dropping items that
-    # fall outside them (e.g. after the trip was shortened).
+    # Widen past the trips' own dates rather than silently dropping items that
+    # fall outside them (e.g. after a trip was shortened).
     populated = [*items_by_day, *lodging_by_day]
-    first = min([trip.start_date, *populated])
-    last = max([trip.end_date, *populated])
+    journey_start = min(t.start_date for t in trips)
+    first = min([journey_start, *populated])
+    last = max([*(t.end_date for t in trips), *populated])
 
     days = []
     day = first
     while day <= last:
+        owner = day_owner(day, trips, links)
+        covering = [t.id for t in trips if t.start_date <= day <= t.end_date]
+        lodging = lodging_by_day.get(day, [])
+        day_items = [entry for _, entry in sorted(items_by_day.get(day, []), key=_sort_key)]
         days.append(
             ItineraryDay(
                 date=day,
-                day_number=(day - trip.start_date).days + 1,
-                lodging=lodging_by_day.get(day, []),
-                items=[entry for _, entry in sorted(items_by_day.get(day, []), key=_sort_key)],
+                day_number=(day - journey_start).days + 1,
+                trip_id=owner.id if owner is not None else None,
+                trip_ids=covering,
+                is_gap=not covering and not lodging and not day_items,
+                lodging=lodging,
+                items=day_items,
             )
         )
         day += timedelta(days=1)
 
     return Itinerary(
         trip=TripRead.model_validate(trip),
+        trips=[TripRead.model_validate(t) for t in trips],
         days=days,
         stale_place_ids=_stale_place_ids(detailed, datetime.now(UTC)),
     )

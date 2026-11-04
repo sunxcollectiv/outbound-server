@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
@@ -7,10 +7,12 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import (
     CurrentUser,
+    Now,
     OrganizerTrip,
     OwnedTrip,
     SessionDep,
     ViewableTrip,
+    get_viewable_trip,
     is_organizer,
 )
 from app.api.trip_items import check_places, viewer, with_item_details
@@ -19,6 +21,7 @@ from app.models import (
     Place,
     Trip,
     TripDay,
+    TripGroup,
     TripItemParticipant,
     TripMember,
     TripRole,
@@ -31,13 +34,22 @@ from app.schemas import (
     TripDayUpdate,
     TripMemberCreate,
     TripMemberRead,
+    TripListEntry,
+    TripQuote,
     TripRead,
     TripUpdate,
 )
-from app.services.item_visibility import visible_items
+from app.services import credits, pricing
+from app.services.credits import InsufficientCredits, PriceChanged, Settlement
+from app.services.item_visibility import visible_items_for
 from app.services.itinerary import build_itinerary
 from app.services.trip_days import sync_trip_days
-from app.services.trip_notifications import TripSnapshot, notify_trip_updated
+from app.services.trip_groups import group_links, my_cluster, split_primary
+from app.services.trip_notifications import (
+    TripSnapshot,
+    notify_trip_extended,
+    notify_trip_updated,
+)
 
 router = APIRouter(prefix="/trips", tags=["trips"])
 
@@ -140,28 +152,160 @@ def attach_areas(session: SessionDep, trips: list[Trip]) -> None:
 
 
 @router.post("", response_model=TripRead, status_code=status.HTTP_201_CREATED)
-def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep) -> Trip:
+def create_trip(payload: TripCreate, user: CurrentUser, session: SessionDep, now: Now) -> Trip:
     """The creator becomes the owner and gets an organizer membership row, so
     trip_members is the full headcount and roles live in one place; anyone in
     `members` is added alongside. A day row is made for every date, seeded
-    with the timezone if one was given."""
+    with the timezone if one was given.
+
+    The trip's price is charged to the creator's credits as it's made: with
+    too few, nothing is created and the 402 says how much is missing (see
+    POST /trips/quote to find out first)."""
     values = payload.model_dump()
     seed_timezone = values.pop("timezone")
     del values["members"]
+    del values["extends_trip_id"]
+    del values["expected_price_cents"]
     values["area_ids"] = _clean_area_ids(session, values["area_ids"])
-    trip = Trip(**values, owner_id=user.id)
-    trip.members.append(TripMember(user_id=user.id, email=user.email, role=TripRole.ORGANIZER))
-    _set_members(session, trip, payload.members, replace=False)
-    sync_trip_days(trip, seed_timezone)
-    session.add(trip)
+    trip = Trip(**values, owner_id=user.id, price_schedule=pricing.CURRENT_SCHEDULE)
+    parent = None
+    with session.begin_nested():
+        trip.members.append(
+            TripMember(user_id=user.id, email=user.email, role=TripRole.ORGANIZER)
+        )
+        _set_members(session, trip, payload.members, replace=False)
+        sync_trip_days(trip, seed_timezone)
+        if payload.extends_trip_id is not None:
+            parent = _extend(session, trip, payload.extends_trip_id, user)
+        session.add(trip)
+        _settle(session, trip, user, now, payload.expected_price_cents)
+    if parent is not None:
+        notify_trip_extended(session, parent, trip, user)
     session.commit()
     attach_areas(session, [trip])
     return trip
 
 
-@router.get("", response_model=list[TripRead])
-def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
-    """Trips the caller is on, as owner or member."""
+def _settle(
+    session: SessionDep, trip: Trip, payer: User, now: datetime, expected: int | None
+) -> Settlement:
+    """Charge the caller, or refund the owner, the difference between what
+    the trip now costs and what's been paid, inside the caller's savepoint
+    so a refusal undoes the edit too. 402 carries the numbers the client needs to sell credits and
+    retry the same request."""
+    try:
+        return credits.settle(session, trip, payer, now=now, expected_price_cents=expected)
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            {
+                "message": "Not enough credits",
+                "price_cents": exc.price_cents,
+                "balance_cents": exc.balance_cents,
+                "shortfall_cents": exc.shortfall_cents,
+            },
+        ) from None
+    except PriceChanged as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "message": "Price changed since it was quoted",
+                "expected_price_cents": exc.expected_price_cents,
+                "price_cents": exc.price_cents,
+            },
+        ) from None
+
+
+def _quote(session: SessionDep, outcome: Settlement, user: User) -> TripQuote:
+    q = outcome.quote
+    available = credits.balance(session, user.id)
+    return TripQuote(
+        schedule=q.schedule,
+        days=q.days,
+        members=q.members,
+        extra_members=q.extra_members,
+        owed_cents=outcome.owed_cents,
+        paid_cents=outcome.paid_cents,
+        price_cents=outcome.price_cents,
+        refund_cents=outcome.refund_cents,
+        refund_window_open=outcome.refund_window_open,
+        trip_lines=[vars(line) | {"days": line.days, "cents": line.cents} for line in q.trip_lines],
+        member_lines=[
+            vars(line) | {"days": line.days, "cents": line.cents} for line in q.member_lines
+        ],
+        balance_cents=available,
+        shortfall_cents=max(outcome.price_cents - available, 0),
+    )
+
+
+def _headcount(owner_email: str, entries: list[TripMemberCreate]) -> int:
+    """How many people a roster of `entries` plus the owner comes to, the
+    way _set_members would build it (emails are lowercased and unique)."""
+    return len({owner_email, *(entry.email for entry in entries)})
+
+
+@router.post("/quote", response_model=TripQuote)
+def quote_trip(payload: TripCreate, user: CurrentUser, session: SessionDep, now: Now) -> TripQuote:
+    """What POST /trips with this body would charge, with the caller's
+    balance and any shortfall, so the client can sell credits first. Nothing
+    is checked besides the price: unknown areas or parent still fail on the
+    real request."""
+    stub = Trip(
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        price_schedule=pricing.CURRENT_SCHEDULE,
+    )
+    outcome = credits.settlement_for(
+        session,
+        stub,
+        days=pricing.trip_days(payload.start_date, payload.end_date),
+        members=_headcount(user.email, payload.members),
+        now=now,
+    )
+    return _quote(session, outcome, user)
+
+
+@router.post("/{trip_id}/quote", response_model=TripQuote)
+def quote_trip_update(
+    payload: TripUpdate, trip: OrganizerTrip, user: CurrentUser, session: SessionDep, now: Now
+) -> TripQuote:
+    """What PATCH /trips/{id} with this body would charge the caller, or
+    refund the trip's owner. Same rules as the edit: `members` left out
+    keeps the roster as it is."""
+    changes = payload.model_dump(exclude_unset=True)
+    start, end = _resolve_dates(trip, changes)
+    if payload.members is None:
+        members = len(trip.members)
+    else:
+        owner_email = next(m.email for m in trip.members if m.user_id == trip.owner_id)
+        members = _headcount(owner_email, payload.members)
+    outcome = credits.settlement_for(
+        session, trip, days=pricing.trip_days(start, end), members=members, now=now
+    )
+    return _quote(session, outcome, user)
+
+
+def _extend(session: SessionDep, trip: Trip, parent_id: uuid.UUID, user: User) -> Trip:
+    """Link a new trip as an extension of `parent_id`. Any member of the
+    parent may extend it (404 otherwise, like reading it). The two join one
+    group: the parent's if it has one, else a new one that the parent joins
+    too, so a standalone trip becomes a group's first member the moment it's
+    extended. Its dates are free: it may overlap the parent or leave a gap,
+    as a group can end up with one anyway once a trip's dates are cut."""
+    parent = get_viewable_trip(parent_id, session, user)
+    if parent.group is None:
+        parent.group = TripGroup()
+    trip.group = parent.group
+    trip.extends = parent
+    return parent
+
+
+@router.get("", response_model=list[TripListEntry])
+def list_trips(user: CurrentUser, session: SessionDep) -> list[TripListEntry]:
+    """Trips the caller is on, as owner or member, one entry per journey: the
+    caller's trips in one group come as a single entry, the lead trip with the
+    others nested under it as `extensions`, and the entry's dates spanning
+    them all. Ordered by when each journey starts."""
     member_of = select(TripMember.trip_id).where(TripMember.user_id == user.id)
     query = (
         select(Trip)
@@ -171,7 +315,26 @@ def list_trips(user: CurrentUser, session: SessionDep) -> list[Trip]:
     )
     trips = list(session.scalars(query))
     attach_areas(session, trips)
-    return trips
+
+    clusters: dict[uuid.UUID, list[Trip]] = {}
+    for trip in trips:
+        clusters.setdefault(trip.group_id or trip.id, []).append(trip)
+    links = group_links(session, (trip.group_id for trip in trips))
+    entries = []
+    for cluster in clusters.values():
+        primary, extensions = split_primary(cluster, links)
+        entries.append(
+            TripListEntry.model_validate(
+                {
+                    **TripRead.model_validate(primary).model_dump(),
+                    "extensions": [TripRead.model_validate(t) for t in extensions],
+                    "start_date": min(t.start_date for t in cluster),
+                    "end_date": max(t.end_date for t in cluster),
+                }
+            )
+        )
+    entries.sort(key=lambda entry: (entry.start_date, entry.id))
+    return entries
 
 
 @router.get("/{trip_id}", response_model=TripRead)
@@ -183,15 +346,41 @@ def read_trip(trip: ViewableTrip, session: SessionDep) -> Trip:
 
 @router.patch("/{trip_id}", response_model=TripRead)
 def update_trip(
-    payload: TripUpdate, trip: OrganizerTrip, user: CurrentUser, session: SessionDep
+    payload: TripUpdate, trip: OrganizerTrip, user: CurrentUser, session: SessionDep, now: Now
 ) -> Trip:
     """Edit the trip. With `notify_members`, everyone else on it is told what
-    changed (and anyone the edit adds, that they were added)."""
+    changed (and anyone the edit adds, that they were added).
+
+    If the edit raises the trip's price (more days, more people beyond the
+    included five), the difference is charged to the caller's credits, or
+    nothing changes (402). If it lowers it, the difference is refunded to
+    the trip's owner, while the trip is more than a day from starting."""
     changes = payload.model_dump(exclude_unset=True)
     area_ids = changes.pop("area_ids", None)
     changes.pop("members", None)
     changes.pop("notify_members", None)
+    changes.pop("expected_price_cents", None)
     before = TripSnapshot.of(trip) if payload.notify_members else None
+    _resolve_dates(trip, changes)
+    with session.begin_nested():
+        for field, value in changes.items():
+            setattr(trip, field, value)
+        if area_ids is not None:
+            trip.area_ids = _clean_area_ids(session, area_ids)
+        if payload.members is not None:
+            _set_members(session, trip, payload.members, replace=True)
+        if "start_date" in changes or "end_date" in changes:
+            sync_trip_days(trip)
+        _settle(session, trip, user, now, payload.expected_price_cents)
+    if before is not None:
+        notify_trip_updated(session, trip, user, before)
+    session.commit()
+    attach_areas(session, [trip])
+    return trip
+
+
+def _resolve_dates(trip: Trip, changes: dict[str, object]) -> tuple[date, date]:
+    """The dates an edit would leave the trip with, or 422."""
     for field in NOT_NULLABLE:
         if field in changes and changes[field] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{field} cannot be null")
@@ -201,24 +390,15 @@ def update_trip(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "end_date must be on or after start_date"
         )
-    for field, value in changes.items():
-        setattr(trip, field, value)
-    if area_ids is not None:
-        trip.area_ids = _clean_area_ids(session, area_ids)
-    if payload.members is not None:
-        _set_members(session, trip, payload.members, replace=True)
-    if "start_date" in changes or "end_date" in changes:
-        sync_trip_days(trip)
-    if before is not None:
-        notify_trip_updated(session, trip, user, before)
-    session.commit()
-    attach_areas(session, [trip])
-    return trip
+    return start, end
 
 
 @router.delete("/{trip_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
-    """Delete a trip and everything on it (items, days, membership). Owner only."""
+def delete_trip(trip: OwnedTrip, session: SessionDep, now: Now) -> None:
+    """Delete a trip and everything on it (items, days, membership). Owner
+    only. What was paid for it goes back to the owner if the trip is more
+    than a day from starting; the ledger keeps the rows either way."""
+    credits.refund_all(session, trip, now=now)
     session.delete(trip)
     session.commit()
 
@@ -226,10 +406,20 @@ def delete_trip(trip: OwnedTrip, session: SessionDep) -> None:
 @router.get("/{trip_id}/itinerary", response_model=Itinerary)
 def read_itinerary(trip: ViewableTrip, user: CurrentUser, session: SessionDep) -> Itinerary:
     """Everyone's plans in one view, each item as the caller gets to see it:
-    private items only if they're on them, closed ones cut down unless they are."""
-    member = viewer(session, trip, user)
-    items = session.scalars(with_item_details(visible_items(trip, member)))
-    return build_itinerary(trip, list(items), member.id)
+    private items only if they're on them, closed ones cut down unless they are.
+
+    Merged across the trip's group: every trip in it the caller is on, so any
+    of them gives the same days. Each day and item says which trip it's on."""
+    trips = my_cluster(session, trip, user)
+    members = [viewer(session, t, user) for t in trips]
+    items = session.scalars(with_item_details(visible_items_for(members)))
+    return build_itinerary(
+        trip,
+        trips,
+        list(items),
+        {member.trip_id: member.id for member in members},
+        group_links(session, [trip.group_id]),
+    )
 
 
 # --- days ---
@@ -288,12 +478,18 @@ def list_members(trip: ViewableTrip, session: SessionDep) -> list[TripMember]:
 @router.post(
     "/{trip_id}/members", response_model=TripMemberRead, status_code=status.HTTP_201_CREATED
 )
-def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionDep) -> TripMember:
+def add_member(
+    payload: TripMemberCreate, trip: OrganizerTrip, user: CurrentUser, session: SessionDep, now: Now
+) -> TripMember:
     """Adds one person by email. Linked to their account now if one exists,
-    otherwise when they register; the row stays on the roster either way."""
+    otherwise when they register; the row stays on the roster either way.
+    A person beyond the included five is charged to the caller (402 if they
+    can't cover it, and nobody is added)."""
     if any(member.email == payload.email for member in trip.members):
         raise HTTPException(status.HTTP_409_CONFLICT, "That email is already on the trip")
-    member = _new_member(session, trip, payload)
+    with session.begin_nested():
+        member = _new_member(session, trip, payload)
+        _settle(session, trip, user, now, None)
     session.commit()
     session.refresh(member)
     return member
@@ -301,11 +497,13 @@ def add_member(payload: TripMemberCreate, trip: OrganizerTrip, session: SessionD
 
 @router.delete("/{trip_id}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_member(
-    member_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
+    member_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep, now: Now
 ) -> None:
     """Organizers can remove anyone but the owner; a member can remove themself (leave).
 
-    Their personal items and RSVPs go with them; group items they posted stay."""
+    Their personal items and RSVPs go with them; group items they posted
+    stay. If they were a paid-for extra, that goes back to the trip's owner
+    while the trip is more than a day from starting."""
     member = next((m for m in trip.members if m.id == member_id), None)
     if member is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
@@ -313,5 +511,7 @@ def remove_member(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only organizers can remove others")
     if member.user_id == trip.owner_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "The owner can't be removed from their trip")
-    _remove_member(session, trip, member)
+    with session.begin_nested():
+        _remove_member(session, trip, member)
+        _settle(session, trip, user, now, None)
     session.commit()

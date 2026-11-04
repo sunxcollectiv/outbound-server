@@ -127,3 +127,22 @@ def notify_trip_updated(
             **common,
         )
     return sent
+
+
+def notify_trip_extended(session: Session, parent: Trip, extension: Trip, actor: User) -> int:
+    """Tell the parent trip's members that someone extended it. Sent on the
+    parent, since that's the trip they're on; the data names the new one."""
+    return notify(
+        session,
+        user_ids=trip_audience(session, parent),
+        category=NotificationCategory.TRIP_ACTIVITY,
+        type="trip.extended",
+        title=parent.title,
+        body=(
+            f"{actor.display_name} added {extension.title}, "
+            f"{date_range(extension.start_date, extension.end_date)}"
+        ),
+        data={"extension_trip_id": str(extension.id)},
+        actor_id=actor.id,
+        trip_id=parent.id,
+    )

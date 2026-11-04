@@ -1,6 +1,7 @@
 from app.models.access_token import AccessToken
 from app.models.area import Area
 from app.models.area_photo import AreaPhoto
+from app.models.credit_entry import CreditEntry, CreditEntryKind
 from app.models.email_receipt import EmailReceipt, EmailReceiptStatus
 from app.models.image_receipt import ImageReceipt
 from app.models.notification import (
@@ -14,7 +15,7 @@ from app.models.notification import (
 )
 from app.models.place import Place
 from app.models.service_token import ServiceToken
-from app.models.trip import Trip, TripDay, TripMember, TripRole
+from app.models.trip import Trip, TripDay, TripGroup, TripMember, TripRole
 from app.models.trip_item import (
     RsvpStatus,
     TransitMode,
@@ -32,6 +33,8 @@ __all__ = [
     "Announcement",
     "Area",
     "AreaPhoto",
+    "CreditEntry",
+    "CreditEntryKind",
     "EmailReceipt",
     "EmailReceiptStatus",
     "ImageReceipt",
@@ -47,6 +50,7 @@ __all__ = [
     "TransitMode",
     "Trip",
     "TripDay",
+    "TripGroup",
     "TripItem",
     "TripItemKind",
     "TripItemParticipant",

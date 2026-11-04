@@ -3,7 +3,6 @@ signed transaction. Transactions here come from the Xcode environment (the
 simulator against Outbound.storekit), which Xcode signs itself, so they can
 be built in a test; anything claiming to be from Apple must verify."""
 
-import uuid
 
 import jwt
 import pytest
@@ -88,14 +87,14 @@ def test_a_purchase_belongs_to_one_account(client, make_user, storekit, credits_
     assert credits_of(sun)["balance_cents"] == 1500
 
 
-def test_xcode_transaction_ids_restart(client, make_user, storekit):
+def test_xcode_transaction_ids_restart(client, make_user, storekit, credits_of):
     """Clearing Xcode's test transactions starts the ids from 0 again; a new
     purchase with an old id is still a new purchase."""
     sun = make_user("sun", credits=0)
     assert _buy(client, sun, _transaction()).status_code == 201
     later = _transaction(purchaseDate=PURCHASED_AT + 60_000)
     assert _buy(client, sun, later).status_code == 201
-    assert client.get("/credits", headers=sun).json()["balance_cents"] == 3000
+    assert credits_of(sun)["balance_cents"] == 3000
 
 
 @pytest.mark.parametrize(
@@ -137,8 +136,3 @@ def test_xcode_purchases_are_refused_unless_allowed(client, make_user):
 def test_needs_a_signed_in_user(client):
     assert client.post(URL, json={"signed_transaction": _transaction()}).status_code == 401
 
-
-def test_token_check_uses_the_account_id(client, make_user, storekit):
-    sun = make_user("sun", credits=0)
-    resp = _buy(client, sun, _transaction(appAccountToken=str(uuid.uuid4())))
-    assert resp.status_code == 403

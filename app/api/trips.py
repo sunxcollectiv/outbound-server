@@ -224,7 +224,6 @@ def _quote(session: SessionDep, outcome: Settlement, user: User) -> TripQuote:
         days=q.days,
         members=q.members,
         extra_members=q.extra_members,
-        member_days=q.member_days,
         owed_cents=outcome.owed_cents,
         paid_cents=outcome.paid_cents,
         price_cents=outcome.price_cents,

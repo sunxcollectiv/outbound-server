@@ -846,8 +846,6 @@ class TripQuote(BaseModel):
     days: int
     members: int
     extra_members: int
-    # extra_members × days: what `member_lines` breaks down.
-    member_days: int
     owed_cents: int
     paid_cents: int
     price_cents: int
@@ -857,6 +855,12 @@ class TripQuote(BaseModel):
     member_lines: list[BracketLineRead]
     balance_cents: int
     shortfall_cents: int
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def member_days(self) -> int:
+        """extra_members × days: what `member_lines` breaks down."""
+        return self.extra_members * self.days
 
 
 class CreditTripRef(ReadModel):

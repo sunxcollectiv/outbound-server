@@ -24,9 +24,9 @@ from appstoreserverlibrary.models.Environment import Environment
 from appstoreserverlibrary.models.Type import Type
 from appstoreserverlibrary.signed_data_verifier import SignedDataVerifier
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 
-ROOT_CERTIFICATES = [Path(__file__).parent.parent / "certs" / "AppleRootCA-G3.cer"]
+ROOT_CERTIFICATE = Path(__file__).parent.parent / "certs" / "AppleRootCA-G3.cer"
 
 # The credits each product buys, in cents: one consumable per amount on
 # offer. Must match App Store Connect and the app's Outbound.storekit.
@@ -64,8 +64,9 @@ class VerifiedPurchase:
 
 
 class StoreKitVerifier:
-    def __init__(self, verifiers: dict[Environment, SignedDataVerifier]) -> None:
-        self._verifiers = {env.value: verifier for env, verifier in verifiers.items()}
+    def __init__(self, verifiers: dict[str, SignedDataVerifier]) -> None:
+        # By environment name, as transactions give it ("Sandbox", ...).
+        self._verifiers = verifiers
 
     @classmethod
     def for_environments(
@@ -76,38 +77,26 @@ class StoreKitVerifier:
         allow_sandbox: bool = True,
         allow_xcode: bool = False,
     ) -> StoreKitVerifier:
-        roots = [path.read_bytes() for path in ROOT_CERTIFICATES]
-        environments = [
-            env
-            for env, on in (
-                (Environment.PRODUCTION, app_apple_id is not None),
-                (Environment.SANDBOX, allow_sandbox),
-                (Environment.XCODE, allow_xcode),
-            )
-            if on
-        ]
+        roots = [ROOT_CERTIFICATE.read_bytes()]
+        enabled = (
+            (Environment.PRODUCTION, app_apple_id is not None),
+            (Environment.SANDBOX, allow_sandbox),
+            (Environment.XCODE, allow_xcode),
+        )
         # Online checks would ask Apple whether its certificates were revoked:
         # a network round trip on every purchase, so off.
         return cls(
             {
-                env: SignedDataVerifier(
+                env.value: SignedDataVerifier(
                     roots,
                     enable_online_checks=False,
                     environment=env,
                     bundle_id=bundle_id,
                     app_apple_id=app_apple_id,
                 )
-                for env in environments
+                for env, on in enabled
+                if on
             }
-        )
-
-    @classmethod
-    def from_settings(cls, settings: Settings) -> StoreKitVerifier:
-        return cls.for_environments(
-            bundle_id=settings.storekit_bundle_id,
-            app_apple_id=settings.storekit_app_apple_id,
-            allow_sandbox=settings.storekit_allow_sandbox,
-            allow_xcode=settings.storekit_allow_xcode,
         )
 
     def verify(self, signed_transaction: str) -> VerifiedPurchase:
@@ -152,4 +141,10 @@ class StoreKitVerifier:
 
 @lru_cache
 def get_storekit_verifier() -> StoreKitVerifier:
-    return StoreKitVerifier.from_settings(get_settings())
+    settings = get_settings()
+    return StoreKitVerifier.for_environments(
+        bundle_id=settings.storekit_bundle_id,
+        app_apple_id=settings.storekit_app_apple_id,
+        allow_sandbox=settings.storekit_allow_sandbox,
+        allow_xcode=settings.storekit_allow_xcode,
+    )

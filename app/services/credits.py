@@ -28,13 +28,16 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import CreditEntry, CreditEntryKind, Trip, TripMember, User
 from app.services.pricing import Quote, quote, trip_days
+
+if TYPE_CHECKING:
+    from app.services.storekit import VerifiedPurchase
 
 REFUND_GRACE = timedelta(hours=24)
 
@@ -92,17 +95,24 @@ def refund_window_open(trip: Trip, now: datetime) -> bool:
     return now < refund_cutoff(trip)
 
 
+# The end of a user's chain: their newest row's id and running balance.
+Head = tuple[uuid.UUID, int]
+
+
+def _head(session: Session, user_id: uuid.UUID) -> Head | None:
+    """None before the user's first row."""
+    return session.execute(
+        select(CreditEntry.id, CreditEntry.balance_after_cents)
+        .where(CreditEntry.user_id == user_id)
+        .order_by(CreditEntry.seq.desc())
+        .limit(1)
+    ).first()
+
+
 def balance(session: Session, user_id: uuid.UUID) -> int:
     """The running balance on the user's newest row; 0 before their first."""
-    return (
-        session.scalar(
-            select(CreditEntry.balance_after_cents)
-            .where(CreditEntry.user_id == user_id)
-            .order_by(CreditEntry.seq.desc())
-            .limit(1)
-        )
-        or 0
-    )
+    head = _head(session, user_id)
+    return head[1] if head is not None else 0
 
 
 def lock_users(session: Session, *user_ids: uuid.UUID) -> None:
@@ -114,17 +124,12 @@ def lock_users(session: Session, *user_ids: uuid.UUID) -> None:
     )
 
 
-def _append(session: Session, entry: CreditEntry) -> CreditEntry:
-    """Adds `entry` to the end of its user's chain (see CreditEntry). The
-    caller must hold the user's lock (lock_users)."""
-    previous = session.execute(
-        select(CreditEntry.id, CreditEntry.balance_after_cents)
-        .where(CreditEntry.user_id == entry.user_id)
-        .order_by(CreditEntry.seq.desc())
-        .limit(1)
-    ).first()
-    if previous is not None:
-        entry.previous_id, entry.previous_balance_cents = previous
+def _append(session: Session, entry: CreditEntry, head: Head | None) -> CreditEntry:
+    """Adds `entry` to its user's chain (see CreditEntry), after `head`, their
+    newest row. The caller must hold the user's lock (lock_users) from before
+    reading the head."""
+    if head is not None:
+        entry.previous_id, entry.previous_balance_cents = head
     entry.balance_after_cents = (entry.previous_balance_cents or 0) + entry.amount_cents
     session.add(entry)
     session.flush()
@@ -148,21 +153,24 @@ class StatementLine:
     refunded_to: list[User] = field(default_factory=list)
 
     def __getattr__(self, name: str) -> Any:
+        # Only reached for names the line doesn't have: the row's columns.
+        if name == "entry" or name.startswith("__"):
+            raise AttributeError(name)
         return getattr(self.entry, name)
 
 
 def statement(
-    session: Session, user_id: uuid.UUID, *, limit: int, before: CreditEntry | None = None
+    session: Session, user_id: uuid.UUID, *, limit: int, before_seq: int | None = None
 ) -> tuple[list[StatementLine], bool]:
-    """A page of the user's ledger, newest first, starting after `before`
-    (one of their rows). Returns the page and whether there's more."""
+    """A page of the user's ledger, newest first, starting after the row at
+    `before_seq`. Returns the page and whether there's more."""
     query = (
         select(CreditEntry)
         .where(CreditEntry.user_id == user_id)
         .order_by(CreditEntry.seq.desc())
     )
-    if before is not None:
-        query = query.where(CreditEntry.seq < before.seq)
+    if before_seq is not None:
+        query = query.where(CreditEntry.seq < before_seq)
     entries = list(session.scalars(query.limit(limit + 1)))
     return _lines(session, user_id, entries[:limit]), len(entries) > limit
 
@@ -199,11 +207,16 @@ def _lines(
 
     refunded: dict[uuid.UUID, int] = defaultdict(int)
     refunded_to: dict[uuid.UUID, dict[uuid.UUID, User]] = defaultdict(dict)
-    if own_charges := [e.id for e in entries if e.kind == CreditEntryKind.TRIP_CHARGE]:
+    charges = [e for e in entries if e.kind == CreditEntryKind.TRIP_CHARGE]
+    if charges:
+        # A refund carries its charge's trip, so the trip_id index finds them.
         refunds = session.execute(
             select(CreditEntry.refund_of_id, CreditEntry.amount_cents, User)
             .outerjoin(User, User.id == CreditEntry.user_id)
-            .where(CreditEntry.refund_of_id.in_(own_charges))
+            .where(
+                CreditEntry.trip_id.in_({c.trip_id for c in charges}),
+                CreditEntry.refund_of_id.in_([c.id for c in charges]),
+            )
             .order_by(CreditEntry.seq)
         )
         for charge_id, cents, recipient in refunds:
@@ -214,8 +227,8 @@ def _lines(
     return [
         StatementLine(
             entry=entry,
-            trip=trips.get(entry.trip_id) if entry.trip_id is not None else None,
-            refund_of_payer=payers.get(entry.refund_of_id) if entry.refund_of_id else None,
+            trip=trips.get(entry.trip_id),
+            refund_of_payer=payers.get(entry.refund_of_id),
             refunded_cents=refunded.get(entry.id, 0),
             refunded_to=list(refunded_to.get(entry.id, {}).values()),
         )
@@ -232,6 +245,12 @@ def paid_for(session: Session, trip_id: uuid.UUID) -> int:
     )
 
 
+class DuplicateExternalId(CreditsError):
+    def __init__(self, user_id: uuid.UUID | None) -> None:
+        super().__init__("Credits with that external_id were already granted")
+        self.user_id = user_id  # who has them (None: their account is gone)
+
+
 def grant(
     session: Session,
     user_id: uuid.UUID,
@@ -241,17 +260,28 @@ def grant(
     description: str | None = None,
     external_id: str | None = None,
 ) -> CreditEntry:
+    """Credits in, for the user. With `external_id` (a receipt or reference)
+    only once: if it's already on the ledger, raises DuplicateExternalId."""
     lock_users(session, user_id)
-    return _append(
-        session,
-        CreditEntry(
-            user_id=user_id,
-            kind=kind,
-            amount_cents=amount_cents,
-            description=description,
-            external_id=external_id,
-        ),
+    if external_id is not None:
+        holder = session.execute(
+            select(CreditEntry.user_id).where(CreditEntry.external_id == external_id)
+        ).first()
+        if holder is not None:
+            raise DuplicateExternalId(holder.user_id)
+    entry = CreditEntry(
+        user_id=user_id,
+        kind=kind,
+        amount_cents=amount_cents,
+        description=description,
+        external_id=external_id,
     )
+    return _append(session, entry, _head(session, user_id))
+
+
+class PurchaseForOtherAccount(CreditsError):
+    def __init__(self) -> None:
+        super().__init__("That purchase was made for another account")
 
 
 class PurchaseClaimed(CreditsError):
@@ -259,25 +289,25 @@ class PurchaseClaimed(CreditsError):
         super().__init__("That purchase was credited to another account")
 
 
-def credit_purchase(
-    session: Session, user_id: uuid.UUID, *, external_id: str, amount_cents: int
-) -> bool:
-    """Credits a store purchase to the user, once: `external_id` is the
-    store's key for it. Returns whether it was credited now (False: it
-    already was, to them). Raises PurchaseClaimed if it went to someone else."""
-    lock_users(session, user_id)
-    existing = session.scalar(select(CreditEntry).where(CreditEntry.external_id == external_id))
-    if existing is not None:
-        if existing.user_id != user_id:
-            raise PurchaseClaimed()
+def credit_purchase(session: Session, user_id: uuid.UUID, purchase: VerifiedPurchase) -> bool:
+    """Credits a verified store purchase to the user, once. Returns whether
+    it was credited now (False: it already was, to them). Raises
+    PurchaseForOtherAccount if the app bought it for someone else, and
+    PurchaseClaimed if it was credited to someone else."""
+    if purchase.app_account_token not in (None, user_id):
+        raise PurchaseForOtherAccount()
+    try:
+        grant(
+            session,
+            user_id,
+            purchase.amount_cents,
+            kind=CreditEntryKind.PURCHASE,
+            external_id=purchase.external_id,
+        )
+    except DuplicateExternalId as exc:
+        if exc.user_id != user_id:
+            raise PurchaseClaimed() from None
         return False
-    grant(
-        session,
-        user_id,
-        amount_cents,
-        kind=CreditEntryKind.PURCHASE,
-        external_id=external_id,
-    )
     return True
 
 
@@ -321,7 +351,8 @@ def settle(
     if expected_price_cents is not None and expected_price_cents != outcome.price_cents:
         raise PriceChanged(expected_price_cents, outcome.price_cents)
     if outcome.price_cents > 0:
-        available = balance(session, payer.id)
+        head = _head(session, payer.id)
+        available = head[1] if head is not None else 0
         if available < outcome.price_cents:
             raise InsufficientCredits(outcome.price_cents, available)
         _append(
@@ -333,6 +364,7 @@ def settle(
                 amount_cents=-outcome.price_cents,
                 description=trip.title,
             ),
+            head,
         )
     elif outcome.refund_cents > 0:
         _refund(session, trip, outcome.refund_cents)
@@ -369,12 +401,13 @@ def _refund(session: Session, trip: Trip, cents: int) -> None:
         .where(CreditEntry.trip_id == trip.id, CreditEntry.kind == CreditEntryKind.TRIP_CHARGE)
         .order_by(CreditEntry.seq.desc())
     ).all()
+    head = _head(session, trip.owner_id)
     left = cents
     for charge, already in charges:
         take = min(-charge.amount_cents - already, left)
         if take <= 0:
             continue
-        _append(
+        refund = _append(
             session,
             CreditEntry(
                 user_id=trip.owner_id,
@@ -384,7 +417,9 @@ def _refund(session: Session, trip: Trip, cents: int) -> None:
                 refund_of_id=charge.id,
                 description=trip.title,
             ),
+            head,
         )
+        head = (refund.id, refund.balance_after_cents)
         left -= take
         if left == 0:
             break

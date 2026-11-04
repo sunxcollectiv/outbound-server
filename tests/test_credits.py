@@ -2,18 +2,13 @@
 window, and where credits come from. Rates are pinned in test_pricing.py;
 here a 7-day trip is $8.00 (800) and a sixth person on it is $1.40 (140)."""
 
-from datetime import UTC, datetime
-
 from sqlalchemy import select
 
 from app.models import CreditEntry
 from app.services import pricing
 from app.services.pricing import Bracket, Schedule
-from tests.conftest import JAPAN_TRIP, STARTING_CREDITS
+from tests.conftest import CUTOFF, FUTURE_TRIP, JAPAN_TRIP, STARTING_CREDITS
 
-# JAPAN_TRIP is long over; this one is a month out, so refunds are still on.
-FUTURE_TRIP = {"title": "Lisbon", "start_date": "2026-12-01", "end_date": "2026-12-07"}
-CUTOFF = datetime(2026, 12, 2, tzinfo=UTC)  # 24h after Lisbon starts (UTC midnight)
 
 
 def _charges(credits_of, headers, kind):

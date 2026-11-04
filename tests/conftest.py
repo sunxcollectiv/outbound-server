@@ -282,10 +282,11 @@ PASSWORD = "correct horse battery"
 
 
 class AuthHeaders(dict[str, str]):
-    """Headers for acting as a user, plus their id and email for use in request bodies."""
+    """Headers for acting as a user, plus who they are for use in request bodies."""
 
     user_id: str
     email: str
+    display_name: str
 
 
 # Enough for any trip a test makes (a 7-day trip is $8), granted straight
@@ -312,6 +313,7 @@ def make_user(client: TestClient, session: Session) -> Callable[..., AuthHeaders
         headers = AuthHeaders(Authorization=f"Bearer {body['token']}")
         headers.user_id = body["user"]["id"]
         headers.email = body["user"]["email"]
+        headers.display_name = body["user"]["display_name"]
         if credits:
             grant(session, uuid.UUID(headers.user_id), credits, description="Test credits")
         return headers
@@ -336,9 +338,11 @@ def grant_credits(client: TestClient, admin: AuthHeaders) -> Callable[..., dict[
 
 
 @pytest.fixture
-def credits_of(client: TestClient) -> Callable[[AuthHeaders], dict[str, Any]]:
-    def _read(headers: AuthHeaders) -> dict[str, Any]:
-        response = client.get("/credits", headers=headers)
+def credits_of(client: TestClient) -> Callable[..., dict[str, Any]]:
+    """GET /credits as a user; keyword arguments go in the query (limit, before)."""
+
+    def _read(headers: AuthHeaders, **params: Any) -> dict[str, Any]:
+        response = client.get("/credits", params=params, headers=headers)
         assert response.status_code == 200, response.text
         return response.json()
 
@@ -350,6 +354,9 @@ JAPAN_TRIP = {
     "start_date": "2026-04-09",
     "end_date": "2026-04-15",
 }
+# JAPAN_TRIP is long over; this one is a month out, so refunds are still on.
+FUTURE_TRIP = {"title": "Lisbon", "start_date": "2026-12-01", "end_date": "2026-12-07"}
+CUTOFF = datetime(2026, 12, 2, tzinfo=UTC)  # 24h after Lisbon starts (UTC midnight)
 
 
 @pytest.fixture

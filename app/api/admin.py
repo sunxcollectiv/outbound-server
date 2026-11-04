@@ -18,6 +18,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.api import announcements, areas, places, received_images, received_mail
+from app.api.credits import PageCursor, PageLimit, read_statement
 from app.api.deps import SessionDep
 from app.models import Trip, TripItem, TripMember, User
 from app.schemas import (
@@ -199,7 +200,10 @@ def grant_credits(payload: CreditGrant, session: SessionDep) -> CreditGrantResul
         raise HTTPException(
             status.HTTP_409_CONFLICT, "Credits with that external_id were already granted"
         ) from None
-    return CreditGrantResult(entry=entry, balance_cents=credits.balance(session, user.id))
+    return CreditGrantResult(
+        entry=credits.statement_line(session, entry),
+        balance_cents=credits.balance(session, user.id),
+    )
 
 
 @router.get(
@@ -208,13 +212,17 @@ def grant_credits(payload: CreditGrant, session: SessionDep) -> CreditGrantResul
     tags=["admin/credits"],
     summary="[admin] Read a user's credits",
 )
-def read_user_credits(user_id: uuid.UUID, session: SessionDep) -> CreditsRead:
-    """One person's balance and ledger, newest first."""
+def read_user_credits(
+    user_id: uuid.UUID,
+    session: SessionDep,
+    limit: PageLimit = 25,
+    before: PageCursor = None,
+) -> CreditsRead:
+    """One person's balance and ledger, newest first, paged and shown just as
+    they see it at GET /credits."""
     if session.get(User, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
-    return CreditsRead(
-        balance_cents=credits.balance(session, user_id), entries=credits.ledger(session, user_id)
-    )
+    return read_statement(session, user_id, limit, before)
 
 
 # Fully-admin resource routers, mounted under /admin/* (they keep their own

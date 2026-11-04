@@ -849,13 +849,42 @@ class TripQuote(BaseModel):
     shortfall_cents: int
 
 
+class CreditTripRef(ReadModel):
+    """The trip a ledger row is about, as it is now."""
+
+    id: uuid.UUID
+    title: str
+    start_date: date
+    end_date: date
+
+
+class CreditPartyRead(ReadModel):
+    """Someone else's side of a ledger row (or the reader's own: compare ids)."""
+
+    id: uuid.UUID
+    display_name: str
+
+
 class CreditEntryRead(ReadModel):
     id: uuid.UUID
     kind: CreditEntryKind
     # Positive when credits came in, negative when spent.
     amount_cents: int
-    # Null for grants and purchases, and once a trip is deleted.
+    # The balance right after this row.
+    balance_after_cents: int
+    # Null for grants and purchases. Kept after the trip is deleted.
     trip_id: uuid.UUID | None
+    # The trip as it is now, for linking to it: null once it's deleted or
+    # the reader is no longer on it (`title` still says what it was).
+    trip: CreditTripRef | None
+    # On a refund: the charge it gives back, and who paid that charge. Refunds
+    # all go to the trip's owner, so it may have been someone else's payment.
+    refund_of_id: uuid.UUID | None
+    refund_of_payer: CreditPartyRead | None
+    # On a charge: how much of it has been refunded so far, and to whom
+    # (the trip's owner, who isn't necessarily the payer).
+    refunded_cents: int
+    refunded_to: list[CreditPartyRead]
     description: str | None
     created_at: datetime
 
@@ -875,9 +904,12 @@ class CreditEntryRead(ReadModel):
 
 
 class CreditsRead(BaseModel):
+    """The balance, and a page of the ledger, newest first. Pass
+    `next_cursor` as `before` for the next page; null when there's no more."""
+
     balance_cents: int
-    # Newest first.
     entries: list[CreditEntryRead]
+    next_cursor: uuid.UUID | None
 
 
 class CreditGrant(BaseModel):

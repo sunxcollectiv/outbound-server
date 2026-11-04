@@ -25,7 +25,7 @@ def _charges(credits_of, headers, kind):
 
 def test_admin_grants_credits(client, make_user, admin, credits_of):
     sun = make_user("sun", credits=0)
-    assert credits_of(sun) == {"balance_cents": 0, "entries": []}
+    assert credits_of(sun) == {"balance_cents": 0, "entries": [], "next_cursor": None}
 
     resp = client.post(
         "/admin/credits/grants",
@@ -41,7 +41,8 @@ def test_admin_grants_credits(client, make_user, admin, credits_of):
     assert ledger["balance_cents"] == 1500
     assert [e["id"] for e in ledger["entries"]] == [entry["id"]]
     assert set(ledger["entries"][0]) == {
-        "id", "kind", "amount_cents", "trip_id", "description", "created_at", "title"
+        "id", "kind", "amount_cents", "balance_after_cents", "trip_id", "trip", "refund_of_id",
+        "refund_of_payer", "refunded_cents", "refunded_to", "description", "created_at", "title",
     }
     # The admin can see the same thing.
     assert client.get(f"/admin/users/{sun.user_id}/credits", headers=admin).json() == ledger

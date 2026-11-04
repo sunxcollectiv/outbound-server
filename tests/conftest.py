@@ -14,8 +14,9 @@ from app.config import get_settings
 from app.api.deps import get_now
 from app.db import get_session
 from app.main import app
-from app.models import CreditEntry, CreditEntryKind, User
+from app.models import User
 from app.services import push
+from app.services.credits import grant
 from app.services.apns import ApnsClient, ApnsResponse
 from app.services.google_places import (
     GooglePlaceNotFound,
@@ -312,15 +313,7 @@ def make_user(client: TestClient, session: Session) -> Callable[..., AuthHeaders
         headers.user_id = body["user"]["id"]
         headers.email = body["user"]["email"]
         if credits:
-            session.add(
-                CreditEntry(
-                    user_id=uuid.UUID(headers.user_id),
-                    kind=CreditEntryKind.GRANT,
-                    amount_cents=credits,
-                    description="Test credits",
-                )
-            )
-            session.flush()
+            grant(session, uuid.UUID(headers.user_id), credits, description="Test credits")
         return headers
 
     return _make

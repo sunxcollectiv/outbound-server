@@ -17,6 +17,7 @@ dependencies = [
     "anthropic>=1.15",
     "python-multipart>=0.0.9",
     "pyjwt[crypto]>=2.8",
+    "app-store-server-library>=3.1",
 ]
 
 [project.optional-dependencies]

@@ -377,6 +377,9 @@ class TripRead(ReadModel):
     # What the trip costs today, for its length and roster under the rate
     # table it was created with. Not what has been paid for it: see /credits.
     price_cents: int
+    # That rate table's key: GET /pricing/schedule?key=... gives its brackets,
+    # for pricing an edit locally. New trips get the current one.
+    price_schedule: str
     # Resolved from the stored area_ids, in order; ids that no longer match an
     # area are dropped (and pruned from storage) so none surface as blanks.
     areas: list[AreaRead] = Field(default_factory=list)
@@ -800,6 +803,7 @@ class ImageImportResult(ReadModel):
 
 
 class BracketRead(BaseModel):
+    # Trip days in `trip_brackets`, extra member-days in `member_brackets`.
     first_day: int
     # Null: open-ended ("day 31 and beyond").
     last_day: int | None
@@ -809,7 +813,9 @@ class BracketRead(BaseModel):
 class PricingScheduleRead(BaseModel):
     """The rate tables, for showing how pricing works. A trip day is charged
     at the rate of the bracket it falls in; that covers up to
-    `included_members` people, and each person beyond adds the member rate."""
+    `included_members` people. People beyond are charged by the member-day
+    (one extra person for one day): all the trip's extra member-days
+    together, each at the rate of the `member_brackets` bracket it falls in."""
 
     key: str
     included_members: int
@@ -818,7 +824,9 @@ class PricingScheduleRead(BaseModel):
 
 
 class BracketLineRead(BaseModel):
-    """One row of a price breakdown: the days that fell in one bracket."""
+    """One row of a price breakdown: the days that fell in one bracket. In
+    `member_lines` the days are extra member-days, and `cents` is already
+    the total for everyone (not per person)."""
 
     first_day: int
     last_day: int
@@ -848,14 +856,49 @@ class TripQuote(BaseModel):
     balance_cents: int
     shortfall_cents: int
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def member_days(self) -> int:
+        """extra_members × days: what `member_lines` breaks down."""
+        return self.extra_members * self.days
+
+
+class CreditTripRef(ReadModel):
+    """The trip a ledger row is about, as it is now."""
+
+    id: uuid.UUID
+    title: str
+    start_date: date
+    end_date: date
+
+
+class CreditPartyRead(ReadModel):
+    """Someone else's side of a ledger row (or the reader's own: compare ids)."""
+
+    id: uuid.UUID
+    display_name: str
+
 
 class CreditEntryRead(ReadModel):
     id: uuid.UUID
     kind: CreditEntryKind
     # Positive when credits came in, negative when spent.
     amount_cents: int
-    # Null for grants and purchases, and once a trip is deleted.
+    # The balance right after this row.
+    balance_after_cents: int
+    # Null for grants and purchases. Kept after the trip is deleted.
     trip_id: uuid.UUID | None
+    # The trip as it is now, for linking to it: null once it's deleted or
+    # the reader is no longer on it (`title` still says what it was).
+    trip: CreditTripRef | None
+    # On a refund: the charge it gives back, and who paid that charge. Refunds
+    # all go to the trip's owner, so it may have been someone else's payment.
+    refund_of_id: uuid.UUID | None
+    refund_of_payer: CreditPartyRead | None
+    # On a charge: how much of it has been refunded so far, and to whom
+    # (the trip's owner, who isn't necessarily the payer).
+    refunded_cents: int
+    refunded_to: list[CreditPartyRead]
     description: str | None
     created_at: datetime
 
@@ -875,9 +918,19 @@ class CreditEntryRead(ReadModel):
 
 
 class CreditsRead(BaseModel):
+    """The balance, and a page of the ledger, newest first. Pass
+    `next_cursor` as `before` for the next page; null when there's no more."""
+
     balance_cents: int
-    # Newest first.
     entries: list[CreditEntryRead]
+    next_cursor: uuid.UUID | None
+
+
+class CreditPurchaseCreate(BaseModel):
+    """A completed App Store purchase of credits, as StoreKit signed it
+    (`VerificationResult.jwsRepresentation`)."""
+
+    signed_transaction: str = Field(min_length=1, max_length=16_384)
 
 
 class CreditGrant(BaseModel):

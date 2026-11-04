@@ -2,18 +2,13 @@
 window, and where credits come from. Rates are pinned in test_pricing.py;
 here a 7-day trip is $8.00 (800) and a sixth person on it is $1.40 (140)."""
 
-from datetime import UTC, datetime
-
 from sqlalchemy import select
 
 from app.models import CreditEntry
 from app.services import pricing
 from app.services.pricing import Bracket, Schedule
-from tests.conftest import JAPAN_TRIP, STARTING_CREDITS
+from tests.conftest import CUTOFF, FUTURE_TRIP, JAPAN_TRIP, STARTING_CREDITS
 
-# JAPAN_TRIP is long over; this one is a month out, so refunds are still on.
-FUTURE_TRIP = {"title": "Lisbon", "start_date": "2026-12-01", "end_date": "2026-12-07"}
-CUTOFF = datetime(2026, 12, 2, tzinfo=UTC)  # 24h after Lisbon starts (UTC midnight)
 
 
 def _charges(credits_of, headers, kind):
@@ -25,7 +20,7 @@ def _charges(credits_of, headers, kind):
 
 def test_admin_grants_credits(client, make_user, admin, credits_of):
     sun = make_user("sun", credits=0)
-    assert credits_of(sun) == {"balance_cents": 0, "entries": []}
+    assert credits_of(sun) == {"balance_cents": 0, "entries": [], "next_cursor": None}
 
     resp = client.post(
         "/admin/credits/grants",
@@ -41,7 +36,8 @@ def test_admin_grants_credits(client, make_user, admin, credits_of):
     assert ledger["balance_cents"] == 1500
     assert [e["id"] for e in ledger["entries"]] == [entry["id"]]
     assert set(ledger["entries"][0]) == {
-        "id", "kind", "amount_cents", "trip_id", "description", "created_at", "title"
+        "id", "kind", "amount_cents", "balance_after_cents", "trip_id", "trip", "refund_of_id",
+        "refund_of_payer", "refunded_cents", "refunded_to", "description", "created_at", "title",
     }
     # The admin can see the same thing.
     assert client.get(f"/admin/users/{sun.user_id}/credits", headers=admin).json() == ledger
@@ -80,7 +76,7 @@ def test_rate_tables_are_public(client):
     assert (body["key"], body["included_members"]) == ("2026-11", 5)
     assert body["trip_brackets"][0] == {"first_day": 1, "last_day": 3, "cents_per_day": 160}
     assert body["trip_brackets"][-1] == {"first_day": 31, "last_day": None, "cents_per_day": 20}
-    assert body["member_brackets"][0] == {"first_day": 1, "last_day": 7, "cents_per_day": 20}
+    assert body["member_brackets"][0] == {"first_day": 1, "last_day": 10, "cents_per_day": 20}
     assert client.get("/pricing/schedule", params={"key": "1999-01"}).status_code == 404
 
 
@@ -338,9 +334,10 @@ def test_people_beyond_five_cost_extra(client, make_user, make_trip, credits_of)
     assert sixth.status_code == 201, sixth.text
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 940
 
+    # The seventh is cheaper: extra member-days 8-14, partly at the 15c rate.
     seventh = client.post(url, json={"email": "seven@example.com"}, headers=broke)
     assert seventh.status_code == 402
-    assert seventh.json()["detail"]["shortfall_cents"] == 140
+    assert seventh.json()["detail"]["shortfall_cents"] == 120
     assert len(client.get(url, headers=sun).json()) == 6
 
     # Removing the sixth gives Sun's 140 back (the trip hasn't started).
@@ -380,9 +377,30 @@ def test_a_trip_keeps_the_rates_it_was_made_under(client, make_user, make_trip, 
 
     new = make_trip(sun)
     assert new["price_cents"] == 1600
+    # Each trip says which rate table it's on, so the app can price edits
+    # with that table's brackets.
+    assert (old["price_schedule"], new["price_schedule"]) == ("2026-11", "test-2x")
+    assert client.get(f"/trips/{old['id']}", headers=sun).json()["price_schedule"] == "2026-11"
+    assert {t["price_schedule"] for t in client.get("/trips", headers=sun).json()} == {"2026-11", "test-2x"}
+    table = client.get("/pricing/schedule", params={"key": new["price_schedule"]}).json()
+    assert table["trip_brackets"][0]["cents_per_day"] == 320
     assert client.post("/trips/quote", json=JAPAN_TRIP, headers=sun).json()["schedule"] == "test-2x"
     assert client.get(f"/trips/{old['id']}", headers=sun).json()["price_cents"] == 800
     quote = client.post(f"/trips/{old['id']}/quote", json={"end_date": "2026-04-16"}, headers=sun).json()
     assert (quote["schedule"], quote["price_cents"]) == ("2026-11", 80)
     assert client.patch(f"/trips/{old['id']}", json={"end_date": "2026-04-16"}, headers=sun).status_code == 200
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 800 - 1600 - 80
+
+
+def test_extensions_carry_their_own_schedule(client, make_user, make_trip, monkeypatch):
+    sun = make_user("sun")
+    lead = make_trip(sun, **FUTURE_TRIP)
+    monkeypatch.setitem(pricing.SCHEDULES, "test-new", pricing.schedule("2026-11"))
+    monkeypatch.setattr(pricing, "CURRENT_SCHEDULE", "test-new")
+
+    later = {"title": "Porto", "start_date": "2026-12-07", "end_date": "2026-12-09"}
+    extension = make_trip(sun, **later, extends_trip_id=lead["id"])
+    assert extension["price_schedule"] == "test-new"
+    [entry] = client.get("/trips", headers=sun).json()
+    assert entry["price_schedule"] == "2026-11"
+    assert [e["price_schedule"] for e in entry["extensions"]] == ["test-new"]

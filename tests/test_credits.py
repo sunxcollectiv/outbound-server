@@ -395,3 +395,17 @@ def test_a_trip_keeps_the_rates_it_was_made_under(client, make_user, make_trip, 
     assert (quote["schedule"], quote["price_cents"]) == ("2026-11", 80)
     assert client.patch(f"/trips/{old['id']}", json={"end_date": "2026-04-16"}, headers=sun).status_code == 200
     assert credits_of(sun)["balance_cents"] == STARTING_CREDITS - 800 - 1600 - 80
+
+
+def test_extensions_carry_their_own_schedule(client, make_user, make_trip, monkeypatch):
+    sun = make_user("sun")
+    lead = make_trip(sun, **FUTURE_TRIP)
+    monkeypatch.setitem(pricing.SCHEDULES, "test-new", pricing.schedule("2026-11"))
+    monkeypatch.setattr(pricing, "CURRENT_SCHEDULE", "test-new")
+
+    later = {"title": "Porto", "start_date": "2026-12-07", "end_date": "2026-12-09"}
+    extension = make_trip(sun, **later, extends_trip_id=lead["id"])
+    assert extension["price_schedule"] == "test-new"
+    [entry] = client.get("/trips", headers=sun).json()
+    assert entry["price_schedule"] == "2026-11"
+    assert [e["price_schedule"] for e in entry["extensions"]] == ["test-new"]

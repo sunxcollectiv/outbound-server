@@ -15,7 +15,8 @@ new trip is out of scope.
 
 Lodging: a stay whose confirmation gives only the check-in/check-out *dates*
 gets the conventional times — check-in 15:00, check-out 11:00 — rather than
-midnight; its details (property type, phone, cancellation deadline) are
+midnight; one with no check-out (or a same-day one) is assumed to be one
+night; its details (property type, phone, cancellation deadline) are
 cleaned up onto the item's lodging row, and what it says about rooms becomes
 the item's rooms (see `_rooms`). It's all the user's to edit afterwards.
 """
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -35,8 +36,9 @@ from app.models import (
     EmailReceiptStatus,
     ImageReceipt,
     LodgingType,
-    TripItemSource,
     Trip,
+    TripItem,
+    TripItemSource,
     TripMember,
     User,
 )
@@ -188,8 +190,7 @@ def _rooms(raw: dict[str, Any] | None) -> list[dict[str, Any]] | None:
         ]
         return rooms or None
 
-    # Older extractions put the count in "rooms" (now the itemized list).
-    count = _count(raw.get("room_count") or (listed if isinstance(listed, int) else None))
+    count = _count(raw.get("room_count"))
     room_type, guests = _text(raw.get("room_type"), 200), _count(raw.get("guests"))
     if count is None and room_type is None and guests is None:
         return None
@@ -234,6 +235,15 @@ def _item_payload(
         ]
     elif kind == "lodging":
         values.update(_ends(item, start_default=CHECK_IN_TIME, end_default=CHECK_OUT_TIME))
+        # A stay always checks out on a later date than it checks in. With no
+        # check-out stated, or a same-day (or earlier) one — a misread, or a
+        # day-use booking we don't model — assume one night, check-out 11:00
+        # the next day, for the user to correct, rather than failing the
+        # whole import.
+        start, end = values["starts_at"], values["ends_at"]
+        if start is not None and (end is None or end.date() <= start.date()):
+            values["ends_at"] = datetime.combine(start.date() + timedelta(days=1), CHECK_OUT_TIME)
+            values["end_timezone"] = values["start_timezone"]
         # A stay is at one property: the check-out end has no place of its own.
         values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
         values["lodging"] = _lodging_details(item.get("lodging"))
@@ -247,7 +257,7 @@ def _item_payload(
     return TripItemCreate(**values)
 
 
-def _link_source(item: Any, receipt: Receipt) -> None:
+def _link_source(item: TripItem, receipt: Receipt) -> None:
     """Mark an imported item with where it came from, linking the receipt so
     its participants can pull up the original."""
     if isinstance(receipt, EmailReceipt):

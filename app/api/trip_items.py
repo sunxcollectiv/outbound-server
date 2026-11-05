@@ -55,6 +55,17 @@ def _check_named(title: str | None, place_id: uuid.UUID | None) -> None:
         raise _unprocessable("an item needs a title or a place")
 
 
+def _check_stay(kind: TripItemKind, starts_at: datetime, ends_at: datetime | None) -> None:
+    """422 unless a stay has a check-out on a later date than its check-in
+    (local dates, as each end is written): at least one night."""
+    if kind is not TripItemKind.LODGING:
+        return
+    if ends_at is None:
+        raise _unprocessable("a stay needs a check-out (ends_at)")
+    if ends_at.date() <= starts_at.date():
+        raise _unprocessable("a stay must check out on a later date than it checks in")
+
+
 def viewer(session: Session, trip: Trip, user: User) -> TripMember:
     """The caller's member row. ViewableTrip has already checked there is one."""
     member = member_for(session, trip, user.id)
@@ -215,9 +226,6 @@ def _apply_span(values: dict[str, Any], segments: list[TripItemTransitSegment]) 
     values["transit_mode"] = modes.pop() if len(modes) == 1 else (TransitMode.MIXED if modes else None)
 
 
-LODGING_FIELDS = ("property_type", "phone", "free_cancellation_until")
-
-
 def _set_lodging(item: TripItem, details: dict[str, Any] | None, start_tz: str | None) -> None:
     """Make `details` the stay's details (None drops them). The cancellation
     deadline is a wall time at the property, read in the stay's check-in zone;
@@ -234,16 +242,19 @@ def _set_lodging(item: TripItem, details: dict[str, Any] | None, start_tz: str |
             )
         details["free_cancellation_until"] = to_local(until, start_tz)
     row = item.lodging or TripItemLodging()
-    for field in LODGING_FIELDS:
+    for field in TripItemLodging.FIELDS:
         setattr(row, field, details.get(field))
     item.lodging = row
 
 
-ROOM_FIELDS = ("label", "room_number", "room_type", "guests", "confirmation_number")
+def _trip_member_ids(session: Session, trip: Trip) -> set[uuid.UUID]:
+    """Every member id on the trip: who an item's participants and room
+    occupants may be. Looked up once per request and shared."""
+    return set(session.scalars(select(TripMember.id).where(TripMember.trip_id == trip.id)))
 
 
 def _set_rooms(
-    session: Session, trip: Trip, item: TripItem, rooms: list[LodgingRoomSet]
+    item: TripItem, rooms: list[LodgingRoomSet], known: set[uuid.UUID]
 ) -> None:
     """Make `rooms` the stay's rooms, in order, and put each listed occupant in
     their room: rooms sent with an id are kept (and updated), new ones made,
@@ -254,7 +265,6 @@ def _set_rooms(
     unknown = [str(room.id) for room in rooms if room.id is not None and room.id not in existing]
     if unknown:
         raise _unprocessable(f"Not a room of this stay: {', '.join(unknown)}")
-    known = set(session.scalars(select(TripMember.id).where(TripMember.trip_id == trip.id)))
     strangers = {str(m) for room in rooms for m in room.occupants if m not in known}
     if strangers:
         raise _unprocessable(f"Not on this trip: {', '.join(sorted(strangers))}")
@@ -265,7 +275,7 @@ def _set_rooms(
         # A new room gets its id now, so assignments can point at it pre-flush.
         row = existing[entry.id] if entry.id is not None else TripItemLodgingRoom(id=uuid.uuid4())
         row.position = position
-        for field in ROOM_FIELDS:
+        for field in TripItemLodgingRoom.FIELDS:
             setattr(row, field, getattr(entry, field))
         kept.append(row)
         room_of.update({member_id: row for member_id in entry.occupants})
@@ -305,12 +315,12 @@ def _get_item(
 
 
 def _set_participants(
-    session: Session, trip: Trip, item: TripItem, entries: list[ParticipantSet]
+    item: TripItem, entries: list[ParticipantSet], known: set[uuid.UUID]
 ) -> None:
     """Make `entries` the item's participants. Listed members keep their row
     and answer (unless the entry sends a new status), new ones are added,
-    anyone not listed is dropped. Every member must be on this trip."""
-    known = set(session.scalars(select(TripMember.id).where(TripMember.trip_id == trip.id)))
+    anyone not listed is dropped. Every member must be on this trip (`known`,
+    from _trip_member_ids)."""
     unknown = [str(entry.member_id) for entry in entries if entry.member_id not in known]
     if unknown:
         raise _unprocessable(f"Not on this trip: {', '.join(unknown)}")
@@ -375,15 +385,21 @@ def build_trip_item(
         _resolve_times(session, values)
         segments = []
     _check_named(values["title"], values["place_id"])
+    _check_stay(payload.kind, values["starts_at"], values["ends_at"])
     item = TripItem(**values, trip_id=trip.id, created_by_id=user.id)
     item.transit_segments = segments
     _set_lodging(item, lodging_payload, values["start_timezone"])
+    known = (
+        _trip_member_ids(session, trip)
+        if payload.participants is not None or payload.rooms
+        else set()
+    )
     if payload.participants is not None:
-        _set_participants(session, trip, item, payload.participants)
+        _set_participants(item, payload.participants, known)
     else:
         item.participants.append(TripItemParticipant(member_id=viewer(session, trip, user).id))
     if payload.rooms:
-        _set_rooms(session, trip, item, payload.rooms)
+        _set_rooms(item, payload.rooms, known)
     session.add(item)
     return item
 
@@ -444,31 +460,35 @@ def read_source(
     wasn't imported, or its original is gone."""
     member = viewer(session, trip, user)
     item = _get_item(session, trip, member, item_id)
-    image = session.get(ImageReceipt, item.source_image_id) if item.source_image_id else None
-    email = (
-        session.get(EmailReceipt, item.source_email_receipt_id)
-        if item.source_email_receipt_id
-        else None
-    )
-    raw = (email.raw or {}) if email is not None else {}
-    html, text = raw.get("html"), raw.get("text")
-    if image is None and not (html or text):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "This item has no original to show")
+    no_original = HTTPException(status.HTTP_404_NOT_FOUND, "This item has no original to show")
+    if not item.has_source:
+        raise no_original
+    # Checked before loading the original, which can be megabytes.
     if not any(row.member_id == member.id for row in item.participants):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Only the item's participants can view its original"
         )
 
-    if image is not None:
+    if item.source_image_id is not None:
+        image = session.get(ImageReceipt, item.source_image_id)
+        assert image is not None, "the link is cleared when the image is deleted"
         media_type = (
             image.content_type
             if image.content_type.startswith("image/")
             else "application/octet-stream"
         )
         return Response(image.data, media_type=media_type, headers=_ORIGINAL_HEADERS)
-    if html:
-        return Response(html, media_type="text/html; charset=utf-8", headers=_ORIGINAL_HEADERS)
-    return Response(text, media_type="text/plain; charset=utf-8", headers=_ORIGINAL_HEADERS)
+    email = session.get(EmailReceipt, item.source_email_receipt_id)
+    raw = (email.raw if email is not None else None) or {}
+    if raw.get("html"):
+        return Response(
+            raw["html"], media_type="text/html; charset=utf-8", headers=_ORIGINAL_HEADERS
+        )
+    if raw.get("text"):
+        return Response(
+            raw["text"], media_type="text/plain; charset=utf-8", headers=_ORIGINAL_HEADERS
+        )
+    raise no_original
 
 
 @router.patch("/{item_id}", response_model=TripItemRead)
@@ -549,21 +569,29 @@ def update_item(
             item.transit_segments = []
 
     _check_named(changes.get("title", item.title), changes.get("place_id", item.place_id))
+    _check_stay(
+        resulting_kind,
+        changes.get("starts_at", item.starts_at),
+        changes.get("ends_at", item.ends_at),
+    )
     if lodging_sent:
         _set_lodging(item, lodging_payload, changes.get("start_timezone", item.start_timezone))
     elif not now_lodging:  # leaving lodging drops the stay's details
         item.lodging = None
     for field, value in changes.items():
         setattr(item, field, value)
+    known = (
+        _trip_member_ids(session, trip)
+        if payload.participants is not None or payload.rooms
+        else set()
+    )
     if payload.participants is not None:
-        _set_participants(session, trip, item, payload.participants)
-    if not now_lodging:  # leaving lodging drops the rooms too
+        _set_participants(item, payload.participants, known)
+    # Leaving lodging drops the rooms too; `rooms: []`/null clears them.
+    if not now_lodging or (rooms_sent and not payload.rooms):
         _clear_rooms(item)
-    elif rooms_sent:
-        if payload.rooms:
-            _set_rooms(session, trip, item, payload.rooms)
-        else:
-            _clear_rooms(item)
+    elif payload.rooms:
+        _set_rooms(item, payload.rooms, known)
     if booking_state(item) != booking_before:
         item.edited_at, item.edited_by = now, user
     if before is not None:

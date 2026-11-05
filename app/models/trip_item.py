@@ -29,7 +29,7 @@ from app.services.timekeeping import to_utc
 
 
 class TripItemKind(StrEnum):
-    LODGING = "lodging"  # starts_at = check-in, ends_at = check-out
+    LODGING = "lodging"  # starts_at = check-in, ends_at = check-out (required, a later date)
     ACTIVITY = "activity"
     # place -> end_place; starts_at = departure, ends_at = arrival. A
     # member's own transit is how the group learns when they come and go.
@@ -173,6 +173,12 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         *local_time_span_constraints(),
         CheckConstraint(
             "transit_mode IS NULL OR kind = 'transit'", name="transit_mode_only_transit"
+        ),
+        # A stay always has a check-out, on a later (local) date than its
+        # check-in: at least one night.
+        CheckConstraint(
+            "kind <> 'lodging' OR (ends_at IS NOT NULL AND ends_at::date > starts_at::date)",
+            name="stay_spans_a_night",
         ),
         # An item links to at most the one receipt it came from, of its own
         # source's type. (A receipt may be gone — the link is then null.)
@@ -322,6 +328,20 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
     """
 
     __tablename__ = "trip_item_transit_segments"
+    # What a leg holds, for the code that copies or compares legs.
+    FIELDS = (
+        "position",
+        "starts_at",
+        "start_timezone",
+        "ends_at",
+        "end_timezone",
+        "place_id",
+        "end_place_id",
+        "carrier",
+        "flight_number",
+        "transit_mode",
+        "confirmation_number",
+    )
     __table_args__ = (
         *local_time_span_constraints(),
         # Deferred so replacing a booking's legs (delete old, insert new at the
@@ -375,6 +395,8 @@ class TripItemLodging(TimestampMixin, Base):
     not the booking."""
 
     __tablename__ = "trip_item_lodgings"
+    # The editable details, as sent and read through the API's `lodging`.
+    FIELDS = ("property_type", "phone", "free_cancellation_until")
 
     trip_item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
@@ -400,6 +422,8 @@ class TripItemLodgingRoom(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     points here; the database keeps that pointer within the same stay."""
 
     __tablename__ = "trip_item_lodging_rooms"
+    # The editable fields of a room, as sent and read through the API's `rooms`.
+    FIELDS = ("label", "room_number", "room_type", "guests", "confirmation_number")
     __table_args__ = (
         # Deferred so reordering rooms doesn't trip it mid-flush.
         UniqueConstraint(

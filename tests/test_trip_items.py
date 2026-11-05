@@ -2,7 +2,8 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     Place,
@@ -287,8 +288,8 @@ def test_clearing_ends_at_clears_its_timezone(client, make_user, admin, make_tri
     item = client.post(
         url,
         json={
-            "kind": "lodging",
-            "title": "Hotel",
+            "kind": "activity",
+            "title": "Retreat",
             "starts_at": "2026-04-09T15:00:00",
             "start_timezone": "Asia/Tokyo",
             "ends_at": "2026-04-11T11:00:00",
@@ -951,7 +952,7 @@ def test_lodging_details_validation(client, make_user, admin, make_trip, session
     sun = make_user("sun")
     trip = make_trip(sun)
     url = f"/trips/{trip['id']}/items"
-    base = {"title": "x", "starts_at": "2026-04-10T15:00:00"}
+    base = {"title": "x", "starts_at": "2026-04-10T15:00:00", "ends_at": "2026-04-11T11:00:00"}
 
     # Only stays have them.
     assert client.post(
@@ -990,3 +991,58 @@ def test_lodging_details_validation(client, make_user, admin, make_trip, session
     assert client.delete(f"{url}/{stay['id']}", headers=sun).status_code == 204
     session.expire_all()
     assert session.get(TripItemLodging, uuid.UUID(stay["id"])) is None
+
+
+def test_a_stay_checks_out_on_a_later_date(client, make_user, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    stay = {"kind": "lodging", "title": "Hotel", "starts_at": "2026-04-10T15:00:00"}
+
+    # A check-out is required.
+    response = client.post(url, json=stay, headers=sun)
+    assert response.status_code == 422 and "needs a check-out" in response.text
+    # Same day, even later that day: invalid.
+    response = client.post(url, json={**stay, "ends_at": "2026-04-10T23:00:00"}, headers=sun)
+    assert response.status_code == 422 and "later date" in response.text
+    # Earlier is already refused as out of order.
+    for ends_at in ("2026-04-10T11:00:00", "2026-04-09T11:00:00"):
+        assert client.post(url, json={**stay, "ends_at": ends_at}, headers=sun).status_code == 422
+    # The next day, whatever the time: fine — one night.
+    item = client.post(url, json={**stay, "ends_at": "2026-04-11T09:00:00"}, headers=sun)
+    assert item.status_code == 201, item.text
+    item = item.json()
+
+    # Edits are held to it too: no dropping the check-out, no same-day one,
+    # and no turning a same-day or open-ended item into a stay.
+    assert client.patch(
+        f"{url}/{item['id']}", json={"ends_at": None}, headers=sun
+    ).status_code == 422
+    assert client.patch(
+        f"{url}/{item['id']}", json={"ends_at": "2026-04-10T18:00:00"}, headers=sun
+    ).status_code == 422
+    open_ended = client.post(
+        url, json={"kind": "activity", "title": "Spa", "starts_at": "2026-04-10T15:00:00"},
+        headers=sun,
+    ).json()
+    assert client.patch(
+        f"{url}/{open_ended['id']}", json={"kind": "lodging"}, headers=sun
+    ).status_code == 422
+    activity = client.post(
+        url,
+        json={"kind": "activity", "title": "Spa", "starts_at": "2026-04-10T15:00:00",
+              "ends_at": "2026-04-10T18:00:00"},
+        headers=sun,
+    ).json()
+    assert client.patch(
+        f"{url}/{activity['id']}", json={"kind": "lodging"}, headers=sun
+    ).status_code == 422
+
+    # And the database itself refuses either.
+    for change in ("ends_at = starts_at + interval '1 hour'", "ends_at = NULL, end_timezone = NULL"):
+        nested = session.begin_nested()
+        with pytest.raises(IntegrityError):
+            session.execute(
+                text(f"UPDATE trip_items SET {change} WHERE id = :id"), {"id": item["id"]}
+            )
+        nested.rollback()

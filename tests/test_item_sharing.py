@@ -234,6 +234,7 @@ def test_closed_lodging_hides_its_stay_details(client, wedding):
         participants=["sun"],
         kind="lodging",
         title="Hotel",
+        ends_at="2026-04-20T11:00:00",
         visibility="closed",
         booking_number="AGENCY-1",
         lodging={"phone": "+1 555 0100"},

@@ -3,8 +3,9 @@ receipt), when a person last changed its booking, and its original."""
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.models import EmailReceipt
+from app.models import EmailReceipt, ImageReceipt
 from app.services.extraction import ExtractedItem, ExtractedPlace, Extraction
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake image bytes"
@@ -60,7 +61,7 @@ def test_a_hand_entered_item_is_manual(client, trip):
     assert client.get(f"{trip['url']}/{item['id']}/source", headers=trip["sun"]).status_code == 404
 
 
-def test_an_imported_screenshot_links_its_original(client, trip, image_extractor, session):
+def test_an_imported_screenshot_links_its_original(client, trip, image_extractor):
     _upload_stay(client, trip["sun"], image_extractor)
     [item] = client.get(trip["url"], headers=trip["sun"]).json()
     assert (item["source"], item["has_source"], item["edited_at"]) == ("image", True, None)
@@ -99,15 +100,26 @@ def test_a_text_only_email_serves_text(client, trip, admin, resend, mail_extract
     assert original.headers["content-type"].startswith("text/plain")
 
 
-def test_only_participants_see_the_original(client, trip, image_extractor):
+def test_only_participants_see_the_original(client, trip, image_extractor, monkeypatch):
     url, sun, sean, ids = trip["url"], trip["sun"], trip["sean"], trip["ids"]
     _upload_stay(client, sun, image_extractor)
     [item] = client.get(url, headers=sun).json()
     source = f"{url}/{item['id']}/source"
 
-    # Sean can see the (open) item, but isn't on it.
+    # Sean can see the (open) item, but isn't on it — and is turned away
+    # before the image (possibly megabytes) is even loaded.
+    loaded = []
+    real_get = Session.get
+
+    def recording_get(self, entity, ident, **kwargs):
+        loaded.append(entity)
+        return real_get(self, entity, ident, **kwargs)
+
+    monkeypatch.setattr(Session, "get", recording_get)
     assert client.get(f"{url}/{item['id']}", headers=sean).status_code == 200
     assert client.get(source, headers=sean).status_code == 403
+    assert ImageReceipt not in loaded
+    monkeypatch.undo()
 
     # Once he's a participant, he can.
     client.patch(

@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 
 import anthropic
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ValidationError, field_validator
 
 
 class ExtractionError(Exception):
@@ -86,14 +86,6 @@ class ExtractedLodging(BaseModel):
     free_cancellation_until: str | None = None  # local "YYYY-MM-DDTHH:MM" or "YYYY-MM-DD"
     # The rooms one by one — only when the booking itemizes them; usually [].
     rooms: list[ExtractedRoom] = []
-
-    @model_validator(mode="before")
-    @classmethod
-    def _rooms_as_a_count(cls, data: object) -> object:
-        # An older reply shape put the room count in "rooms".
-        if isinstance(data, dict) and not isinstance(data.get("rooms", []), list):
-            data = {**data, "room_count": data.get("room_count") or data["rooms"], "rooms": []}
-        return data
 
     @field_validator("guests", "room_count", mode="before")
     @classmethod

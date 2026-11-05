@@ -1,3 +1,4 @@
+import pytest
 from sqlalchemy import select
 
 from app.models import EmailReceipt, EmailReceiptStatus, Place
@@ -313,27 +314,28 @@ def test_import_itemized_rooms_arrive_with_nobody_in_them(
     assert [p["room_id"] for p in item["participants"]] == [None]
 
 
-def test_import_reads_an_older_extraction_room_count(
-    client, make_user, admin, make_trip, resend, mail_extractor, session
+@pytest.mark.parametrize(
+    "end", [None, "2026-04-10", "2026-04-10T09:00"], ids=["none", "same-day", "before"]
+)
+def test_import_assumes_one_night_without_a_real_check_out(
+    client, make_user, admin, make_trip, resend, mail_extractor, end
 ):
     sun = make_user("sun")
     trip = make_trip(sun)
-    _make_extracted(client, admin, resend, mail_extractor, "re_r2", "sun@example.com",
-                    _stay("2026-04-10", "2026-04-12", ExtractedLodging(guests=2)))
-    # Stored before the rename: the count sat in "rooms".
-    receipt = _receipt(session, "re_r2")
-    extracted = dict(receipt.extracted)
-    extracted["items"] = [{**extracted["items"][0], "lodging": {"room_type": "Twin", "rooms": 3}}]
-    receipt.extracted = extracted
-    session.flush()
-
-    client.post("/admin/received/mail/import/re_r2", headers=admin)
+    # No check-out, or one on the check-in day: rather than fail the import,
+    # assume one night — check-out 11:00 the next day — for the user to fix.
+    _make_extracted(client, admin, resend, mail_extractor, "re_sd", "sun@example.com",
+                    _stay("2026-04-10", end))
+    body = client.post("/admin/received/mail/import/re_sd", headers=admin).json()
+    assert body["outcome"] == "placed", body
     item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
-    assert [r["room_type"] for r in item["rooms"]] == ["Twin", "Twin", "Twin"]
+    assert (item["starts_at"], item["ends_at"], item["end_timezone"]) == (
+        "2026-04-10T15:00:00", "2026-04-11T11:00:00", "Asia/Tokyo"
+    )
 
 
 def test_extracted_lodging_tolerates_wordy_counts():
-    parsed = ExtractedLodging.model_validate({"guests": "2 adults", "rooms": "1"})
+    parsed = ExtractedLodging.model_validate({"guests": "2 adults", "room_count": "1"})
     assert (parsed.guests, parsed.room_count) == (None, 1)
 
 

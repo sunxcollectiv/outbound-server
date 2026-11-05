@@ -241,9 +241,8 @@ def test_moving_rooms_counts_as_a_change(client, family):
         ]},
         headers=sun,
     )
-    inbox = client.get("/notifications", headers=sean).json()
-    items = inbox["items"] if isinstance(inbox, dict) else inbox
-    assert any("details" in (n.get("body") or "") for n in items), items
+    bodies = [n["body"] for n in client.get("/notifications", headers=sean).json()["items"]]
+    assert bodies == ["Sun updated the details of Hotel"], bodies
 
 
 def test_taking_someone_out_of_a_room_leaves_them_unassigned(client, family):

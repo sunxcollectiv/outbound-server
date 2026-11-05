@@ -20,13 +20,18 @@ _REDACTED: dict[str, object] = {
     "requirement": None,
     "notes": None,
     "confirmation_number": None,
+    "booking_number": None,
     "transit_mode": None,
     "tags": [],
     "image_url": None,
     "place": None,
     "end_place": None,
     "segments": [],
+    "lodging": None,
+    "rooms": [],
     "created_by": None,
+    "edited_by": None,
+    "has_source": False,
     "participants": [],
 }
 

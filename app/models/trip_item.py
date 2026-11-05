@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     SmallInteger,
     String,
@@ -28,7 +29,7 @@ from app.services.timekeeping import to_utc
 
 
 class TripItemKind(StrEnum):
-    LODGING = "lodging"  # starts_at = check-in, ends_at = check-out
+    LODGING = "lodging"  # starts_at = check-in, ends_at = check-out (required, a later date)
     ACTIVITY = "activity"
     # place -> end_place; starts_at = departure, ends_at = arrival. A
     # member's own transit is how the group learns when they come and go.
@@ -48,6 +49,25 @@ class TransitMode(StrEnum):
     CAR_RENTAL = "car_rental"
     OTHER = "other"
     MIXED = "mixed"
+
+
+class LodgingType(StrEnum):
+    """What kind of place a stay is at."""
+
+    HOTEL = "hotel"
+    VACATION_RENTAL = "vacation_rental"  # an Airbnb/VRBO-style whole place
+    HOSTEL = "hostel"
+    OTHER = "other"
+
+
+class TripItemSource(StrEnum):
+    """Where an item came from. Set when it's made and never changed: an
+    imported item the user then edits is still `email`/`image` (see
+    `edited_at`)."""
+
+    MANUAL = "manual"  # entered by hand
+    EMAIL = "email"  # imported from a forwarded confirmation email
+    IMAGE = "image"  # imported from an uploaded screenshot/photo
 
 
 class TripItemRequirement(StrEnum):
@@ -154,6 +174,19 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         CheckConstraint(
             "transit_mode IS NULL OR kind = 'transit'", name="transit_mode_only_transit"
         ),
+        # A stay always has a check-out, on a later (local) date than its
+        # check-in: at least one night.
+        CheckConstraint(
+            "kind <> 'lodging' OR (ends_at IS NOT NULL AND ends_at::date > starts_at::date)",
+            name="stay_spans_a_night",
+        ),
+        # An item links to at most the one receipt it came from, of its own
+        # source's type. (A receipt may be gone — the link is then null.)
+        CheckConstraint(
+            "(source_email_receipt_id IS NULL OR source = 'email')"
+            " AND (source_image_id IS NULL OR source = 'image')",
+            name="source_link_matches",
+        ),
         Index("ix_trip_items_trip_id_starts_at", "trip_id", "starts_at"),
     )
 
@@ -172,6 +205,12 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     # Booking reference / record locator for the whole item — a flight PNR, a
     # hotel confirmation number, etc. Null for items that aren't a booking.
     confirmation_number: Mapped[str | None] = mapped_column(String(120))
+    # The reference of whoever the item was booked through, when that's not the
+    # provider itself — a travel agent's or booking site's booking number. One
+    # booking can cover several items (an agent's three hotels: three items, each
+    # with its hotel's confirmation_number, all sharing this). Null for a direct
+    # booking, whose one reference is the confirmation_number.
+    booking_number: Mapped[str | None] = mapped_column(String(120))
     # The booking's overall transport mode, carried down from its legs (the
     # shared value, or `mixed`). Only set for transit items. Clients read this
     # for a one-glance type instead of inspecting the legs.
@@ -195,11 +234,35 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    # Where it came from, and for an import the receipt it was read from — so
+    # the user can check it against (or show staff) the original. Deleting
+    # the receipt keeps the item and clears the link.
+    source: Mapped[TripItemSource] = mapped_column(
+        str_enum(TripItemSource, "trip_item_source"),
+        default=TripItemSource.MANUAL,
+        server_default=TripItemSource.MANUAL.value,
+    )
+    source_email_receipt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("r_email_receipts.id", ondelete="SET NULL"), index=True
+    )
+    source_image_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("r_images.id", ondelete="SET NULL"), index=True
+    )
+    # The last time a person changed the booking itself — its kind, title,
+    # times, places, references, lodging details, rooms or legs — and who.
+    # Never set by an import, and not by changes to who's on it (or in which
+    # room), its visibility, requirement, notes or tags. On an imported item,
+    # set means "no longer exactly what the booking said".
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
     trip: Mapped[Trip] = relationship(back_populates="items")
     place: Mapped[Place | None] = relationship(foreign_keys=[place_id])
     end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_id])
+    edited_by: Mapped[User | None] = relationship(foreign_keys=[edited_by_id])
     participants: Mapped[list[TripItemParticipant]] = relationship(
         back_populates="item",
         cascade="all, delete-orphan",
@@ -218,6 +281,28 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         passive_deletes=True,
         order_by="TripItemTransitSegment.position",
     )
+    # A stay's details beyond its span and place. Only ever set on a lodging;
+    # optional even then (a stay entered by hand may have none).
+    lodging: Mapped[TripItemLodging | None] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
+    # A stay's rooms, in order, when someone has bothered to spell them out —
+    # optional, and empty for most stays (and for every other kind). Who sleeps
+    # where is each participant's `room_id`.
+    rooms: Mapped[list[TripItemLodgingRoom]] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TripItemLodgingRoom.position",
+    )
+
+    @property
+    def has_source(self) -> bool:
+        """Whether the original it was imported from can still be fetched."""
+        return self.source_email_receipt_id is not None or self.source_image_id is not None
 
     @property
     def display_title(self) -> str:
@@ -243,6 +328,20 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
     """
 
     __tablename__ = "trip_item_transit_segments"
+    # What a leg holds, for the code that copies or compares legs.
+    FIELDS = (
+        "position",
+        "starts_at",
+        "start_timezone",
+        "ends_at",
+        "end_timezone",
+        "place_id",
+        "end_place_id",
+        "carrier",
+        "flight_number",
+        "transit_mode",
+        "confirmation_number",
+    )
     __table_args__ = (
         *local_time_span_constraints(),
         # Deferred so replacing a booking's legs (delete old, insert new at the
@@ -286,6 +385,83 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
     end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
 
 
+class TripItemLodging(TimestampMixin, Base):
+    """The details of a stay that only a stay has, one row per lodging item
+    (keyed by it). The stay's check-in/check-out are the item's own span, the
+    property is the item's place, who's staying are its participants, and its
+    rooms (type, guests, who's in each) are the item's optional `rooms`; this
+    holds the rest. Every field is optional: a booking states what it states.
+    Imported values are the user's to edit — changing them changes the trip,
+    not the booking."""
+
+    __tablename__ = "trip_item_lodgings"
+    # The editable details, as sent and read through the API's `lodging`.
+    FIELDS = ("property_type", "phone", "free_cancellation_until")
+
+    trip_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    property_type: Mapped[LodgingType | None] = mapped_column(
+        str_enum(LodgingType, "lodging_type")
+    )
+    # As the booking names it, e.g. "Deluxe King, City View".
+    # The property's own number, as printed.
+    phone: Mapped[str | None] = mapped_column(String(40))
+    # Last moment the stay can be cancelled free of charge: a naive wall time
+    # read in the stay's check-in zone (the property's), like the item's times.
+    free_cancellation_until: Mapped[datetime | None] = mapped_column(LocalDateTime)
+
+    item: Mapped[TripItem] = relationship(back_populates="lodging")
+
+
+class TripItemLodgingRoom(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One room of a stay, for a booking that spells its rooms out (or someone
+    who wants to say who sleeps where). Entirely optional: a stay with no rows
+    here is just a stay. Every field is optional too — "Room 1" with nothing
+    else is fine. The people in it are the stay's participants whose `room_id`
+    points here; the database keeps that pointer within the same stay."""
+
+    __tablename__ = "trip_item_lodging_rooms"
+    # The editable fields of a room, as sent and read through the API's `rooms`.
+    FIELDS = ("label", "room_number", "room_type", "guests", "confirmation_number")
+    __table_args__ = (
+        # Deferred so reordering rooms doesn't trip it mid-flush.
+        UniqueConstraint(
+            "trip_item_id",
+            "position",
+            name="uq_lodging_room_position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        # The target of the participants' (item_id, room_id) foreign key, which
+        # is what keeps a participant's room on their own stay.
+        UniqueConstraint("trip_item_id", "id", name="uq_lodging_room_item"),
+        CheckConstraint("guests IS NULL OR guests >= 1", name="guests_positive"),
+    )
+
+    trip_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_items.id", ondelete="CASCADE")
+    )
+    # 0-based order of the room within the stay.
+    position: Mapped[int] = mapped_column(SmallInteger)
+    # What to call it, e.g. "Room 1" or "Kids' room". Null: the client numbers it.
+    label: Mapped[str | None] = mapped_column(String(60))
+    # The property's number for it, often only known at check-in.
+    room_number: Mapped[str | None] = mapped_column(String(40))
+    room_type: Mapped[str | None] = mapped_column(String(200))
+    guests: Mapped[int | None] = mapped_column(SmallInteger)
+    # A reference for this room alone, when it's booked separately from the
+    # stay's own confirmation_number. Usually null.
+    confirmation_number: Mapped[str | None] = mapped_column(String(120))
+
+    item: Mapped[TripItem] = relationship(back_populates="rooms")
+
+    @property
+    def occupant_ids(self) -> list[uuid.UUID]:
+        """The trip-member ids of the stay's participants in this room."""
+        return [p.member_id for p in self.item.participants if p.room_id == self.id]
+
+
 register_instant_sync(TripItem, TripItemTransitSegment)
 
 
@@ -299,6 +475,17 @@ class TripItemParticipant(TimestampMixin, Base):
     """
 
     __tablename__ = "trip_item_participants"
+    __table_args__ = (
+        # A participant's room must be a room of the same stay. Deferred so a
+        # rooms edit can reassign people and add/remove rooms in any order;
+        # a null room_id satisfies it (MATCH SIMPLE).
+        ForeignKeyConstraint(
+            ["item_id", "room_id"],
+            ["trip_item_lodging_rooms.trip_item_id", "trip_item_lodging_rooms.id"],
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
 
     item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
@@ -307,6 +494,15 @@ class TripItemParticipant(TimestampMixin, Base):
         ForeignKey("trip_members.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     status: Mapped[RsvpStatus | None] = mapped_column(str_enum(RsvpStatus, "rsvp_status"))
+    # Which of the stay's rooms they're in, if anyone has said. Lodging only.
+    # Deleting the room just unassigns them (they stay on the stay).
+    room_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trip_item_lodging_rooms.id", ondelete="SET NULL"), index=True
+    )
 
     item: Mapped[TripItem] = relationship(back_populates="participants")
     member: Mapped[TripMember] = relationship()
+    room: Mapped[TripItemLodgingRoom | None] = relationship(
+        primaryjoin="TripItemParticipant.room_id == TripItemLodgingRoom.id",
+        foreign_keys=[room_id],
+    )

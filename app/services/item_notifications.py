@@ -31,6 +31,7 @@ from app.models import (
     TripMember,
     User,
 )
+from app.services.item_edits import legs_state, lodging_state, rooms_state
 from app.services.notifications import notify, trip_audience
 
 # How each change reads in a list, in the order they're listed.
@@ -82,22 +83,6 @@ class ItemSnapshot:
 
     @classmethod
     def of(cls, item: TripItem) -> "ItemSnapshot":
-        legs = tuple(
-            (
-                leg.position,
-                leg.starts_at,
-                leg.ends_at,
-                leg.start_timezone,
-                leg.end_timezone,
-                leg.place_id,
-                leg.end_place_id,
-                leg.carrier,
-                leg.flight_number,
-                leg.transit_mode,
-                leg.confirmation_number,
-            )
-            for leg in item.transit_segments
-        )
         return cls(
             title=item.title,
             time=(item.starts_at, item.ends_at, item.start_timezone, item.end_timezone),
@@ -109,10 +94,14 @@ class ItemSnapshot:
                 item.visibility,
                 item.requirement,
                 item.confirmation_number,
+                item.booking_number,
                 item.transit_mode,
                 tuple(item.tags),
                 item.image_url,
-                legs,
+                legs_state(item),
+                lodging_state(item),
+                # Moving people between rooms is news, so occupants count here.
+                rooms_state(item, occupants=True),
             ),
             place_name=item.place.name if item.place is not None else None,
             kind=item.kind,

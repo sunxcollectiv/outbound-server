@@ -2,11 +2,13 @@ import uuid
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.models import (
     Place,
     TripItem,
+    TripItemLodging,
     TripItemParticipant,
     TripItemTransitSegment,
 )
@@ -286,8 +288,8 @@ def test_clearing_ends_at_clears_its_timezone(client, make_user, admin, make_tri
     item = client.post(
         url,
         json={
-            "kind": "lodging",
-            "title": "Hotel",
+            "kind": "activity",
+            "title": "Retreat",
             "starts_at": "2026-04-09T15:00:00",
             "start_timezone": "Asia/Tokyo",
             "ends_at": "2026-04-11T11:00:00",
@@ -888,3 +890,159 @@ def test_an_item_goes_by_its_title_or_its_place(client, make_user, admin, make_t
     dropped = client.patch(item_url, json={"title": None, "place_id": ramen["id"]}, headers=sun)
     assert dropped.status_code == 200, dropped.text
     assert (dropped.json()["title"], dropped.json()["display_title"]) == (None, "Ichiran Shibuya")
+
+
+def test_lodging_details_round_trip(client, make_user, admin, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    stay = {
+        "kind": "lodging",
+        "title": "Hotel",
+        "starts_at": "2026-04-10T15:00:00",
+        "start_timezone": "Asia/Tokyo",
+        "ends_at": "2026-04-12T11:00:00",
+        "lodging": {
+            "property_type": "hotel",
+            "phone": "+81 3-0000-0000",
+            # Aware: converted into the stay's zone (06:00Z is 15:00 in Tokyo).
+            "free_cancellation_until": "2026-04-08T06:00:00Z",
+        },
+    }
+    stay["confirmation_number"] = "PH-55120"
+    stay["booking_number"] = "JTB-778201"
+    created = client.post(url, json=stay, headers=sun)
+    assert created.status_code == 201, created.text
+    item = created.json()
+    assert (item["confirmation_number"], item["booking_number"]) == ("PH-55120", "JTB-778201")
+    assert item["lodging"] == {
+        "property_type": "hotel",
+        "phone": "+81 3-0000-0000",
+        "free_cancellation_until": "2026-04-08T15:00:00",
+    }
+    item_url = f"{url}/{item['id']}"
+    assert client.get(item_url, headers=sun).json()["lodging"] == item["lodging"]
+
+    # Other edits leave the details alone.
+    renamed = client.patch(item_url, json={"title": "The Hotel"}, headers=sun).json()
+    assert renamed["lodging"] == item["lodging"]
+
+    # Sending details replaces them whole; fields left out are cleared.
+    replaced = client.patch(item_url, json={"lodging": {"phone": "+81 3-1111-1111"}}, headers=sun)
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["lodging"] == {
+        "property_type": None,
+        "phone": "+81 3-1111-1111",
+        "free_cancellation_until": None,
+    }
+
+    # null drops them.
+    cleared = client.patch(item_url, json={"lodging": None}, headers=sun).json()
+    assert cleared["lodging"] is None
+
+    # Back again, then turning the stay into an activity drops them too.
+    client.patch(item_url, json={"lodging": {"property_type": "hostel"}}, headers=sun)
+    moved = client.patch(item_url, json={"kind": "activity"}, headers=sun).json()
+    assert moved["lodging"] is None
+    session.expire_all()
+    assert session.get(TripItemLodging, uuid.UUID(item["id"])) is None
+
+
+def test_lodging_details_validation(client, make_user, admin, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    base = {"title": "x", "starts_at": "2026-04-10T15:00:00", "ends_at": "2026-04-11T11:00:00"}
+
+    # Only stays have them.
+    assert client.post(
+        url, json={**base, "kind": "activity", "lodging": {"property_type": "hotel"}}, headers=sun
+    ).status_code == 422
+    activity = client.post(url, json={**base, "kind": "activity"}, headers=sun).json()
+    assert client.patch(
+        f"{url}/{activity['id']}", json={"lodging": {"property_type": "hotel"}}, headers=sun
+    ).status_code == 422
+    # ...but becoming a stay and gaining them in one edit is fine.
+    became = client.patch(
+        f"{url}/{activity['id']}",
+        json={"kind": "lodging", "lodging": {"property_type": "hotel"}},
+        headers=sun,
+    )
+    assert became.status_code == 200 and became.json()["lodging"]["property_type"] == "hotel"
+
+    # Room types and guests live on the rooms now, not the stay.
+    for bad in ({"guests": 2}, {"room_type": "King"}, {"property_type": "castle"}, {"nope": 1}):
+        assert client.post(
+            url, json={**base, "kind": "lodging", "lodging": bad}, headers=sun
+        ).status_code == 422, bad
+
+    # An aware deadline on a floating stay has no zone to be read in.
+    floating = client.post(
+        url,
+        json={**base, "kind": "lodging", "lodging": {"free_cancellation_until": "2026-04-08T06:00:00Z"}},
+        headers=sun,
+    )
+    assert floating.status_code == 422
+
+    # Deleting the stay takes its details with it.
+    stay = client.post(
+        url, json={**base, "kind": "lodging", "lodging": {"phone": "+1 555"}}, headers=sun
+    ).json()
+    assert client.delete(f"{url}/{stay['id']}", headers=sun).status_code == 204
+    session.expire_all()
+    assert session.get(TripItemLodging, uuid.UUID(stay["id"])) is None
+
+
+def test_a_stay_checks_out_on_a_later_date(client, make_user, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    stay = {"kind": "lodging", "title": "Hotel", "starts_at": "2026-04-10T15:00:00"}
+
+    # A check-out is required.
+    response = client.post(url, json=stay, headers=sun)
+    assert response.status_code == 422 and "needs a check-out" in response.text
+    # Same day, even later that day: invalid.
+    response = client.post(url, json={**stay, "ends_at": "2026-04-10T23:00:00"}, headers=sun)
+    assert response.status_code == 422 and "later date" in response.text
+    # Earlier is already refused as out of order.
+    for ends_at in ("2026-04-10T11:00:00", "2026-04-09T11:00:00"):
+        assert client.post(url, json={**stay, "ends_at": ends_at}, headers=sun).status_code == 422
+    # The next day, whatever the time: fine — one night.
+    item = client.post(url, json={**stay, "ends_at": "2026-04-11T09:00:00"}, headers=sun)
+    assert item.status_code == 201, item.text
+    item = item.json()
+
+    # Edits are held to it too: no dropping the check-out, no same-day one,
+    # and no turning a same-day or open-ended item into a stay.
+    assert client.patch(
+        f"{url}/{item['id']}", json={"ends_at": None}, headers=sun
+    ).status_code == 422
+    assert client.patch(
+        f"{url}/{item['id']}", json={"ends_at": "2026-04-10T18:00:00"}, headers=sun
+    ).status_code == 422
+    open_ended = client.post(
+        url, json={"kind": "activity", "title": "Spa", "starts_at": "2026-04-10T15:00:00"},
+        headers=sun,
+    ).json()
+    assert client.patch(
+        f"{url}/{open_ended['id']}", json={"kind": "lodging"}, headers=sun
+    ).status_code == 422
+    activity = client.post(
+        url,
+        json={"kind": "activity", "title": "Spa", "starts_at": "2026-04-10T15:00:00",
+              "ends_at": "2026-04-10T18:00:00"},
+        headers=sun,
+    ).json()
+    assert client.patch(
+        f"{url}/{activity['id']}", json={"kind": "lodging"}, headers=sun
+    ).status_code == 422
+
+    # And the database itself refuses either.
+    for change in ("ends_at = starts_at + interval '1 hour'", "ends_at = NULL, end_timezone = NULL"):
+        nested = session.begin_nested()
+        with pytest.raises(IntegrityError):
+            session.execute(
+                text(f"UPDATE trip_items SET {change} WHERE id = :id"), {"id": item["id"]}
+            )
+        nested.rollback()

@@ -12,12 +12,19 @@ The trip is auto-matched by date overlap (dates-only for MVP): a unique
 overlapping member-trip is used; zero or several leaves the receipt ``extracted``
 with a ``no_match``/``ambiguous`` outcome (we never guess a placement). Creating a
 new trip is out of scope.
+
+Lodging: a stay whose confirmation gives only the check-in/check-out *dates*
+gets the conventional times — check-in 15:00, check-out 11:00 — rather than
+midnight; one with no check-out (or a same-day one) is assumed to be one
+night; its details (property type, phone, cancellation deadline) are
+cleaned up onto the item's lodging row, and what it says about rooms becomes
+the item's rooms (see `_rooms`). It's all the user's to edit afterwards.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -28,7 +35,10 @@ from app.models import (
     EmailReceipt,
     EmailReceiptStatus,
     ImageReceipt,
+    LodgingType,
     Trip,
+    TripItem,
+    TripItemSource,
     TripMember,
     User,
 )
@@ -54,13 +64,24 @@ class ImportOutcome:
     candidate_trip_ids: list[Any] = field(default_factory=list)
 
 
-def _as_datetime(local: Any) -> datetime | None:
+# What a stay's ends default to when the booking states only the dates.
+CHECK_IN_TIME = time(15, 0)
+CHECK_OUT_TIME = time(11, 0)
+
+
+def _as_datetime(local: Any, *, date_only_at: time = time(0)) -> datetime | None:
+    """Parse an extracted local time. A bare date ("2026-04-10") is taken at
+    `date_only_at` on that day."""
     if not isinstance(local, str):
         return None
+    local = local.strip()
     try:
-        return datetime.fromisoformat(local)
+        parsed = datetime.fromisoformat(local)
     except ValueError:
         return None
+    if "T" not in local and " " not in local:  # a bare date
+        return datetime.combine(parsed.date(), date_only_at)
+    return parsed
 
 
 def _as_date(local: Any) -> date | None:
@@ -102,13 +123,84 @@ def _match_trip(
     return (candidates[0] if len(candidates) == 1 else None), candidates
 
 
-def _ends(part: dict[str, Any]) -> dict[str, Any]:
+def _ends(
+    part: dict[str, Any], *, start_default: time = time(0), end_default: time = time(0)
+) -> dict[str, Any]:
+    """The part's two ends; a date-only end is taken at the given default."""
     return {
-        "starts_at": _as_datetime(part.get("start_local")),
+        "starts_at": _as_datetime(part.get("start_local"), date_only_at=start_default),
         "start_timezone": part.get("start_timezone"),
-        "ends_at": _as_datetime(part.get("end_local")),
+        "ends_at": _as_datetime(part.get("end_local"), date_only_at=end_default),
         "end_timezone": part.get("end_timezone"),
     }
+
+
+def _text(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.strip()[:limit] or None
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and 1 <= value <= 999 else None
+
+
+def _lodging_details(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Clean an extracted stay's details into a `LodgingDetails` payload, or
+    None when nothing usable was stated. Lenient: an unknown property type
+    becomes `other` — an odd value loses that field, never the booking. A
+    date-only cancellation deadline is taken at the start of that day, the
+    cautious reading of "free cancellation until <date>"."""
+    if not raw:
+        return None
+    kind = _text(raw.get("property_type"), 32)
+    known = {t.value for t in LodgingType}
+    details = {
+        "property_type": (kind if kind in known else LodgingType.OTHER.value) if kind else None,
+        "phone": _text(raw.get("phone"), 40),
+        "free_cancellation_until": _as_datetime(raw.get("free_cancellation_until")),
+    }
+    return details if any(v is not None for v in details.values()) else None
+
+
+# A booking "for 30 rooms" is a group block, not something to lay out room by room.
+MAX_SUMMARY_ROOMS = 20
+
+
+def _rooms(raw: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """An extracted stay's rooms as `rooms` payload entries, or None when the
+    booking says nothing about rooms. Itemized rooms are taken as listed;
+    otherwise the booking's summary — room count, room type, guests — becomes
+    that many rooms of that type (the guest count only when it's one room,
+    since a total can't be split). Nobody is put in a room: guests are printed
+    by name and members are known by email, so people are placed by hand."""
+    raw = raw or {}
+    listed = raw.get("rooms")
+    if isinstance(listed, list) and listed:
+        rooms = [
+            {
+                "label": _text(room.get("label"), 60),
+                "room_number": _text(room.get("room_number"), 40),
+                "room_type": _text(room.get("room_type"), 200),
+                "guests": _count(room.get("guests")),
+                "confirmation_number": _text(room.get("confirmation_number"), 120),
+            }
+            for room in listed[:50]
+            if isinstance(room, dict)
+        ]
+        return rooms or None
+
+    count = _count(raw.get("room_count"))
+    room_type, guests = _text(raw.get("room_type"), 200), _count(raw.get("guests"))
+    if count is None and room_type is None and guests is None:
+        return None
+    count = count or 1
+    if count > MAX_SUMMARY_ROOMS:
+        return None
+    return [
+        {"room_type": room_type, "guests": guests if count == 1 else None}
+        for _ in range(count)
+    ]
 
 
 def _item_payload(
@@ -124,7 +216,8 @@ def _item_payload(
     values: dict[str, Any] = {
         "kind": kind,
         "title": (item.get("title") or "Booking")[:200],
-        "confirmation_number": item.get("confirmation_number"),
+        "confirmation_number": _text(item.get("confirmation_number"), 120),
+        "booking_number": _text(item.get("booking_number"), 120),
     }
     segments = item.get("segments") or []
     if kind == "transit" and segments:
@@ -140,6 +233,21 @@ def _item_payload(
             }
             for seg in segments
         ]
+    elif kind == "lodging":
+        values.update(_ends(item, start_default=CHECK_IN_TIME, end_default=CHECK_OUT_TIME))
+        # A stay always checks out on a later date than it checks in. With no
+        # check-out stated, or a same-day (or earlier) one — a misread, or a
+        # day-use booking we don't model — assume one night, check-out 11:00
+        # the next day, for the user to correct, rather than failing the
+        # whole import.
+        start, end = values["starts_at"], values["ends_at"]
+        if start is not None and (end is None or end.date() <= start.date()):
+            values["ends_at"] = datetime.combine(start.date() + timedelta(days=1), CHECK_OUT_TIME)
+            values["end_timezone"] = values["start_timezone"]
+        # A stay is at one property: the check-out end has no place of its own.
+        values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
+        values["lodging"] = _lodging_details(item.get("lodging"))
+        values["rooms"] = _rooms(item.get("lodging"))
     else:
         values.update(_ends(item))
         values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
@@ -147,6 +255,15 @@ def _item_payload(
         if kind == "transit":
             values["transit_mode"] = item.get("transit_mode")
     return TripItemCreate(**values)
+
+
+def _link_source(item: TripItem, receipt: Receipt) -> None:
+    """Mark an imported item with where it came from, linking the receipt so
+    its participants can pull up the original."""
+    if isinstance(receipt, EmailReceipt):
+        item.source, item.source_email_receipt_id = TripItemSource.EMAIL, receipt.id
+    else:
+        item.source, item.source_image_id = TripItemSource.IMAGE, receipt.id
 
 
 def import_receipt(session: Session, receipt: Receipt) -> ImportOutcome:
@@ -168,7 +285,7 @@ def import_receipt(session: Session, receipt: Receipt) -> ImportOutcome:
     count = 0
     for item in extraction.get("items") or []:
         payload = _item_payload(session, item, user_id=receipt.user_id, cache=cache)
-        build_trip_item(session, trip, user, payload)
+        _link_source(build_trip_item(session, trip, user, payload), receipt)
         count += 1
 
     receipt.status = EmailReceiptStatus.PROCESSED

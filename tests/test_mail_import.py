@@ -5,6 +5,7 @@ from app.services.mail_extraction import (
     ExtractedItem,
     ExtractedLodging,
     ExtractedPlace,
+    ExtractedRoom,
     ExtractedSegment,
     Extraction,
 )
@@ -148,7 +149,7 @@ def test_import_lodging_stores_stay_details(client, make_user, admin, make_trip,
     sun = make_user("sun")
     trip = make_trip(sun)
     details = ExtractedLodging(
-        property_type="hotel", room_type="Deluxe Twin", guests=3, rooms=2,
+        property_type="hotel", room_type="Deluxe Twin", guests=3, room_count=2,
         phone="+81 75-000-0000", free_cancellation_until="2026-04-08T23:59",
     )
     _make_extracted(client, admin, resend, mail_extractor, "re_l1", "sun@example.com",
@@ -161,9 +162,15 @@ def test_import_lodging_stores_stay_details(client, make_user, admin, make_trip,
     assert (item["starts_at"], item["ends_at"]) == ("2026-04-10T16:00:00", "2026-04-12T10:30:00")
     assert item["place"]["name"] == "Kyoto Ryokan" and item["end_place"] is None
     assert item["lodging"] == {
-        "property_type": "hotel", "room_type": "Deluxe Twin", "guests": 3, "rooms": 2,
-        "phone": "+81 75-000-0000", "free_cancellation_until": "2026-04-08T23:59:00",
+        "property_type": "hotel", "phone": "+81 75-000-0000",
+        "free_cancellation_until": "2026-04-08T23:59:00",
     }
+    # "2 Deluxe Twin rooms, 3 guests": two rooms of that type. A total of 3
+    # can't be split between them, so the rooms carry no guest count.
+    assert [(r["position"], r["room_type"], r["guests"], r["occupants"]) for r in item["rooms"]] == [
+        (0, "Deluxe Twin", None, []),
+        (1, "Deluxe Twin", None, []),
+    ]
 
 
 def test_import_date_only_lodging_gets_default_check_in_and_out(
@@ -201,19 +208,43 @@ def test_import_lodging_details_are_cleaned_not_fatal(
 ):
     sun = make_user("sun")
     trip = make_trip(sun)
-    # An unknown type becomes `other`, a nonsense count is dropped, a date-only
-    # deadline is read as the start of that day.
-    details = ExtractedLodging(property_type="capsule", guests=0, rooms=1, room_type="  ",
+    # An unknown type becomes `other`, a nonsense count is dropped, a blank
+    # room type is no type, a date-only deadline is read as the start of that day.
+    details = ExtractedLodging(property_type="capsule", guests=0, room_count=1, room_type="  ",
                                free_cancellation_until="2026-04-08")
     _make_extracted(client, admin, resend, mail_extractor, "re_l4", "sun@example.com",
                     _stay("2026-04-10", "2026-04-12", details))
 
     assert client.post("/admin/received/mail/import/re_l4", headers=admin).json()["outcome"] == "placed"
-    stay = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["lodging"]
-    assert stay == {
-        "property_type": "other", "room_type": None, "guests": None, "rooms": 1,
-        "phone": None, "free_cancellation_until": "2026-04-08T00:00:00",
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["lodging"] == {
+        "property_type": "other", "phone": None, "free_cancellation_until": "2026-04-08T00:00:00",
     }
+    assert [(r["room_type"], r["guests"]) for r in item["rooms"]] == [(None, None)]
+
+
+def test_import_a_single_room_keeps_its_type_and_guests(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_l6", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-12", ExtractedLodging(room_type="King", guests=2)))
+    client.post("/admin/received/mail/import/re_l6", headers=admin)
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["lodging"] is None  # nothing left for the details row
+    assert [(r["room_type"], r["guests"]) for r in item["rooms"]] == [("King", 2)]
+
+
+def test_import_a_group_block_is_not_laid_out_room_by_room(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_l7", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-12", ExtractedLodging(room_count=30)))
+    client.post("/admin/received/mail/import/re_l7", headers=admin)
+    assert client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["rooms"] == []
 
 
 def _agent_stay(title, confirmation, start, end):
@@ -258,9 +289,52 @@ def test_import_agent_itinerary_splits_into_one_item_per_stay(
     assert len({i["id"] for i in items}) == len({i["place"]["id"] for i in items}) == 3
 
 
+def test_import_itemized_rooms_arrive_with_nobody_in_them(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    details = ExtractedLodging(property_type="hotel", room_count=2, rooms=[
+        ExtractedRoom(label="Room 1", room_type="Twin", guests=2),
+        ExtractedRoom(label="Room 2", room_type="King", guests=1, confirmation_number="R2"),
+    ])
+    _make_extracted(client, admin, resend, mail_extractor, "re_r1", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-12", details))
+
+    assert client.post("/admin/received/mail/import/re_r1", headers=admin).json()["outcome"] == "placed"
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    # Itemized rooms win over the summary count.
+    assert [(r["label"], r["room_type"], r["guests"], r["confirmation_number"], r["occupants"])
+            for r in item["rooms"]] == [
+        ("Room 1", "Twin", 2, None, []),
+        ("Room 2", "King", 1, "R2", []),
+    ]
+    # The importer is a participant, in no room: people are placed by hand.
+    assert [p["room_id"] for p in item["participants"]] == [None]
+
+
+def test_import_reads_an_older_extraction_room_count(
+    client, make_user, admin, make_trip, resend, mail_extractor, session
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_r2", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-12", ExtractedLodging(guests=2)))
+    # Stored before the rename: the count sat in "rooms".
+    receipt = _receipt(session, "re_r2")
+    extracted = dict(receipt.extracted)
+    extracted["items"] = [{**extracted["items"][0], "lodging": {"room_type": "Twin", "rooms": 3}}]
+    receipt.extracted = extracted
+    session.flush()
+
+    client.post("/admin/received/mail/import/re_r2", headers=admin)
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert [r["room_type"] for r in item["rooms"]] == ["Twin", "Twin", "Twin"]
+
+
 def test_extracted_lodging_tolerates_wordy_counts():
     parsed = ExtractedLodging.model_validate({"guests": "2 adults", "rooms": "1"})
-    assert (parsed.guests, parsed.rooms) == (None, 1)
+    assert (parsed.guests, parsed.room_count) == (None, 1)
 
 
 def test_import_no_matching_trip_stays_extracted(client, make_user, admin, resend, mail_extractor, session):

@@ -21,6 +21,7 @@ from app.services.extraction import (  # noqa: F401 — re-exported for callers/
     ExtractedItem,
     ExtractedLodging,
     ExtractedPlace,
+    ExtractedRoom,
     ExtractedSegment,
     Extraction,
     ExtractionError,

@@ -14,12 +14,14 @@ from app.models import (
     TripItem,
     TripItemKind,
     TripItemLodging,
+    TripItemLodgingRoom,
     TripItemParticipant,
     TripItemTransitSegment,
     TripMember,
     User,
 )
 from app.schemas import (
+    LodgingRoomSet,
     ParticipantSet,
     RsvpUpdate,
     TripItemCreate,
@@ -64,6 +66,7 @@ def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]
         selectinload(TripItem.end_place).selectinload(Place.area),
         selectinload(TripItem.created_by),
         selectinload(TripItem.lodging),
+        selectinload(TripItem.rooms),
         selectinload(TripItem.participants)
         .selectinload(TripItemParticipant.member)
         .selectinload(TripMember.user),
@@ -208,14 +211,7 @@ def _apply_span(values: dict[str, Any], segments: list[TripItemTransitSegment]) 
     values["transit_mode"] = modes.pop() if len(modes) == 1 else (TransitMode.MIXED if modes else None)
 
 
-LODGING_FIELDS = (
-    "property_type",
-    "room_type",
-    "guests",
-    "rooms",
-    "phone",
-    "free_cancellation_until",
-)
+LODGING_FIELDS = ("property_type", "phone", "free_cancellation_until")
 
 
 def _set_lodging(item: TripItem, details: dict[str, Any] | None, start_tz: str | None) -> None:
@@ -237,6 +233,60 @@ def _set_lodging(item: TripItem, details: dict[str, Any] | None, start_tz: str |
     for field in LODGING_FIELDS:
         setattr(row, field, details.get(field))
     item.lodging = row
+
+
+ROOM_FIELDS = ("label", "room_number", "room_type", "guests", "confirmation_number")
+
+
+def _set_rooms(
+    session: Session, trip: Trip, item: TripItem, rooms: list[LodgingRoomSet]
+) -> None:
+    """Make `rooms` the stay's rooms, in order, and put each listed occupant in
+    their room: rooms sent with an id are kept (and updated), new ones made,
+    unlisted ones dropped. Occupants not yet participants become participants;
+    every other participant ends up in no room. Call after any participants
+    edit, so it has the last word on who's where."""
+    existing = {room.id: room for room in item.rooms}
+    unknown = [str(room.id) for room in rooms if room.id is not None and room.id not in existing]
+    if unknown:
+        raise _unprocessable(f"Not a room of this stay: {', '.join(unknown)}")
+    known = set(session.scalars(select(TripMember.id).where(TripMember.trip_id == trip.id)))
+    strangers = {str(m) for room in rooms for m in room.occupants if m not in known}
+    if strangers:
+        raise _unprocessable(f"Not on this trip: {', '.join(sorted(strangers))}")
+
+    kept: list[TripItemLodgingRoom] = []
+    room_of: dict[uuid.UUID, TripItemLodgingRoom] = {}
+    for position, entry in enumerate(rooms):
+        # A new room gets its id now, so assignments can point at it pre-flush.
+        row = existing[entry.id] if entry.id is not None else TripItemLodgingRoom(id=uuid.uuid4())
+        row.position = position
+        for field in ROOM_FIELDS:
+            setattr(row, field, getattr(entry, field))
+        kept.append(row)
+        room_of.update({member_id: row for member_id in entry.occupants})
+    item.rooms = kept
+
+    on_item = {row.member_id for row in item.participants}
+    for member_id in room_of.keys() - on_item:
+        item.participants.append(TripItemParticipant(member_id=member_id))
+    for row in item.participants:
+        _assign(row, room_of.get(row.member_id))
+
+
+def _clear_rooms(item: TripItem) -> None:
+    """Drop a stay's rooms and everyone's place in them."""
+    if item.rooms:
+        item.rooms = []
+    for row in item.participants:
+        _assign(row, None)
+
+
+def _assign(row: TripItemParticipant, room: TripItemLodgingRoom | None) -> None:
+    # Only touch rows whose room actually changes, so an edit doesn't bump
+    # every participant's updated_at.
+    if row.room_id != (room.id if room is not None else None):
+        row.room = room
 
 
 def _get_item(
@@ -309,6 +359,7 @@ def build_trip_item(
     values = payload.model_dump()
     segments_payload = values.pop("segments", None)
     lodging_payload = values.pop("lodging", None)
+    values.pop("rooms", None)
     del values["participants"]
     del values["notify_members"]
     if payload.kind is TripItemKind.TRANSIT:
@@ -327,6 +378,8 @@ def build_trip_item(
         _set_participants(session, trip, item, payload.participants)
     else:
         item.participants.append(TripItemParticipant(member_id=viewer(session, trip, user).id))
+    if payload.rooms:
+        _set_rooms(session, trip, item, payload.rooms)
     session.add(item)
     return item
 
@@ -371,6 +424,8 @@ def update_item(
     segments_payload = changes.pop("segments", None)
     lodging_sent = "lodging" in changes
     lodging_payload = changes.pop("lodging", None)
+    rooms_sent = "rooms" in changes
+    changes.pop("rooms", None)
     changes.pop("participants", None)
     changes.pop("notify_members", None)
     for field in NOT_NULLABLE:
@@ -383,6 +438,8 @@ def update_item(
     now_lodging = resulting_kind is TripItemKind.LODGING
     if lodging_payload is not None and not now_lodging:
         raise _unprocessable("only lodging items have lodging details")
+    if payload.rooms and not now_lodging:
+        raise _unprocessable("only lodging items have rooms")
     span_edited = any(field in changes for field in SPAN_FIELDS)
 
     if segments_payload is not None:
@@ -431,6 +488,13 @@ def update_item(
         setattr(item, field, value)
     if payload.participants is not None:
         _set_participants(session, trip, item, payload.participants)
+    if not now_lodging:  # leaving lodging drops the rooms too
+        _clear_rooms(item)
+    elif rooms_sent:
+        if payload.rooms:
+            _set_rooms(session, trip, item, payload.rooms)
+        else:
+            _clear_rooms(item)
     if before is not None:
         notify_item_updated(session, trip, item, user, before)
     session.commit()

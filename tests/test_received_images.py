@@ -337,7 +337,8 @@ def test_process_imports_a_lodging_screenshot(client, make_user, make_trip, imag
     item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
     assert (item["starts_at"], item["ends_at"]) == ("2026-04-11T15:00:00", "2026-04-14T11:00:00")
     assert item["lodging"]["property_type"] == "vacation_rental"
-    assert item["lodging"]["guests"] == 4
+    # "4 guests" in one unit: one room holding the count, nobody placed yet.
+    assert [(r["guests"], r["occupants"]) for r in item["rooms"]] == [(4, [])]
 
 
 def test_process_not_a_booking_never_imports(client, make_user, make_trip, image_extractor):

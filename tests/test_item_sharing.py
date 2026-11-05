@@ -236,9 +236,9 @@ def test_closed_lodging_hides_its_stay_details(client, wedding):
         title="Hotel",
         visibility="closed",
         booking_number="AGENCY-1",
-        lodging={"room_type": "Suite", "guests": 2, "phone": "+1 555 0100"},
+        lodging={"phone": "+1 555 0100"},
     )
-    assert stay["lodging"]["room_type"] == "Suite"
+    assert stay["lodging"]["phone"] == "+1 555 0100"
     [seen] = client.get(f"{url}/items", headers=amy).json()
     assert seen["redacted"] is True and seen["lodging"] is None
     assert seen["booking_number"] is None

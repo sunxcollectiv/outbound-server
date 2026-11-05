@@ -484,20 +484,59 @@ class TransitSegmentCreate(BaseModel):
 
 
 class LodgingDetails(BaseModel):
-    """A stay's details beyond its check-in/check-out (the item's times) and
-    property (the item's place). Lodging items only; every field optional. On a
-    PATCH the object replaces the stored details whole, and null clears them."""
+    """A stay's details beyond its check-in/check-out (the item's times),
+    property (the item's place), people (its participants) and rooms (its
+    optional `rooms`). Lodging items only; every field optional. On a PATCH the
+    object replaces the stored details whole, and null clears them."""
 
     model_config = ConfigDict(extra="forbid")
 
     property_type: LodgingType | None = None
-    room_type: str | None = Field(default=None, min_length=1, max_length=200)
-    guests: int | None = Field(default=None, ge=1, le=999)
-    rooms: int | None = Field(default=None, ge=1, le=999)
     phone: str | None = Field(default=None, min_length=1, max_length=40)
     # Wall time at the property (the stay's check-in zone). An aware value is
     # converted into that zone, so it needs the stay to have one.
     free_cancellation_until: datetime | None = None
+
+
+def _unique_occupants(occupants: list[uuid.UUID]) -> list[uuid.UUID]:
+    if len(set(occupants)) != len(occupants):
+        raise ValueError("each member may appear only once")
+    return occupants
+
+
+class LodgingRoomSet(BaseModel):
+    """One room of a stay, as sent. Send `id` to keep an existing room (its
+    assignments are rewritten from `occupants` either way); leave it out for a
+    new one. Every field is optional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=60)
+    room_number: str | None = Field(default=None, min_length=1, max_length=40)
+    room_type: str | None = Field(default=None, min_length=1, max_length=200)
+    guests: int | None = Field(default=None, ge=1, le=999)
+    confirmation_number: str | None = Field(default=None, min_length=1, max_length=120)
+    # Trip-member ids of who's in it. Anyone listed who isn't a participant
+    # yet becomes one. A member can be in only one room of a stay.
+    occupants: Annotated[list[uuid.UUID], AfterValidator(_unique_occupants)] = Field(
+        default_factory=list
+    )
+
+
+def _rooms_consistent(rooms: list[LodgingRoomSet] | None) -> list[LodgingRoomSet] | None:
+    if rooms is None:
+        return rooms
+    ids = [room.id for room in rooms if room.id is not None]
+    if len(set(ids)) != len(ids):
+        raise ValueError("each room may appear only once")
+    members = [member for room in rooms for member in room.occupants]
+    if len(set(members)) != len(members):
+        raise ValueError("a member can be in only one room")
+    return rooms
+
+
+RoomsIn = Annotated[list[LodgingRoomSet], Field(max_length=50), AfterValidator(_rooms_consistent)]
 
 
 class TripItemCreate(BaseModel):
@@ -537,6 +576,8 @@ class TripItemCreate(BaseModel):
     segments: list[TransitSegmentCreate] | None = None
     # Lodging only: the stay's room, guests, cancellation deadline, etc.
     lodging: LodgingDetails | None = None
+    # Lodging only, optional: the rooms one by one and who's in each.
+    rooms: RoomsIn | None = None
     # Who the item is for, by trip member. Nobody is implied: an item for the
     # whole trip lists every member. Omit to make it just for the creator.
     participants: ParticipantsIn | None = None
@@ -553,6 +594,10 @@ class TripItemCreate(BaseModel):
             raise ValueError("only transit items have a transit_mode")
         if self.lodging is not None and self.kind is not TripItemKind.LODGING:
             raise ValueError("only lodging items have lodging details")
+        if self.rooms and self.kind is not TripItemKind.LODGING:
+            raise ValueError("only lodging items have rooms")
+        if self.rooms and any(room.id is not None for room in self.rooms):
+            raise ValueError("a new item's rooms are new: leave out their ids")
         if self.segments is not None:
             if self.kind is not TripItemKind.TRANSIT:
                 raise ValueError("only transit items have segments")
@@ -609,6 +654,11 @@ class TripItemUpdate(BaseModel):
     # Replaces the stay's details when present (null clears them); only valid
     # on a lodging item. Changing the kind away from lodging drops them.
     lodging: LodgingDetails | None = None
+    # Replaces the stay's rooms and who's in each when present ([] or null
+    # clears them; rooms sent with an `id` are kept and updated). Leave it out
+    # and the rooms are untouched. Changing the kind away from lodging drops
+    # them.
+    rooms: RoomsIn | None = None
     # Replaces who the item is for when present: members left out are dropped,
     # listed ones keep their answer unless a new status is sent.
     participants: ParticipantsIn | None = None
@@ -620,6 +670,9 @@ class TripItemUpdate(BaseModel):
 class ParticipantRead(ReadModel):
     member: TripMemberRead
     status: RsvpStatus | None
+    # Which of the stay's `rooms` they're in; null when not said (and always
+    # for other kinds).
+    room_id: uuid.UUID | None = None
     updated_at: datetime
 
 
@@ -659,11 +712,20 @@ class TransitSegmentRead(TimeSpanRead):
 
 class LodgingRead(ReadModel):
     property_type: LodgingType | None
-    room_type: str | None
-    guests: int | None
-    rooms: int | None
     phone: str | None
     free_cancellation_until: datetime | None
+
+
+class LodgingRoomRead(ReadModel):
+    id: uuid.UUID
+    position: int
+    label: str | None
+    room_number: str | None
+    room_type: str | None
+    guests: int | None
+    confirmation_number: str | None
+    # Trip-member ids of who's in it (match against `participants[].member.id`).
+    occupants: list[uuid.UUID] = Field(validation_alias="occupant_ids")
 
 
 class TripItemRead(TimeSpanRead):
@@ -697,6 +759,8 @@ class TripItemRead(TimeSpanRead):
     )
     # A stay's details; null for every other kind, and for a stay with none.
     lodging: LodgingRead | None = None
+    # A stay's rooms in order, when anyone has spelled them out; usually empty.
+    rooms: list[LodgingRoomRead] = Field(default_factory=list)
     created_by: UserRead | None
     # Who the item is for. Callers find their own entry by member.user.id.
     participants: list[ParticipantRead]

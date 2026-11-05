@@ -28,6 +28,7 @@ _REDACTED: dict[str, object] = {
     "end_place": None,
     "segments": [],
     "lodging": None,
+    "rooms": [],
     "created_by": None,
     "participants": [],
 }

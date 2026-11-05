@@ -903,9 +903,6 @@ def test_lodging_details_round_trip(client, make_user, admin, make_trip, session
         "ends_at": "2026-04-12T11:00:00",
         "lodging": {
             "property_type": "hotel",
-            "room_type": "Deluxe King",
-            "guests": 2,
-            "rooms": 1,
             "phone": "+81 3-0000-0000",
             # Aware: converted into the stay's zone (06:00Z is 15:00 in Tokyo).
             "free_cancellation_until": "2026-04-08T06:00:00Z",
@@ -919,9 +916,6 @@ def test_lodging_details_round_trip(client, make_user, admin, make_trip, session
     assert (item["confirmation_number"], item["booking_number"]) == ("PH-55120", "JTB-778201")
     assert item["lodging"] == {
         "property_type": "hotel",
-        "room_type": "Deluxe King",
-        "guests": 2,
-        "rooms": 1,
         "phone": "+81 3-0000-0000",
         "free_cancellation_until": "2026-04-08T15:00:00",
     }
@@ -933,14 +927,11 @@ def test_lodging_details_round_trip(client, make_user, admin, make_trip, session
     assert renamed["lodging"] == item["lodging"]
 
     # Sending details replaces them whole; fields left out are cleared.
-    replaced = client.patch(item_url, json={"lodging": {"guests": 3}}, headers=sun)
+    replaced = client.patch(item_url, json={"lodging": {"phone": "+81 3-1111-1111"}}, headers=sun)
     assert replaced.status_code == 200, replaced.text
     assert replaced.json()["lodging"] == {
         "property_type": None,
-        "room_type": None,
-        "guests": 3,
-        "rooms": None,
-        "phone": None,
+        "phone": "+81 3-1111-1111",
         "free_cancellation_until": None,
     }
 
@@ -949,7 +940,7 @@ def test_lodging_details_round_trip(client, make_user, admin, make_trip, session
     assert cleared["lodging"] is None
 
     # Back again, then turning the stay into an activity drops them too.
-    client.patch(item_url, json={"lodging": {"rooms": 2}}, headers=sun)
+    client.patch(item_url, json={"lodging": {"property_type": "hostel"}}, headers=sun)
     moved = client.patch(item_url, json={"kind": "activity"}, headers=sun).json()
     assert moved["lodging"] is None
     session.expire_all()
@@ -964,19 +955,22 @@ def test_lodging_details_validation(client, make_user, admin, make_trip, session
 
     # Only stays have them.
     assert client.post(
-        url, json={**base, "kind": "activity", "lodging": {"guests": 1}}, headers=sun
+        url, json={**base, "kind": "activity", "lodging": {"property_type": "hotel"}}, headers=sun
     ).status_code == 422
     activity = client.post(url, json={**base, "kind": "activity"}, headers=sun).json()
     assert client.patch(
-        f"{url}/{activity['id']}", json={"lodging": {"guests": 1}}, headers=sun
+        f"{url}/{activity['id']}", json={"lodging": {"property_type": "hotel"}}, headers=sun
     ).status_code == 422
     # ...but becoming a stay and gaining them in one edit is fine.
     became = client.patch(
-        f"{url}/{activity['id']}", json={"kind": "lodging", "lodging": {"guests": 1}}, headers=sun
+        f"{url}/{activity['id']}",
+        json={"kind": "lodging", "lodging": {"property_type": "hotel"}},
+        headers=sun,
     )
-    assert became.status_code == 200 and became.json()["lodging"]["guests"] == 1
+    assert became.status_code == 200 and became.json()["lodging"]["property_type"] == "hotel"
 
-    for bad in ({"guests": 0}, {"rooms": -1}, {"property_type": "castle"}, {"nope": 1}):
+    # Room types and guests live on the rooms now, not the stay.
+    for bad in ({"guests": 2}, {"room_type": "King"}, {"property_type": "castle"}, {"nope": 1}):
         assert client.post(
             url, json={**base, "kind": "lodging", "lodging": bad}, headers=sun
         ).status_code == 422, bad
@@ -991,7 +985,7 @@ def test_lodging_details_validation(client, make_user, admin, make_trip, session
 
     # Deleting the stay takes its details with it.
     stay = client.post(
-        url, json={**base, "kind": "lodging", "lodging": {"rooms": 1}}, headers=sun
+        url, json={**base, "kind": "lodging", "lodging": {"phone": "+1 555"}}, headers=sun
     ).json()
     assert client.delete(f"{url}/{stay['id']}", headers=sun).status_code == 204
     session.expire_all()

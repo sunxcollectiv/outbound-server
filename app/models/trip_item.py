@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     SmallInteger,
     String,
@@ -241,6 +242,15 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         passive_deletes=True,
         uselist=False,
     )
+    # A stay's rooms, in order, when someone has bothered to spell them out —
+    # optional, and empty for most stays (and for every other kind). Who sleeps
+    # where is each participant's `room_id`.
+    rooms: Mapped[list[TripItemLodgingRoom]] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="TripItemLodgingRoom.position",
+    )
 
     @property
     def display_title(self) -> str:
@@ -311,15 +321,14 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
 
 class TripItemLodging(TimestampMixin, Base):
     """The details of a stay that only a stay has, one row per lodging item
-    (keyed by it). The stay's check-in/check-out are the item's own span and the
-    property is the item's place; this holds the rest of what a confirmation
-    tells you. Every field is optional: a booking states what it states."""
+    (keyed by it). The stay's check-in/check-out are the item's own span, the
+    property is the item's place, who's staying are its participants, and its
+    rooms (type, guests, who's in each) are the item's optional `rooms`; this
+    holds the rest. Every field is optional: a booking states what it states.
+    Imported values are the user's to edit — changing them changes the trip,
+    not the booking."""
 
     __tablename__ = "trip_item_lodgings"
-    __table_args__ = (
-        CheckConstraint("guests IS NULL OR guests >= 1", name="guests_positive"),
-        CheckConstraint("rooms IS NULL OR rooms >= 1", name="rooms_positive"),
-    )
 
     trip_item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
@@ -328,9 +337,6 @@ class TripItemLodging(TimestampMixin, Base):
         str_enum(LodgingType, "lodging_type")
     )
     # As the booking names it, e.g. "Deluxe King, City View".
-    room_type: Mapped[str | None] = mapped_column(String(200))
-    guests: Mapped[int | None] = mapped_column(SmallInteger)
-    rooms: Mapped[int | None] = mapped_column(SmallInteger)
     # The property's own number, as printed.
     phone: Mapped[str | None] = mapped_column(String(40))
     # Last moment the stay can be cancelled free of charge: a naive wall time
@@ -338,6 +344,52 @@ class TripItemLodging(TimestampMixin, Base):
     free_cancellation_until: Mapped[datetime | None] = mapped_column(LocalDateTime)
 
     item: Mapped[TripItem] = relationship(back_populates="lodging")
+
+
+class TripItemLodgingRoom(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One room of a stay, for a booking that spells its rooms out (or someone
+    who wants to say who sleeps where). Entirely optional: a stay with no rows
+    here is just a stay. Every field is optional too — "Room 1" with nothing
+    else is fine. The people in it are the stay's participants whose `room_id`
+    points here; the database keeps that pointer within the same stay."""
+
+    __tablename__ = "trip_item_lodging_rooms"
+    __table_args__ = (
+        # Deferred so reordering rooms doesn't trip it mid-flush.
+        UniqueConstraint(
+            "trip_item_id",
+            "position",
+            name="uq_lodging_room_position",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        # The target of the participants' (item_id, room_id) foreign key, which
+        # is what keeps a participant's room on their own stay.
+        UniqueConstraint("trip_item_id", "id", name="uq_lodging_room_item"),
+        CheckConstraint("guests IS NULL OR guests >= 1", name="guests_positive"),
+    )
+
+    trip_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_items.id", ondelete="CASCADE")
+    )
+    # 0-based order of the room within the stay.
+    position: Mapped[int] = mapped_column(SmallInteger)
+    # What to call it, e.g. "Room 1" or "Kids' room". Null: the client numbers it.
+    label: Mapped[str | None] = mapped_column(String(60))
+    # The property's number for it, often only known at check-in.
+    room_number: Mapped[str | None] = mapped_column(String(40))
+    room_type: Mapped[str | None] = mapped_column(String(200))
+    guests: Mapped[int | None] = mapped_column(SmallInteger)
+    # A reference for this room alone, when it's booked separately from the
+    # stay's own confirmation_number. Usually null.
+    confirmation_number: Mapped[str | None] = mapped_column(String(120))
+
+    item: Mapped[TripItem] = relationship(back_populates="rooms")
+
+    @property
+    def occupant_ids(self) -> list[uuid.UUID]:
+        """The trip-member ids of the stay's participants in this room."""
+        return [p.member_id for p in self.item.participants if p.room_id == self.id]
 
 
 register_instant_sync(TripItem, TripItemTransitSegment)
@@ -353,6 +405,17 @@ class TripItemParticipant(TimestampMixin, Base):
     """
 
     __tablename__ = "trip_item_participants"
+    __table_args__ = (
+        # A participant's room must be a room of the same stay. Deferred so a
+        # rooms edit can reassign people and add/remove rooms in any order;
+        # a null room_id satisfies it (MATCH SIMPLE).
+        ForeignKeyConstraint(
+            ["item_id", "room_id"],
+            ["trip_item_lodging_rooms.trip_item_id", "trip_item_lodging_rooms.id"],
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+    )
 
     item_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
@@ -361,6 +424,15 @@ class TripItemParticipant(TimestampMixin, Base):
         ForeignKey("trip_members.id", ondelete="CASCADE"), primary_key=True, index=True
     )
     status: Mapped[RsvpStatus | None] = mapped_column(str_enum(RsvpStatus, "rsvp_status"))
+    # Which of the stay's rooms they're in, if anyone has said. Lodging only.
+    # Deleting the room just unassigns them (they stay on the stay).
+    room_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("trip_item_lodging_rooms.id", ondelete="SET NULL"), index=True
+    )
 
     item: Mapped[TripItem] = relationship(back_populates="participants")
     member: Mapped[TripMember] = relationship()
+    room: Mapped[TripItemLodgingRoom | None] = relationship(
+        primaryjoin="TripItemParticipant.room_id == TripItemLodgingRoom.id",
+        foreign_keys=[room_id],
+    )

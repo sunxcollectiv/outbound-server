@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime
 from typing import Literal
 
 import anthropic
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
 
 class ExtractionError(Exception):
@@ -44,27 +44,61 @@ class ExtractedSegment(BaseModel):
     destination: ExtractedPlace | None = None
 
 
+def _count_or_none(value: object) -> int | None:
+    # "2 adults" and the like shouldn't sink the whole extraction.
+    try:
+        return int(value) if value is not None else None  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+
+
+class ExtractedRoom(BaseModel):
+    """One room of a stay, when the booking spells its rooms out. Field names
+    mirror `TripItemLodgingRoom`. Who's in it isn't extracted: guests are
+    printed by name and members are known by email, so people are placed by
+    hand."""
+
+    label: str | None = None
+    room_number: str | None = None
+    room_type: str | None = None
+    guests: int | None = None
+    confirmation_number: str | None = None
+
+    @field_validator("guests", mode="before")
+    @classmethod
+    def _count(cls, value: object) -> int | None:
+        return _count_or_none(value)
+
+
 class ExtractedLodging(BaseModel):
-    """A stay's details beyond its dates and property. Field names mirror
-    `TripItemLodging`. Loosely typed on purpose (property_type is a free string,
-    counts plain ints): a slightly-off value is cleaned up at import rather than
-    failing the whole extraction."""
+    """A stay's details beyond its dates and property, as the booking states
+    them. property_type/phone/free_cancellation_until land on
+    `TripItemLodging`; the room summary (room_type, guests, room_count) and any
+    itemized `rooms` become the item's rooms at import. Loosely typed on purpose
+    (property_type is a free string, counts plain ints): a slightly-off value is
+    cleaned up at import rather than failing the whole extraction."""
 
     property_type: str | None = None  # hotel|vacation_rental|hostel|other
     room_type: str | None = None
     guests: int | None = None
-    rooms: int | None = None
+    room_count: int | None = None
     phone: str | None = None
     free_cancellation_until: str | None = None  # local "YYYY-MM-DDTHH:MM" or "YYYY-MM-DD"
+    # The rooms one by one — only when the booking itemizes them; usually [].
+    rooms: list[ExtractedRoom] = []
 
-    @field_validator("guests", "rooms", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _count_or_none(cls, value: object) -> int | None:
-        # "2 adults" and the like shouldn't sink the whole extraction.
-        try:
-            return int(value) if value is not None else None  # type: ignore[call-overload]
-        except (TypeError, ValueError):
-            return None
+    def _rooms_as_a_count(cls, data: object) -> object:
+        # An older reply shape put the room count in "rooms".
+        if isinstance(data, dict) and not isinstance(data.get("rooms", []), list):
+            data = {**data, "room_count": data.get("room_count") or data["rooms"], "rooms": []}
+        return data
+
+    @field_validator("guests", "room_count", mode="before")
+    @classmethod
+    def _counts(cls, value: object) -> int | None:
+        return _count_or_none(value)
 
 
 class ExtractedItem(BaseModel):
@@ -128,8 +162,12 @@ exactly this shape:
       ],
       "lodging": {
         "property_type": "hotel" | "vacation_rental" | "hostel" | "other" | null,
-        "room_type": str|null, "guests": int|null, "rooms": int|null, "phone": str|null,
-        "free_cancellation_until": "YYYY-MM-DDTHH:MM" | "YYYY-MM-DD" | null
+        "room_type": str|null, "guests": int|null, "room_count": int|null, "phone": str|null,
+        "free_cancellation_until": "YYYY-MM-DDTHH:MM" | "YYYY-MM-DD" | null,
+        "rooms": [
+          {"label": str|null, "room_number": str|null, "room_type": str|null,
+           "guests": int|null, "confirmation_number": str|null}
+        ]
       } (lodging only, else null)
     }
   ]
@@ -152,7 +190,7 @@ item, each item keeping its own confirmation_number (null if none is issued \
 yet). With only one reference, put it in confirmation_number and leave \
 booking_number null.
 - lodging: one item per property stay (several rooms at one property are ONE \
-item with "rooms" set; two hotels are two items). "place" is the property, with \
+item with "room_count" set; two hotels are two items). "place" is the property, with \
 its street address when given; "end_place" null. start_local/end_local are \
 check-in/check-out: if the source gives only the DATE (no check-in/check-out \
 time), write just "YYYY-MM-DD" — never invent a time. property_type \
@@ -160,7 +198,12 @@ time), write just "YYYY-MM-DD" — never invent a time. property_type \
 hostels, "hotel" for hotels/inns/ryokans/B&Bs, else "other". guests = total \
 guests (adults + children). phone = the property's own number, not the booking \
 site's. free_cancellation_until = the last moment it can be cancelled free, in \
-the property's local time; null if non-refundable or not stated.
+the property's local time; null if non-refundable or not stated. \
+"rooms": list the rooms one by one ONLY when the booking itemizes them with \
+something per room (its own type, guest count, room number or confirmation \
+number) — otherwise []. A room's confirmation_number is only for a room \
+confirmed separately from the stay's own; usually null. label = how the \
+booking names the room ("Room 1"), else null.
 - transit_mode: set each leg's mode, and the item's overall mode (the shared \
 value when every leg is the same). Most bookings are one mode (a flight's legs \
 are all flights); only a genuinely mixed booking (e.g. ferry + connecting bus) \

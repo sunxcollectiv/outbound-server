@@ -100,16 +100,22 @@ class ItemSnapshot:
         )
         stay = item.lodging
         lodging = (
-            (
-                stay.property_type,
-                stay.room_type,
-                stay.guests,
-                stay.rooms,
-                stay.phone,
-                stay.free_cancellation_until,
-            )
+            (stay.property_type, stay.phone, stay.free_cancellation_until)
             if stay is not None
             else None
+        )
+        rooms = tuple(
+            (
+                room.id,
+                room.position,
+                room.label,
+                room.room_number,
+                room.room_type,
+                room.guests,
+                room.confirmation_number,
+                frozenset(room.occupant_ids),
+            )
+            for room in item.rooms
         )
         return cls(
             title=item.title,
@@ -128,6 +134,7 @@ class ItemSnapshot:
                 item.image_url,
                 legs,
                 lodging,
+                rooms,
             ),
             place_name=item.place.name if item.place is not None else None,
             kind=item.kind,

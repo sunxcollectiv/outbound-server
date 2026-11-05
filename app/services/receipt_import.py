@@ -15,8 +15,9 @@ new trip is out of scope.
 
 Lodging: a stay whose confirmation gives only the check-in/check-out *dates*
 gets the conventional times — check-in 15:00, check-out 11:00 — rather than
-midnight; its details (property type, room, guests, …) are cleaned up and
-stored on the item's lodging row.
+midnight; its details (property type, phone, cancellation deadline) are
+cleaned up onto the item's lodging row, and what it says about rooms becomes
+the item's rooms (see `_rooms`). It's all the user's to edit afterwards.
 """
 from __future__ import annotations
 
@@ -144,22 +145,60 @@ def _count(value: Any) -> int | None:
 def _lodging_details(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     """Clean an extracted stay's details into a `LodgingDetails` payload, or
     None when nothing usable was stated. Lenient: an unknown property type
-    becomes `other`, an implausible count is dropped — an odd value loses that
-    field, never the booking. A date-only cancellation deadline is taken at the
-    start of that day, the cautious reading of "free cancellation until <date>"."""
+    becomes `other` — an odd value loses that field, never the booking. A
+    date-only cancellation deadline is taken at the start of that day, the
+    cautious reading of "free cancellation until <date>"."""
     if not raw:
         return None
     kind = _text(raw.get("property_type"), 32)
     known = {t.value for t in LodgingType}
     details = {
         "property_type": (kind if kind in known else LodgingType.OTHER.value) if kind else None,
-        "room_type": _text(raw.get("room_type"), 200),
-        "guests": _count(raw.get("guests")),
-        "rooms": _count(raw.get("rooms")),
         "phone": _text(raw.get("phone"), 40),
         "free_cancellation_until": _as_datetime(raw.get("free_cancellation_until")),
     }
     return details if any(v is not None for v in details.values()) else None
+
+
+# A booking "for 30 rooms" is a group block, not something to lay out room by room.
+MAX_SUMMARY_ROOMS = 20
+
+
+def _rooms(raw: dict[str, Any] | None) -> list[dict[str, Any]] | None:
+    """An extracted stay's rooms as `rooms` payload entries, or None when the
+    booking says nothing about rooms. Itemized rooms are taken as listed;
+    otherwise the booking's summary — room count, room type, guests — becomes
+    that many rooms of that type (the guest count only when it's one room,
+    since a total can't be split). Nobody is put in a room: guests are printed
+    by name and members are known by email, so people are placed by hand."""
+    raw = raw or {}
+    listed = raw.get("rooms")
+    if isinstance(listed, list) and listed:
+        rooms = [
+            {
+                "label": _text(room.get("label"), 60),
+                "room_number": _text(room.get("room_number"), 40),
+                "room_type": _text(room.get("room_type"), 200),
+                "guests": _count(room.get("guests")),
+                "confirmation_number": _text(room.get("confirmation_number"), 120),
+            }
+            for room in listed[:50]
+            if isinstance(room, dict)
+        ]
+        return rooms or None
+
+    # Older extractions put the count in "rooms" (now the itemized list).
+    count = _count(raw.get("room_count") or (listed if isinstance(listed, int) else None))
+    room_type, guests = _text(raw.get("room_type"), 200), _count(raw.get("guests"))
+    if count is None and room_type is None and guests is None:
+        return None
+    count = count or 1
+    if count > MAX_SUMMARY_ROOMS:
+        return None
+    return [
+        {"room_type": room_type, "guests": guests if count == 1 else None}
+        for _ in range(count)
+    ]
 
 
 def _item_payload(
@@ -197,6 +236,7 @@ def _item_payload(
         # A stay is at one property: the check-out end has no place of its own.
         values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
         values["lodging"] = _lodging_details(item.get("lodging"))
+        values["rooms"] = _rooms(item.get("lodging"))
     else:
         values.update(_ends(item))
         values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))

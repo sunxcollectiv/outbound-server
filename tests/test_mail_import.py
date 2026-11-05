@@ -3,6 +3,7 @@ from sqlalchemy import select
 from app.models import EmailReceipt, EmailReceiptStatus, Place
 from app.services.mail_extraction import (
     ExtractedItem,
+    ExtractedLodging,
     ExtractedPlace,
     ExtractedSegment,
     Extraction,
@@ -129,6 +130,137 @@ def test_import_places_lodging_with_item_level_times(client, make_user, admin, m
     assert item["starts_at"] == "2026-04-10T15:00:00" and item["start_timezone"] == "Asia/Tokyo"
     assert item["confirmation_number"] == "H999"
     assert item["place"]["name"] == "Hotel Tokyo"  # resolved (created)
+
+
+def _stay(start, end, lodging=None, **item_fields):
+    return Extraction(
+        category="lodging", confidence=0.9, summary="Stay",
+        items=[ExtractedItem(
+            kind="lodging", title="Kyoto Ryokan", start_local=start, end_local=end,
+            start_timezone="Asia/Tokyo", end_timezone="Asia/Tokyo",
+            place=ExtractedPlace(name="Kyoto Ryokan", address="1 Gion", city="Kyoto"),
+            lodging=lodging, **item_fields,
+        )],
+    )
+
+
+def test_import_lodging_stores_stay_details(client, make_user, admin, make_trip, resend, mail_extractor):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    details = ExtractedLodging(
+        property_type="hotel", room_type="Deluxe Twin", guests=3, rooms=2,
+        phone="+81 75-000-0000", free_cancellation_until="2026-04-08T23:59",
+    )
+    _make_extracted(client, admin, resend, mail_extractor, "re_l1", "sun@example.com",
+                    _stay("2026-04-10T16:00", "2026-04-12T10:30", details, confirmation_number="RYO1"))
+
+    assert client.post("/admin/received/mail/import/re_l1", headers=admin).json()["outcome"] == "placed"
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["kind"] == "lodging" and item["confirmation_number"] == "RYO1"
+    # Stated times are kept as written.
+    assert (item["starts_at"], item["ends_at"]) == ("2026-04-10T16:00:00", "2026-04-12T10:30:00")
+    assert item["place"]["name"] == "Kyoto Ryokan" and item["end_place"] is None
+    assert item["lodging"] == {
+        "property_type": "hotel", "room_type": "Deluxe Twin", "guests": 3, "rooms": 2,
+        "phone": "+81 75-000-0000", "free_cancellation_until": "2026-04-08T23:59:00",
+    }
+
+
+def test_import_date_only_lodging_gets_default_check_in_and_out(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_l2", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-13"))
+
+    assert client.post("/admin/received/mail/import/re_l2", headers=admin).json()["outcome"] == "placed"
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["starts_at"] == "2026-04-10T15:00:00"  # check-in 15:00
+    assert item["ends_at"] == "2026-04-13T11:00:00"  # check-out 11:00
+    assert item["starts_at_utc"] == "2026-04-10T06:00:00Z"
+    assert item["lodging"] is None  # nothing stated beyond the dates
+
+
+def test_import_lodging_mixes_stated_and_default_times(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    # Check-in time stated, check-out only a date.
+    _make_extracted(client, admin, resend, mail_extractor, "re_l3", "sun@example.com",
+                    _stay("2026-04-10T14:00", "2026-04-11"))
+
+    client.post("/admin/received/mail/import/re_l3", headers=admin)
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert (item["starts_at"], item["ends_at"]) == ("2026-04-10T14:00:00", "2026-04-11T11:00:00")
+
+
+def test_import_lodging_details_are_cleaned_not_fatal(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    # An unknown type becomes `other`, a nonsense count is dropped, a date-only
+    # deadline is read as the start of that day.
+    details = ExtractedLodging(property_type="capsule", guests=0, rooms=1, room_type="  ",
+                               free_cancellation_until="2026-04-08")
+    _make_extracted(client, admin, resend, mail_extractor, "re_l4", "sun@example.com",
+                    _stay("2026-04-10", "2026-04-12", details))
+
+    assert client.post("/admin/received/mail/import/re_l4", headers=admin).json()["outcome"] == "placed"
+    stay = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["lodging"]
+    assert stay == {
+        "property_type": "other", "room_type": None, "guests": None, "rooms": 1,
+        "phone": None, "free_cancellation_until": "2026-04-08T00:00:00",
+    }
+
+
+def _agent_stay(title, confirmation, start, end):
+    return ExtractedItem(
+        kind="lodging", title=title, confirmation_number=confirmation, booking_number="JTB-778201",
+        start_local=start, end_local=end, start_timezone="Asia/Tokyo", end_timezone="Asia/Tokyo",
+        place=ExtractedPlace(name=title, city="Kyoto"),
+        lodging=ExtractedLodging(property_type="hotel", guests=2),
+    )
+
+
+# A travel agent's itinerary: three hotels under one agency booking number.
+AGENT_ITINERARY = Extraction(
+    category="lodging", confidence=0.95, summary="JTB Japan hotels",
+    items=[
+        _agent_stay("Park Hyatt Tokyo", "PH-55120", "2026-04-10", "2026-04-13"),
+        _agent_stay("Tawaraya Ryokan", "TW8812", "2026-04-13T15:00", "2026-04-15T11:00"),
+        _agent_stay("Hotel Kanra Kyoto", None, "2026-04-15", "2026-04-16"),
+    ],
+)
+
+
+def test_import_agent_itinerary_splits_into_one_item_per_stay(
+    client, make_user, admin, make_trip, resend, mail_extractor
+):
+    sun = make_user("sun")
+    trip = make_trip(sun)  # 04-09 .. 04-15: overlaps the whole itinerary
+    _make_extracted(client, admin, resend, mail_extractor, "re_l5", "sun@example.com", AGENT_ITINERARY)
+
+    body = client.post("/admin/received/mail/import/re_l5", headers=admin).json()
+    assert (body["outcome"], body["item_count"]) == ("placed", 3)
+    items = client.get(f"/trips/{trip['id']}/items?kind=lodging", headers=sun).json()
+    assert [
+        (i["display_title"], i["confirmation_number"], i["booking_number"], i["starts_at"], i["ends_at"])
+        for i in items
+    ] == [
+        ("Park Hyatt Tokyo", "PH-55120", "JTB-778201", "2026-04-10T15:00:00", "2026-04-13T11:00:00"),
+        ("Tawaraya Ryokan", "TW8812", "JTB-778201", "2026-04-13T15:00:00", "2026-04-15T11:00:00"),
+        ("Hotel Kanra Kyoto", None, "JTB-778201", "2026-04-15T15:00:00", "2026-04-16T11:00:00"),
+    ]
+    # Each stay is its own item at its own property.
+    assert len({i["id"] for i in items}) == len({i["place"]["id"] for i in items}) == 3
+
+
+def test_extracted_lodging_tolerates_wordy_counts():
+    parsed = ExtractedLodging.model_validate({"guests": "2 adults", "rooms": "1"})
+    assert (parsed.guests, parsed.rooms) == (None, 1)
 
 
 def test_import_no_matching_trip_stays_extracted(client, make_user, admin, resend, mail_extractor, session):

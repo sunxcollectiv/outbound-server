@@ -17,10 +17,12 @@ from app.models.place import Place
 from app.models.service_token import ServiceToken
 from app.models.trip import Trip, TripDay, TripGroup, TripMember, TripRole
 from app.models.trip_item import (
+    LodgingType,
     RsvpStatus,
     TransitMode,
     TripItem,
     TripItemKind,
+    TripItemLodging,
     TripItemParticipant,
     TripItemRequirement,
     TripItemTransitSegment,
@@ -38,6 +40,7 @@ __all__ = [
     "EmailReceipt",
     "EmailReceiptStatus",
     "ImageReceipt",
+    "LodgingType",
     "Notification",
     "NotificationCategory",
     "NotificationChannel",
@@ -53,6 +56,7 @@ __all__ = [
     "TripGroup",
     "TripItem",
     "TripItemKind",
+    "TripItemLodging",
     "TripItemParticipant",
     "TripItemRequirement",
     "TripItemTransitSegment",

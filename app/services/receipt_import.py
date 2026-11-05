@@ -12,12 +12,17 @@ The trip is auto-matched by date overlap (dates-only for MVP): a unique
 overlapping member-trip is used; zero or several leaves the receipt ``extracted``
 with a ``no_match``/``ambiguous`` outcome (we never guess a placement). Creating a
 new trip is out of scope.
+
+Lodging: a stay whose confirmation gives only the check-in/check-out *dates*
+gets the conventional times — check-in 15:00, check-out 11:00 — rather than
+midnight; its details (property type, room, guests, …) are cleaned up and
+stored on the item's lodging row.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal
 
 from sqlalchemy import select
@@ -28,6 +33,7 @@ from app.models import (
     EmailReceipt,
     EmailReceiptStatus,
     ImageReceipt,
+    LodgingType,
     Trip,
     TripMember,
     User,
@@ -54,13 +60,24 @@ class ImportOutcome:
     candidate_trip_ids: list[Any] = field(default_factory=list)
 
 
-def _as_datetime(local: Any) -> datetime | None:
+# What a stay's ends default to when the booking states only the dates.
+CHECK_IN_TIME = time(15, 0)
+CHECK_OUT_TIME = time(11, 0)
+
+
+def _as_datetime(local: Any, *, date_only_at: time = time(0)) -> datetime | None:
+    """Parse an extracted local time. A bare date ("2026-04-10") is taken at
+    `date_only_at` on that day."""
     if not isinstance(local, str):
         return None
+    local = local.strip()
     try:
-        return datetime.fromisoformat(local)
+        parsed = datetime.fromisoformat(local)
     except ValueError:
         return None
+    if "T" not in local and " " not in local:  # a bare date
+        return datetime.combine(parsed.date(), date_only_at)
+    return parsed
 
 
 def _as_date(local: Any) -> date | None:
@@ -102,13 +119,47 @@ def _match_trip(
     return (candidates[0] if len(candidates) == 1 else None), candidates
 
 
-def _ends(part: dict[str, Any]) -> dict[str, Any]:
+def _ends(
+    part: dict[str, Any], *, start_default: time = time(0), end_default: time = time(0)
+) -> dict[str, Any]:
+    """The part's two ends; a date-only end is taken at the given default."""
     return {
-        "starts_at": _as_datetime(part.get("start_local")),
+        "starts_at": _as_datetime(part.get("start_local"), date_only_at=start_default),
         "start_timezone": part.get("start_timezone"),
-        "ends_at": _as_datetime(part.get("end_local")),
+        "ends_at": _as_datetime(part.get("end_local"), date_only_at=end_default),
         "end_timezone": part.get("end_timezone"),
     }
+
+
+def _text(value: Any, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value.strip()[:limit] or None
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and 1 <= value <= 999 else None
+
+
+def _lodging_details(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Clean an extracted stay's details into a `LodgingDetails` payload, or
+    None when nothing usable was stated. Lenient: an unknown property type
+    becomes `other`, an implausible count is dropped — an odd value loses that
+    field, never the booking. A date-only cancellation deadline is taken at the
+    start of that day, the cautious reading of "free cancellation until <date>"."""
+    if not raw:
+        return None
+    kind = _text(raw.get("property_type"), 32)
+    known = {t.value for t in LodgingType}
+    details = {
+        "property_type": (kind if kind in known else LodgingType.OTHER.value) if kind else None,
+        "room_type": _text(raw.get("room_type"), 200),
+        "guests": _count(raw.get("guests")),
+        "rooms": _count(raw.get("rooms")),
+        "phone": _text(raw.get("phone"), 40),
+        "free_cancellation_until": _as_datetime(raw.get("free_cancellation_until")),
+    }
+    return details if any(v is not None for v in details.values()) else None
 
 
 def _item_payload(
@@ -124,7 +175,8 @@ def _item_payload(
     values: dict[str, Any] = {
         "kind": kind,
         "title": (item.get("title") or "Booking")[:200],
-        "confirmation_number": item.get("confirmation_number"),
+        "confirmation_number": _text(item.get("confirmation_number"), 120),
+        "booking_number": _text(item.get("booking_number"), 120),
     }
     segments = item.get("segments") or []
     if kind == "transit" and segments:
@@ -140,6 +192,11 @@ def _item_payload(
             }
             for seg in segments
         ]
+    elif kind == "lodging":
+        values.update(_ends(item, start_default=CHECK_IN_TIME, end_default=CHECK_OUT_TIME))
+        # A stay is at one property: the check-out end has no place of its own.
+        values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
+        values["lodging"] = _lodging_details(item.get("lodging"))
     else:
         values.update(_ends(item))
         values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))

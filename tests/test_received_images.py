@@ -4,7 +4,13 @@ import uuid
 from sqlalchemy import func, select
 
 from app.models import EmailReceiptStatus, ImageReceipt
-from app.services.extraction import ExtractedItem, ExtractedPlace, ExtractedSegment, Extraction
+from app.services.extraction import (
+    ExtractedItem,
+    ExtractedLodging,
+    ExtractedPlace,
+    ExtractedSegment,
+    Extraction,
+)
 from app.services.image_extraction import ImageExtractionError
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake image bytes"
@@ -309,6 +315,29 @@ def test_process_uploads_extracts_and_imports(client, make_user, make_trip, imag
     assert body["receipt"]["status"] == "processed"
     assert len(image_extractor.calls) == 1  # one upload → one vision call
     assert len(client.get(f"/trips/{trip['id']}/items", headers=sun).json()) == 1
+
+
+def test_process_imports_a_lodging_screenshot(client, make_user, make_trip, image_extractor):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    image_extractor.result = Extraction(
+        category="lodging", confidence=0.9, summary="Airbnb in Tokyo",
+        items=[ExtractedItem(
+            kind="lodging", title="Shibuya loft", start_local="2026-04-11",
+            end_local="2026-04-14", start_timezone="Asia/Tokyo", end_timezone="Asia/Tokyo",
+            place=ExtractedPlace(name="Shibuya loft", city="Tokyo"),
+            lodging=ExtractedLodging(property_type="vacation_rental", guests=4),
+        )],
+    )
+    resp = client.post(
+        "/received/images/process", files={"file": ("stay.png", PNG, "image/png")}, headers=sun
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["outcome"] == "placed"
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert (item["starts_at"], item["ends_at"]) == ("2026-04-11T15:00:00", "2026-04-14T11:00:00")
+    assert item["lodging"]["property_type"] == "vacation_rental"
+    assert item["lodging"]["guests"] == 4
 
 
 def test_process_not_a_booking_never_imports(client, make_user, make_trip, image_extractor):

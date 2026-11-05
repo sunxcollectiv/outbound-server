@@ -98,6 +98,19 @@ class ItemSnapshot:
             )
             for leg in item.transit_segments
         )
+        stay = item.lodging
+        lodging = (
+            (
+                stay.property_type,
+                stay.room_type,
+                stay.guests,
+                stay.rooms,
+                stay.phone,
+                stay.free_cancellation_until,
+            )
+            if stay is not None
+            else None
+        )
         return cls(
             title=item.title,
             time=(item.starts_at, item.ends_at, item.start_timezone, item.end_timezone),
@@ -109,10 +122,12 @@ class ItemSnapshot:
                 item.visibility,
                 item.requirement,
                 item.confirmation_number,
+                item.booking_number,
                 item.transit_mode,
                 tuple(item.tags),
                 item.image_url,
                 legs,
+                lodging,
             ),
             place_name=item.place.name if item.place is not None else None,
             kind=item.kind,

@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from app.models import (
     Place,
     TripItem,
+    TripItemLodging,
     TripItemParticipant,
     TripItemTransitSegment,
 )
@@ -888,3 +889,110 @@ def test_an_item_goes_by_its_title_or_its_place(client, make_user, admin, make_t
     dropped = client.patch(item_url, json={"title": None, "place_id": ramen["id"]}, headers=sun)
     assert dropped.status_code == 200, dropped.text
     assert (dropped.json()["title"], dropped.json()["display_title"]) == (None, "Ichiran Shibuya")
+
+
+def test_lodging_details_round_trip(client, make_user, admin, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    stay = {
+        "kind": "lodging",
+        "title": "Hotel",
+        "starts_at": "2026-04-10T15:00:00",
+        "start_timezone": "Asia/Tokyo",
+        "ends_at": "2026-04-12T11:00:00",
+        "lodging": {
+            "property_type": "hotel",
+            "room_type": "Deluxe King",
+            "guests": 2,
+            "rooms": 1,
+            "phone": "+81 3-0000-0000",
+            # Aware: converted into the stay's zone (06:00Z is 15:00 in Tokyo).
+            "free_cancellation_until": "2026-04-08T06:00:00Z",
+        },
+    }
+    stay["confirmation_number"] = "PH-55120"
+    stay["booking_number"] = "JTB-778201"
+    created = client.post(url, json=stay, headers=sun)
+    assert created.status_code == 201, created.text
+    item = created.json()
+    assert (item["confirmation_number"], item["booking_number"]) == ("PH-55120", "JTB-778201")
+    assert item["lodging"] == {
+        "property_type": "hotel",
+        "room_type": "Deluxe King",
+        "guests": 2,
+        "rooms": 1,
+        "phone": "+81 3-0000-0000",
+        "free_cancellation_until": "2026-04-08T15:00:00",
+    }
+    item_url = f"{url}/{item['id']}"
+    assert client.get(item_url, headers=sun).json()["lodging"] == item["lodging"]
+
+    # Other edits leave the details alone.
+    renamed = client.patch(item_url, json={"title": "The Hotel"}, headers=sun).json()
+    assert renamed["lodging"] == item["lodging"]
+
+    # Sending details replaces them whole; fields left out are cleared.
+    replaced = client.patch(item_url, json={"lodging": {"guests": 3}}, headers=sun)
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["lodging"] == {
+        "property_type": None,
+        "room_type": None,
+        "guests": 3,
+        "rooms": None,
+        "phone": None,
+        "free_cancellation_until": None,
+    }
+
+    # null drops them.
+    cleared = client.patch(item_url, json={"lodging": None}, headers=sun).json()
+    assert cleared["lodging"] is None
+
+    # Back again, then turning the stay into an activity drops them too.
+    client.patch(item_url, json={"lodging": {"rooms": 2}}, headers=sun)
+    moved = client.patch(item_url, json={"kind": "activity"}, headers=sun).json()
+    assert moved["lodging"] is None
+    session.expire_all()
+    assert session.get(TripItemLodging, uuid.UUID(item["id"])) is None
+
+
+def test_lodging_details_validation(client, make_user, admin, make_trip, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    url = f"/trips/{trip['id']}/items"
+    base = {"title": "x", "starts_at": "2026-04-10T15:00:00"}
+
+    # Only stays have them.
+    assert client.post(
+        url, json={**base, "kind": "activity", "lodging": {"guests": 1}}, headers=sun
+    ).status_code == 422
+    activity = client.post(url, json={**base, "kind": "activity"}, headers=sun).json()
+    assert client.patch(
+        f"{url}/{activity['id']}", json={"lodging": {"guests": 1}}, headers=sun
+    ).status_code == 422
+    # ...but becoming a stay and gaining them in one edit is fine.
+    became = client.patch(
+        f"{url}/{activity['id']}", json={"kind": "lodging", "lodging": {"guests": 1}}, headers=sun
+    )
+    assert became.status_code == 200 and became.json()["lodging"]["guests"] == 1
+
+    for bad in ({"guests": 0}, {"rooms": -1}, {"property_type": "castle"}, {"nope": 1}):
+        assert client.post(
+            url, json={**base, "kind": "lodging", "lodging": bad}, headers=sun
+        ).status_code == 422, bad
+
+    # An aware deadline on a floating stay has no zone to be read in.
+    floating = client.post(
+        url,
+        json={**base, "kind": "lodging", "lodging": {"free_cancellation_until": "2026-04-08T06:00:00Z"}},
+        headers=sun,
+    )
+    assert floating.status_code == 422
+
+    # Deleting the stay takes its details with it.
+    stay = client.post(
+        url, json={**base, "kind": "lodging", "lodging": {"rooms": 1}}, headers=sun
+    ).json()
+    assert client.delete(f"{url}/{stay['id']}", headers=sun).status_code == 204
+    session.expire_all()
+    assert session.get(TripItemLodging, uuid.UUID(stay["id"])) is None

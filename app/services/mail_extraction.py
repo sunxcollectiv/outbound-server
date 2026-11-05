@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.services.extraction import (  # noqa: F401 — re-exported for callers/tests
     EXTRACTION_SCHEMA_PROMPT,
     ExtractedItem,
+    ExtractedLodging,
     ExtractedPlace,
     ExtractedSegment,
     Extraction,

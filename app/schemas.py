@@ -18,6 +18,7 @@ from pydantic import (
 from app.models import (
     CreditEntryKind,
     EmailReceiptStatus,
+    LodgingType,
     NotificationCategory,
     NotificationChannel,
     PushPlatform,
@@ -482,6 +483,23 @@ class TransitSegmentCreate(BaseModel):
         return self
 
 
+class LodgingDetails(BaseModel):
+    """A stay's details beyond its check-in/check-out (the item's times) and
+    property (the item's place). Lodging items only; every field optional. On a
+    PATCH the object replaces the stored details whole, and null clears them."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    property_type: LodgingType | None = None
+    room_type: str | None = Field(default=None, min_length=1, max_length=200)
+    guests: int | None = Field(default=None, ge=1, le=999)
+    rooms: int | None = Field(default=None, ge=1, le=999)
+    phone: str | None = Field(default=None, min_length=1, max_length=40)
+    # Wall time at the property (the stay's check-in zone). An aware value is
+    # converted into that zone, so it needs the stay to have one.
+    free_cancellation_until: datetime | None = None
+
+
 class TripItemCreate(BaseModel):
     kind: TripItemKind
     # How much the participants are expected to be there; a label only.
@@ -493,6 +511,9 @@ class TripItemCreate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
+    # The agent's/booking site's reference when booked through one; shared by
+    # every item that booking covers.
+    booking_number: str | None = Field(default=None, max_length=120)
     # Transit only, and only for a plain hop — a segmented transit's mode is
     # derived from its legs (see the validator). `mixed` is derived, never sent.
     transit_mode: TransitMode | None = None
@@ -514,6 +535,8 @@ class TripItemCreate(BaseModel):
     # Transit only. Omit for a plain hop (the item's own ends are the one leg);
     # supply two or more to spell out layovers.
     segments: list[TransitSegmentCreate] | None = None
+    # Lodging only: the stay's room, guests, cancellation deadline, etc.
+    lodging: LodgingDetails | None = None
     # Who the item is for, by trip member. Nobody is implied: an item for the
     # whole trip lists every member. Omit to make it just for the creator.
     participants: ParticipantsIn | None = None
@@ -528,6 +551,8 @@ class TripItemCreate(BaseModel):
             raise ValueError("'mixed' is derived from the legs, not set directly")
         if self.transit_mode is not None and self.kind is not TripItemKind.TRANSIT:
             raise ValueError("only transit items have a transit_mode")
+        if self.lodging is not None and self.kind is not TripItemKind.LODGING:
+            raise ValueError("only lodging items have lodging details")
         if self.segments is not None:
             if self.kind is not TripItemKind.TRANSIT:
                 raise ValueError("only transit items have segments")
@@ -569,6 +594,7 @@ class TripItemUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str | None = None
     confirmation_number: str | None = Field(default=None, max_length=120)
+    booking_number: str | None = Field(default=None, max_length=120)
     transit_mode: TransitMode | None = None
     tags: list[Tag] | None = None
     starts_at: datetime | None = None
@@ -580,6 +606,9 @@ class TripItemUpdate(BaseModel):
     end_place_id: uuid.UUID | None = None
     # Replaces the whole leg list when present; only valid on a transit item.
     segments: list[TransitSegmentCreate] | None = None
+    # Replaces the stay's details when present (null clears them); only valid
+    # on a lodging item. Changing the kind away from lodging drops them.
+    lodging: LodgingDetails | None = None
     # Replaces who the item is for when present: members left out are dropped,
     # listed ones keep their answer unless a new status is sent.
     participants: ParticipantsIn | None = None
@@ -628,6 +657,15 @@ class TransitSegmentRead(TimeSpanRead):
     confirmation_number: str | None
 
 
+class LodgingRead(ReadModel):
+    property_type: LodgingType | None
+    room_type: str | None
+    guests: int | None
+    rooms: int | None
+    phone: str | None
+    free_cancellation_until: datetime | None
+
+
 class TripItemRead(TimeSpanRead):
     id: uuid.UUID
     trip_id: uuid.UUID
@@ -643,7 +681,10 @@ class TripItemRead(TimeSpanRead):
     # ("Activity"). On a redacted item, whose place is hidden, it skips the place.
     display_title: str
     notes: str | None
+    # The provider's own reference (the hotel's, the airline's PNR).
     confirmation_number: str | None
+    # The agent's/booking site's reference, when booked through one.
+    booking_number: str | None
     transit_mode: TransitMode | None
     tags: list[str]
     image_url: str | None
@@ -654,6 +695,8 @@ class TripItemRead(TimeSpanRead):
     segments: list[TransitSegmentRead] = Field(
         default_factory=list, validation_alias="transit_segments", serialization_alias="segments"
     )
+    # A stay's details; null for every other kind, and for a stay with none.
+    lodging: LodgingRead | None = None
     created_by: UserRead | None
     # Who the item is for. Callers find their own entry by member.user.id.
     participants: list[ParticipantRead]

@@ -50,6 +50,15 @@ class TransitMode(StrEnum):
     MIXED = "mixed"
 
 
+class LodgingType(StrEnum):
+    """What kind of place a stay is at."""
+
+    HOTEL = "hotel"
+    VACATION_RENTAL = "vacation_rental"  # an Airbnb/VRBO-style whole place
+    HOSTEL = "hostel"
+    OTHER = "other"
+
+
 class TripItemRequirement(StrEnum):
     """How much the participants are expected to be there. A label, not an
     enforcement: people can still decline."""
@@ -172,6 +181,12 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     # Booking reference / record locator for the whole item — a flight PNR, a
     # hotel confirmation number, etc. Null for items that aren't a booking.
     confirmation_number: Mapped[str | None] = mapped_column(String(120))
+    # The reference of whoever the item was booked through, when that's not the
+    # provider itself — a travel agent's or booking site's booking number. One
+    # booking can cover several items (an agent's three hotels: three items, each
+    # with its hotel's confirmation_number, all sharing this). Null for a direct
+    # booking, whose one reference is the confirmation_number.
+    booking_number: Mapped[str | None] = mapped_column(String(120))
     # The booking's overall transport mode, carried down from its legs (the
     # shared value, or `mixed`). Only set for transit items. Clients read this
     # for a one-glance type instead of inspecting the legs.
@@ -217,6 +232,14 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         order_by="TripItemTransitSegment.position",
+    )
+    # A stay's details beyond its span and place. Only ever set on a lodging;
+    # optional even then (a stay entered by hand may have none).
+    lodging: Mapped[TripItemLodging | None] = relationship(
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
     )
 
     @property
@@ -284,6 +307,37 @@ class TripItemTransitSegment(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan,
     item: Mapped[TripItem] = relationship(back_populates="transit_segments")
     place: Mapped[Place | None] = relationship(foreign_keys=[place_id])
     end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
+
+
+class TripItemLodging(TimestampMixin, Base):
+    """The details of a stay that only a stay has, one row per lodging item
+    (keyed by it). The stay's check-in/check-out are the item's own span and the
+    property is the item's place; this holds the rest of what a confirmation
+    tells you. Every field is optional: a booking states what it states."""
+
+    __tablename__ = "trip_item_lodgings"
+    __table_args__ = (
+        CheckConstraint("guests IS NULL OR guests >= 1", name="guests_positive"),
+        CheckConstraint("rooms IS NULL OR rooms >= 1", name="rooms_positive"),
+    )
+
+    trip_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trip_items.id", ondelete="CASCADE"), primary_key=True
+    )
+    property_type: Mapped[LodgingType | None] = mapped_column(
+        str_enum(LodgingType, "lodging_type")
+    )
+    # As the booking names it, e.g. "Deluxe King, City View".
+    room_type: Mapped[str | None] = mapped_column(String(200))
+    guests: Mapped[int | None] = mapped_column(SmallInteger)
+    rooms: Mapped[int | None] = mapped_column(SmallInteger)
+    # The property's own number, as printed.
+    phone: Mapped[str | None] = mapped_column(String(40))
+    # Last moment the stay can be cancelled free of charge: a naive wall time
+    # read in the stay's check-in zone (the property's), like the item's times.
+    free_cancellation_until: Mapped[datetime | None] = mapped_column(LocalDateTime)
+
+    item: Mapped[TripItem] = relationship(back_populates="lodging")
 
 
 register_instant_sync(TripItem, TripItemTransitSegment)

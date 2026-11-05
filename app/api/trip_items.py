@@ -13,6 +13,7 @@ from app.models import (
     Trip,
     TripItem,
     TripItemKind,
+    TripItemLodging,
     TripItemParticipant,
     TripItemTransitSegment,
     TripMember,
@@ -62,6 +63,7 @@ def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]
         selectinload(TripItem.place).selectinload(Place.area),
         selectinload(TripItem.end_place).selectinload(Place.area),
         selectinload(TripItem.created_by),
+        selectinload(TripItem.lodging),
         selectinload(TripItem.participants)
         .selectinload(TripItemParticipant.member)
         .selectinload(TripMember.user),
@@ -206,6 +208,37 @@ def _apply_span(values: dict[str, Any], segments: list[TripItemTransitSegment]) 
     values["transit_mode"] = modes.pop() if len(modes) == 1 else (TransitMode.MIXED if modes else None)
 
 
+LODGING_FIELDS = (
+    "property_type",
+    "room_type",
+    "guests",
+    "rooms",
+    "phone",
+    "free_cancellation_until",
+)
+
+
+def _set_lodging(item: TripItem, details: dict[str, Any] | None, start_tz: str | None) -> None:
+    """Make `details` the stay's details (None drops them). The cancellation
+    deadline is a wall time at the property, read in the stay's check-in zone;
+    an aware one is converted into that zone, so it needs one. An existing row
+    is updated in place rather than swapped for a new one with the same key."""
+    if details is None:
+        item.lodging = None
+        return
+    until = details.get("free_cancellation_until")
+    if until is not None and until.tzinfo is not None:
+        if start_tz is None:
+            raise _unprocessable(
+                "free_cancellation_until has an offset but the stay has no zone to read it in"
+            )
+        details["free_cancellation_until"] = to_local(until, start_tz)
+    row = item.lodging or TripItemLodging()
+    for field in LODGING_FIELDS:
+        setattr(row, field, details.get(field))
+    item.lodging = row
+
+
 def _get_item(
     session: Session, trip: Trip, member: TripMember, item_id: uuid.UUID
 ) -> TripItem:
@@ -275,6 +308,7 @@ def build_trip_item(
     creator."""
     values = payload.model_dump()
     segments_payload = values.pop("segments", None)
+    lodging_payload = values.pop("lodging", None)
     del values["participants"]
     del values["notify_members"]
     if payload.kind is TripItemKind.TRANSIT:
@@ -288,6 +322,7 @@ def build_trip_item(
     _check_named(values["title"], values["place_id"])
     item = TripItem(**values, trip_id=trip.id, created_by_id=user.id)
     item.transit_segments = segments
+    _set_lodging(item, lodging_payload, values["start_timezone"])
     if payload.participants is not None:
         _set_participants(session, trip, item, payload.participants)
     else:
@@ -334,6 +369,8 @@ def update_item(
 
     changes = payload.model_dump(exclude_unset=True)
     segments_payload = changes.pop("segments", None)
+    lodging_sent = "lodging" in changes
+    lodging_payload = changes.pop("lodging", None)
     changes.pop("participants", None)
     changes.pop("notify_members", None)
     for field in NOT_NULLABLE:
@@ -343,6 +380,9 @@ def update_item(
 
     resulting_kind = changes.get("kind", item.kind)
     now_transit = resulting_kind is TripItemKind.TRANSIT
+    now_lodging = resulting_kind is TripItemKind.LODGING
+    if lodging_payload is not None and not now_lodging:
+        raise _unprocessable("only lodging items have lodging details")
     span_edited = any(field in changes for field in SPAN_FIELDS)
 
     if segments_payload is not None:
@@ -383,6 +423,10 @@ def update_item(
             item.transit_segments = []
 
     _check_named(changes.get("title", item.title), changes.get("place_id", item.place_id))
+    if lodging_sent:
+        _set_lodging(item, lodging_payload, changes.get("start_timezone", item.start_timezone))
+    elif not now_lodging:  # leaving lodging drops the stay's details
+        item.lodging = None
     for field, value in changes.items():
         setattr(item, field, value)
     if payload.participants is not None:

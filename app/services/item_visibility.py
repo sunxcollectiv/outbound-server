@@ -30,6 +30,8 @@ _REDACTED: dict[str, object] = {
     "lodging": None,
     "rooms": [],
     "created_by": None,
+    "edited_by": None,
+    "has_source": False,
     "participants": [],
 }
 

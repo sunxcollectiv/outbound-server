@@ -26,6 +26,7 @@ from app.models import (
     TransitMode,
     TripItemKind,
     TripItemRequirement,
+    TripItemSource,
     TripItemVisibility,
     TripRole,
 )
@@ -762,6 +763,17 @@ class TripItemRead(TimeSpanRead):
     # A stay's rooms in order, when anyone has spelled them out; usually empty.
     rooms: list[LodgingRoomRead] = Field(default_factory=list)
     created_by: UserRead | None
+    # Where it came from: entered by hand, or imported from an email or a
+    # screenshot. Fixed at creation.
+    source: TripItemSource
+    # Whether the original it was imported from can be fetched, by its
+    # participants, from GET .../items/{id}/source.
+    has_source: bool
+    # The last time someone changed the booking itself (not who's on it, its
+    # visibility or notes), and who. On an imported item, set means it no
+    # longer matches exactly what the booking said. Null if never.
+    edited_at: datetime | None
+    edited_by: UserRead | None
     # Who the item is for. Callers find their own entry by member.user.id.
     participants: list[ParticipantRead]
     created_at: datetime

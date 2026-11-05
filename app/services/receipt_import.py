@@ -35,6 +35,7 @@ from app.models import (
     EmailReceiptStatus,
     ImageReceipt,
     LodgingType,
+    TripItemSource,
     Trip,
     TripMember,
     User,
@@ -246,6 +247,15 @@ def _item_payload(
     return TripItemCreate(**values)
 
 
+def _link_source(item: Any, receipt: Receipt) -> None:
+    """Mark an imported item with where it came from, linking the receipt so
+    its participants can pull up the original."""
+    if isinstance(receipt, EmailReceipt):
+        item.source, item.source_email_receipt_id = TripItemSource.EMAIL, receipt.id
+    else:
+        item.source, item.source_image_id = TripItemSource.IMAGE, receipt.id
+
+
 def import_receipt(session: Session, receipt: Receipt) -> ImportOutcome:
     """Place an extracted receipt's booking into the owner's matching trip. Only
     acts on `extracted` receipts; the caller commits (atomic per receipt)."""
@@ -265,7 +275,7 @@ def import_receipt(session: Session, receipt: Receipt) -> ImportOutcome:
     count = 0
     for item in extraction.get("items") or []:
         payload = _item_payload(session, item, user_id=receipt.user_id, cache=cache)
-        build_trip_item(session, trip, user, payload)
+        _link_source(build_trip_item(session, trip, user, payload), receipt)
         count += 1
 
     receipt.status = EmailReceiptStatus.PROCESSED

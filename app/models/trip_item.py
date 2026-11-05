@@ -60,6 +60,16 @@ class LodgingType(StrEnum):
     OTHER = "other"
 
 
+class TripItemSource(StrEnum):
+    """Where an item came from. Set when it's made and never changed: an
+    imported item the user then edits is still `email`/`image` (see
+    `edited_at`)."""
+
+    MANUAL = "manual"  # entered by hand
+    EMAIL = "email"  # imported from a forwarded confirmation email
+    IMAGE = "image"  # imported from an uploaded screenshot/photo
+
+
 class TripItemRequirement(StrEnum):
     """How much the participants are expected to be there. A label, not an
     enforcement: people can still decline."""
@@ -164,6 +174,13 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         CheckConstraint(
             "transit_mode IS NULL OR kind = 'transit'", name="transit_mode_only_transit"
         ),
+        # An item links to at most the one receipt it came from, of its own
+        # source's type. (A receipt may be gone — the link is then null.)
+        CheckConstraint(
+            "(source_email_receipt_id IS NULL OR source = 'email')"
+            " AND (source_image_id IS NULL OR source = 'image')",
+            name="source_link_matches",
+        ),
         Index("ix_trip_items_trip_id_starts_at", "trip_id", "starts_at"),
     )
 
@@ -211,11 +228,35 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    # Where it came from, and for an import the receipt it was read from — so
+    # the user can check it against (or show staff) the original. Deleting
+    # the receipt keeps the item and clears the link.
+    source: Mapped[TripItemSource] = mapped_column(
+        str_enum(TripItemSource, "trip_item_source"),
+        default=TripItemSource.MANUAL,
+        server_default=TripItemSource.MANUAL.value,
+    )
+    source_email_receipt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("r_email_receipts.id", ondelete="SET NULL"), index=True
+    )
+    source_image_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("r_images.id", ondelete="SET NULL"), index=True
+    )
+    # The last time a person changed the booking itself — its kind, title,
+    # times, places, references, lodging details, rooms or legs — and who.
+    # Never set by an import, and not by changes to who's on it (or in which
+    # room), its visibility, requirement, notes or tags. On an imported item,
+    # set means "no longer exactly what the booking said".
+    edited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    edited_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
     trip: Mapped[Trip] = relationship(back_populates="items")
     place: Mapped[Place | None] = relationship(foreign_keys=[place_id])
     end_place: Mapped[Place | None] = relationship(foreign_keys=[end_place_id])
     created_by: Mapped[User | None] = relationship(foreign_keys=[created_by_id])
+    edited_by: Mapped[User | None] = relationship(foreign_keys=[edited_by_id])
     participants: Mapped[list[TripItemParticipant]] = relationship(
         back_populates="item",
         cascade="all, delete-orphan",
@@ -251,6 +292,11 @@ class TripItem(UUIDPrimaryKeyMixin, TimestampMixin, LocalTimeSpan, Base):
         passive_deletes=True,
         order_by="TripItemLodgingRoom.position",
     )
+
+    @property
+    def has_source(self) -> bool:
+        """Whether the original it was imported from can still be fetched."""
+        return self.source_email_receipt_id is not None or self.source_image_id is not None
 
     @property
     def display_title(self) -> str:

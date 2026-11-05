@@ -2,12 +2,14 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from sqlalchemy import Select, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.api.deps import CurrentUser, SessionDep, ViewableTrip, member_for
+from app.api.deps import CurrentUser, Now, SessionDep, ViewableTrip, member_for
 from app.models import (
+    EmailReceipt,
+    ImageReceipt,
     Place,
     TransitMode,
     Trip,
@@ -28,6 +30,7 @@ from app.schemas import (
     TripItemRead,
     TripItemUpdate,
 )
+from app.services.item_edits import booking_state
 from app.services.item_notifications import (
     ItemSnapshot,
     notify_item_created,
@@ -65,6 +68,7 @@ def with_item_details(query: Select[tuple[TripItem]]) -> Select[tuple[TripItem]]
         selectinload(TripItem.place).selectinload(Place.area),
         selectinload(TripItem.end_place).selectinload(Place.area),
         selectinload(TripItem.created_by),
+        selectinload(TripItem.edited_by),
         selectinload(TripItem.lodging),
         selectinload(TripItem.rooms),
         selectinload(TripItem.participants)
@@ -406,6 +410,67 @@ def read_item(
     return present_item(_get_item(session, trip, member, item_id), member.id)
 
 
+# The original is someone's own booking, served from our origin: never cache it
+# in shared caches, never sniff it into something else, and render an email's
+# HTML with scripts, forms and remote loads (other than images) shut off.
+_ORIGINAL_HEADERS = {
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Disposition": "inline",
+    "Content-Security-Policy": (
+        "sandbox; default-src 'none'; img-src * data:; style-src 'unsafe-inline'"
+    ),
+}
+
+
+@router.get(
+    "/{item_id}/source",
+    response_class=Response,
+    responses={
+        200: {
+            "description": "The original: the image as uploaded, or the email's HTML "
+            "(plain text when it had none).",
+            "content": {"image/*": {}, "text/html": {}, "text/plain": {}},
+        }
+    },
+)
+def read_source(
+    item_id: uuid.UUID, trip: ViewableTrip, user: CurrentUser, session: SessionDep
+) -> Response:
+    """The original an imported item was read from — the uploaded screenshot,
+    or the forwarded email — so its participants can check the item against
+    it or show it to staff. Participants only (it can carry other travelers'
+    details): 403 for anyone else who can see the item. 404 when the item
+    wasn't imported, or its original is gone."""
+    member = viewer(session, trip, user)
+    item = _get_item(session, trip, member, item_id)
+    image = session.get(ImageReceipt, item.source_image_id) if item.source_image_id else None
+    email = (
+        session.get(EmailReceipt, item.source_email_receipt_id)
+        if item.source_email_receipt_id
+        else None
+    )
+    raw = (email.raw or {}) if email is not None else {}
+    html, text = raw.get("html"), raw.get("text")
+    if image is None and not (html or text):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "This item has no original to show")
+    if not any(row.member_id == member.id for row in item.participants):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Only the item's participants can view its original"
+        )
+
+    if image is not None:
+        media_type = (
+            image.content_type
+            if image.content_type.startswith("image/")
+            else "application/octet-stream"
+        )
+        return Response(image.data, media_type=media_type, headers=_ORIGINAL_HEADERS)
+    if html:
+        return Response(html, media_type="text/html; charset=utf-8", headers=_ORIGINAL_HEADERS)
+    return Response(text, media_type="text/plain; charset=utf-8", headers=_ORIGINAL_HEADERS)
+
+
 @router.patch("/{item_id}", response_model=TripItemRead)
 def update_item(
     item_id: uuid.UUID,
@@ -413,12 +478,16 @@ def update_item(
     trip: ViewableTrip,
     user: CurrentUser,
     session: SessionDep,
+    now: Now,
 ) -> TripItemRead:
     """Anyone who can see the item can change it, for now. With
-    `notify_members`, the others who can see it are told what changed."""
+    `notify_members`, the others who can see it are told what changed. A
+    change to the booking itself stamps `edited_at`/`edited_by` (see
+    app.services.item_edits)."""
     member = viewer(session, trip, user)
     item = _get_item(session, trip, member, item_id)
     before = ItemSnapshot.of(item) if payload.notify_members else None
+    booking_before = booking_state(item)
 
     changes = payload.model_dump(exclude_unset=True)
     segments_payload = changes.pop("segments", None)
@@ -495,6 +564,8 @@ def update_item(
             _set_rooms(session, trip, item, payload.rooms)
         else:
             _clear_rooms(item)
+    if booking_state(item) != booking_before:
+        item.edited_at, item.edited_by = now, user
     if before is not None:
         notify_item_updated(session, trip, item, user, before)
     session.commit()

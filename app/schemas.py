@@ -191,6 +191,17 @@ class AreaDetailRead(AreaRead):
     photos: list[AreaPhotoRead] = []
 
 
+class AdminAreaPage(BaseModel):
+    """A page of areas for the admin dashboard, in the same order as the
+    client search (best match first with `q`, else alphabetical), plus the
+    total across all pages for the pager."""
+
+    items: list[AreaRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class AreaPhotosRefreshRequest(BaseModel):
     """The area ids a trip flagged as missing photos (its areas_missing_photos)."""
 

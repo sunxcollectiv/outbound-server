@@ -2,12 +2,13 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import ColumnElement, case, func, select
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import Area
 from app.schemas import (
+    AdminAreaPage,
     AreaCreate,
     AreaDetailRead,
     AreaPhotosRefreshRequest,
@@ -61,6 +62,55 @@ def create_area(payload: AreaCreate, session: SessionDep) -> Area:
     return area
 
 
+def _area_search(
+    q: str | None, kind: str | None
+) -> tuple[list[ColumnElement[bool]], list[ColumnElement]]:
+    """The filters and ordering shared by the client search and the admin list.
+    With a (non-blank) ``q``: name substring match, ranked exact name, then
+    prefix, then substring; ties broken by shorter name, then broader kind
+    (country/territory before city), then alphabetically. Without it: plain
+    alphabetical. ``kind`` restricts to one kind (e.g. ``city``)."""
+    filters: list[ColumnElement[bool]] = []
+    if kind:
+        filters.append(Area.kind == kind)
+    if q and (term := q.strip()):
+        filters.append(Area.name.icontains(term, autoescape=True))
+        match_rank = case(
+            (func.lower(Area.name) == term.lower(), 0),
+            (Area.name.istartswith(term, autoescape=True), 1),
+            else_=2,
+        )
+        return filters, [match_rank, func.length(Area.name), _KIND_RANK, Area.name, Area.id]
+    return filters, [Area.name, Area.id]
+
+
+def _search_areas(
+    session: Session, q: str | None, kind: str | None, limit: int, offset: int
+) -> list[Area]:
+    filters, order_by = _area_search(q, kind)
+    return list(
+        session.scalars(
+            select(Area)
+            .options(selectinload(Area.parent))
+            .where(*filters)
+            .order_by(*order_by)
+            .limit(limit)
+            .offset(offset)
+        )
+    )
+
+
+def _read_area_detail(session: Session, area_id: uuid.UUID) -> Area:
+    area = session.scalar(
+        select(Area)
+        .options(selectinload(Area.parent), selectinload(Area.photos))
+        .where(Area.id == area_id)
+    )
+    if area is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Area not found")
+    return area
+
+
 @router.get("", response_model=list[AreaRead])
 def list_areas(
     _: CurrentUser,
@@ -75,25 +125,32 @@ def list_areas(
     broader kind (country/territory before city), then alphabetically. Pass
     ``kind`` to restrict to one kind (e.g. ``city``). Without ``q`` it's a
     plain alphabetical listing."""
-    query = select(Area).options(selectinload(Area.parent)).limit(limit).offset(offset)
+    return _search_areas(session, q, kind, limit, offset)
 
-    if kind:
-        query = query.where(Area.kind == kind)
 
-    if q:
-        term = q.strip()
-        match_rank = case(
-            (func.lower(Area.name) == term.lower(), 0),
-            (Area.name.istartswith(term, autoescape=True), 1),
-            else_=2,
-        )
-        query = query.where(Area.name.icontains(term, autoescape=True)).order_by(
-            match_rank, func.length(Area.name), _KIND_RANK, Area.name, Area.id
-        )
-    else:
-        query = query.order_by(Area.name, Area.id)
-
-    return list(session.scalars(query))
+@admin_router.get("", response_model=AdminAreaPage, summary="[admin] List areas")
+def admin_list_areas(
+    session: SessionDep,
+    q: Annotated[
+        str | None,
+        Query(description="filter by name (case-insensitive substring), ranked best match first"),
+    ] = None,
+    kind: Annotated[str | None, Query(max_length=60, description="restrict to one kind")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminAreaPage:
+    """Browse the area taxonomy for the management dashboard. Same filters and
+    ordering as the client search (`GET /areas`); `total` is the count across
+    all pages, for the pager."""
+    filters, _order = _area_search(q, kind)
+    total = session.scalar(select(func.count()).select_from(Area).where(*filters)) or 0
+    items = _search_areas(session, q, kind, limit, offset)
+    return AdminAreaPage(
+        items=[AreaRead.model_validate(area) for area in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/refresh-photos", response_model=AreaPhotosRefreshResponse)
@@ -132,15 +189,15 @@ def refresh_area_photos(
 
 @router.get("/{area_id}", response_model=AreaDetailRead)
 def read_area(area_id: uuid.UUID, _: CurrentUser, session: SessionDep) -> Area:
-    """A single area with its candidate photos loaded (the detail/admin view)."""
-    area = session.scalar(
-        select(Area)
-        .options(selectinload(Area.parent), selectinload(Area.photos))
-        .where(Area.id == area_id)
-    )
-    if area is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Area not found")
-    return area
+    """A single area with its candidate photos loaded (the detail view)."""
+    return _read_area_detail(session, area_id)
+
+
+@admin_router.get("/{area_id}", response_model=AreaDetailRead, summary="[admin] Read area")
+def admin_read_area(area_id: uuid.UUID, session: SessionDep) -> Area:
+    """A single area with its parent and candidate photos, for the dashboard's
+    detail/edit view."""
+    return _read_area_detail(session, area_id)
 
 
 @admin_router.patch("/{area_id}", response_model=AreaRead, summary="[admin] Update area")

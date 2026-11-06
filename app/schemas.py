@@ -1117,6 +1117,25 @@ class NotificationRead(ReadModel):
         return self.read_at is not None
 
 
+class AdminNotificationRead(NotificationRead):
+    """A notification as the admin log shows it: whose inbox it's in, plus
+    `archived_at` (dismissed). Every row is listed, including ones not yet
+    due (`visible_at` in the future), expired and dismissed ones."""
+
+    recipient: UserRead
+    archived_at: datetime | None
+
+
+class AdminNotificationPage(BaseModel):
+    """A page of the admin notification log, newest first, plus the total
+    across all pages for the pager."""
+
+    items: list[AdminNotificationRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class NotificationPage(BaseModel):
     """A page of the inbox, newest first. Pass `next_cursor` as `before` for
     the next one; null when there's no more."""

@@ -114,7 +114,7 @@ def test_refunds_show_whose_payment_they_came_from(client, make_user, make_trip,
     assert (suns_charge["refunded_cents"], suns_charge["refunded_to"]) == (80, [_party(sun)])
 
     # The admin view is the same page, from Sun's side.
-    as_admin = client.get(f"/admin/users/{sun.user_id}/credits", params={"limit": 2}, headers=admin)
+    as_admin = client.get(f"/admin/credits/{sun.user_id}", params={"limit": 2}, headers=admin)
     assert as_admin.status_code == 200
     assert as_admin.json() == credits_of(sun, limit=2)
 

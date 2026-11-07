@@ -267,7 +267,7 @@ def grant_credits(payload: CreditGrant, session: SessionDep) -> CreditGrantResul
 
 
 @router.get(
-    "/users/{user_id}/credits",
+    "/credits/{user_id}",
     response_model=CreditsRead,
     tags=["admin/credits"],
     summary="[admin] Read a user's credits",

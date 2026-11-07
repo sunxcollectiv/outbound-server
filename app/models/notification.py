@@ -128,6 +128,8 @@ class Notification(UUIDPrimaryKeyMixin, Base):
     )
 
     actor: Mapped[User | None] = relationship(foreign_keys=[actor_id])
+    # Whose inbox it's in (user_id); loaded for the admin log.
+    recipient: Mapped[User] = relationship(foreign_keys=[user_id])
 
 
 class Announcement(UUIDPrimaryKeyMixin, TimestampMixin, Base):

@@ -191,6 +191,17 @@ class AreaDetailRead(AreaRead):
     photos: list[AreaPhotoRead] = []
 
 
+class AdminAreaPage(BaseModel):
+    """A page of areas for the admin dashboard, in the same order as the
+    client search (best match first with `q`, else alphabetical), plus the
+    total across all pages for the pager."""
+
+    items: list[AreaRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class AreaPhotosRefreshRequest(BaseModel):
     """The area ids a trip flagged as missing photos (its areas_missing_photos)."""
 
@@ -1104,6 +1115,25 @@ class NotificationRead(ReadModel):
     @property
     def read(self) -> bool:
         return self.read_at is not None
+
+
+class AdminNotificationRead(NotificationRead):
+    """A notification as the admin log shows it: whose inbox it's in, plus
+    `archived_at` (dismissed). Every row is listed, including ones not yet
+    due (`visible_at` in the future), expired and dismissed ones."""
+
+    recipient: UserRead
+    archived_at: datetime | None
+
+
+class AdminNotificationPage(BaseModel):
+    """A page of the admin notification log, newest first, plus the total
+    across all pages for the pager."""
+
+    items: list[AdminNotificationRead]
+    total: int
+    limit: int
+    offset: int
 
 
 class NotificationPage(BaseModel):

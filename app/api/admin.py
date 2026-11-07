@@ -15,12 +15,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import selectinload
 
 from app.api import announcements, areas, places, received_images, received_mail
 from app.api.credits import DEFAULT_PAGE, PageCursor, PageLimit, read_statement
 from app.api.deps import SessionDep
-from app.models import Trip, TripItem, TripMember, User
+from app.models import Notification, NotificationCategory, Trip, TripItem, TripMember, User
 from app.schemas import (
+    AdminNotificationPage,
+    AdminNotificationRead,
     AdminTripPage,
     AdminTripRead,
     AdminUserPage,
@@ -117,6 +120,67 @@ def list_trips(
     return AdminTripPage(items=items, total=total, limit=limit, offset=offset)
 
 
+@router.get(
+    "/notifications",
+    response_model=AdminNotificationPage,
+    tags=["admin/notifications"],
+    summary="[admin] List notifications",
+)
+def list_notifications(
+    session: SessionDep,
+    q: Annotated[
+        str | None,
+        Query(description="filter by title or recipient email (case-insensitive substring)"),
+    ] = None,
+    user_id: Annotated[uuid.UUID | None, Query(description="only this recipient's")] = None,
+    category: NotificationCategory | None = None,
+    unread_only: bool = False,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminNotificationPage:
+    """Every notification row across all inboxes, newest first (by
+    `visible_at`, when it lands), with its recipient. Unlike a user's inbox
+    this includes rows not yet due, expired and dismissed ones, and doesn't
+    apply anyone's muted categories. Announcement copies only exist once a
+    user's inbox has been read. `total` is the count across all pages."""
+    filters = []
+    joins_recipient = False
+    if q and (term := q.strip()):
+        joins_recipient = True
+        filters.append(
+            or_(
+                Notification.title.icontains(term, autoescape=True),
+                User.email.icontains(term, autoescape=True),
+            )
+        )
+    if user_id is not None:
+        filters.append(Notification.user_id == user_id)
+    if category is not None:
+        filters.append(Notification.category == category)
+    if unread_only:
+        filters.append(Notification.read_at.is_(None))
+
+    def scoped(stmt):
+        if joins_recipient:
+            stmt = stmt.join(User, User.id == Notification.user_id)
+        return stmt.where(*filters)
+
+    total = session.scalar(scoped(select(func.count()).select_from(Notification))) or 0
+    rows = session.scalars(
+        scoped(select(Notification))
+        .options(selectinload(Notification.recipient), selectinload(Notification.actor))
+        .order_by(Notification.visible_at.desc(), Notification.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return AdminNotificationPage(
+        items=[AdminNotificationRead.model_validate(row) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.post(
     "/notifications",
     response_model=NotificationSendResult,
@@ -203,7 +267,7 @@ def grant_credits(payload: CreditGrant, session: SessionDep) -> CreditGrantResul
 
 
 @router.get(
-    "/users/{user_id}/credits",
+    "/credits/{user_id}",
     response_model=CreditsRead,
     tags=["admin/credits"],
     summary="[admin] Read a user's credits",

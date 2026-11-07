@@ -40,7 +40,7 @@ def test_admin_grants_credits(client, make_user, admin, credits_of):
         "refund_of_payer", "refunded_cents", "refunded_to", "description", "created_at", "title",
     }
     # The admin can see the same thing.
-    assert client.get(f"/admin/users/{sun.user_id}/credits", headers=admin).json() == ledger
+    assert client.get(f"/admin/credits/{sun.user_id}", headers=admin).json() == ledger
 
 
 def test_grant_validation(client, make_user, admin):

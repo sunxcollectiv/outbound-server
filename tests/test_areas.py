@@ -89,6 +89,21 @@ def test_area_search_exact_match_wins(client, make_user, admin):
     assert names[0] == "Nice"
 
 
+def test_area_search_ranks_island_and_region_above_city_on_a_tie(client, make_user, admin):
+    sun = make_user("sun")
+    # Same match quality (prefix) and same length, so kind decides. The names
+    # are chosen so plain alphabetical order would give the opposite answer.
+    for name, kind in [("Cairo", "city"), ("Capri", "island"), ("Cadiz", "city")]:
+        client.post("/admin/areas", json={"name": name, "kind": kind}, headers=admin)
+    names = [a["name"] for a in client.get("/areas", params={"q": "ca"}, headers=sun).json()]
+    assert names == ["Capri", "Cadiz", "Cairo"]
+
+    for name, kind in [("Tuzla", "city"), ("Tyrol", "region")]:
+        client.post("/admin/areas", json={"name": name, "kind": kind}, headers=admin)
+    names = [a["name"] for a in client.get("/areas", params={"q": "t"}, headers=sun).json()]
+    assert names == ["Tyrol", "Tuzla"]
+
+
 def test_area_search_filter_by_kind(client, make_user, admin):
     sun = make_user("sun")
     client.post("/admin/areas", json={"name": "Georgia", "kind": "country"}, headers=admin)

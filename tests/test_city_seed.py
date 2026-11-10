@@ -21,6 +21,23 @@ def test_seed_cities_links_to_parent_country(session: Session):
     assert kyoto.parent.kind == "country"
 
 
+def test_travel_batch_cities_are_seeded(session: Session):
+    """The second, travel-curated batch: destinations the population fill
+    missed, including ones in countries that had no city at all."""
+    seed_areas(session)
+    seed_cities(session)
+
+    for city, country in [
+        ("Edinburgh", "United Kingdom"),
+        ("Miami", "United States"),
+        ("Kraków", "Poland"),
+        ("Praia", "Cape Verde"),
+    ]:
+        area = session.scalar(select(Area).where(Area.name == city, Area.kind == "city"))
+        assert area is not None, city
+        assert area.parent.name == country
+
+
 def test_same_name_cities_in_different_countries_coexist(session: Session):
     seed_areas(session)
     seed_cities(session)

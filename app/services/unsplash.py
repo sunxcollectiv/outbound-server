@@ -123,9 +123,10 @@ def get_unsplash_client() -> UnsplashClient:
 
 
 def search_query_for(area: Area) -> str:
-    """A search query for an area. Cities get their country for context
-    ("Kyoto Japan") so we don't match a same-named place elsewhere."""
-    if area.kind == "city" and area.parent is not None:
+    """A search query for an area. Anything that sits inside another area (a
+    city, island or region in its country) gets the parent for context ("Kyoto
+    Japan", "Bali Indonesia") so we don't match a same-named place elsewhere."""
+    if area.parent is not None:
         return f"{area.name} {area.parent.name}"
     return area.name
 

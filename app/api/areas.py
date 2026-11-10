@@ -62,6 +62,14 @@ def create_area(payload: AreaCreate, session: SessionDep) -> Area:
     return area
 
 
+def _fold(text: ColumnElement[str] | str) -> ColumnElement[str]:
+    """``text`` as area search compares it: accents stripped, then lowercased,
+    so "Kraków", "KRAKOW" and "krakow" all fold to "krakow". Postgres's
+    ``unaccent`` (enabled by a migration) also unpicks letters a plain
+    diacritic-strip misses: "Łódź" → "lodz", "Straße" → "strasse"."""
+    return func.lower(func.unaccent(text))
+
+
 def _area_search(
     q: str | None, kind: str | None
 ) -> tuple[list[ColumnElement[bool]], list[ColumnElement]]:
@@ -74,10 +82,16 @@ def _area_search(
     if kind:
         filters.append(Area.kind == kind)
     if q and (term := q.strip()):
-        filters.append(Area.name.icontains(term, autoescape=True))
+        # Name and term are folded the same way, in SQL, so all three tiers
+        # ignore case and accents: "malaga" is an exact match for "Málaga".
+        # strpos/starts_with rather than LIKE, so the term is always literal:
+        # "%" and "_" in it match only themselves, including ones the folding
+        # itself produces (unaccent turns "％" into "%").
+        name, needle = _fold(Area.name), _fold(term)
+        filters.append(func.strpos(name, needle) > 0)
         match_rank = case(
-            (func.lower(Area.name) == term.lower(), 0),
-            (Area.name.istartswith(term, autoescape=True), 1),
+            (name == needle, 0),
+            (func.starts_with(name, needle), 1),
             else_=2,
         )
         return filters, [match_rank, func.length(Area.name), _KIND_RANK, Area.name, Area.id]
@@ -133,7 +147,10 @@ def admin_list_areas(
     session: SessionDep,
     q: Annotated[
         str | None,
-        Query(description="filter by name (case-insensitive substring), ranked best match first"),
+        Query(
+            description="filter by name (substring, ignoring case and accents), "
+            "ranked best match first"
+        ),
     ] = None,
     kind: Annotated[str | None, Query(max_length=60, description="restrict to one kind")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,

@@ -57,6 +57,73 @@ def test_area_search_by_name(client, make_user, admin):
     assert [area["name"] for area in found.json()] == ["Lyon"]
 
 
+def test_area_search_ignores_accents(client, make_user, admin):
+    sun = make_user("sun")
+    for name in ("Kraków", "Montréal", "Łódź", "Lyon"):
+        client.post("/admin/areas", json={"name": name}, headers=admin)
+
+    def search(q: str) -> list[str]:
+        return [a["name"] for a in client.get("/areas", params={"q": q}, headers=sun).json()]
+
+    # Typed without accents: the whole name, a prefix, and a mid-name substring.
+    assert search("krakow") == ["Kraków"]
+    assert search("montre") == ["Montréal"]
+    assert search("treal") == ["Montréal"]
+    # Typed with them (in any case) still works, for the same three.
+    assert search("Kraków") == ["Kraków"]
+    assert search("MONTRÉ") == ["Montréal"]
+    assert search("tréal") == ["Montréal"]
+    # Letters that aren't a base letter plus a mark fold too.
+    assert search("lodz") == ["Łódź"]
+    # An accent in the term doesn't stop it matching a plain name.
+    assert search("lyón") == ["Lyon"]
+
+
+def test_area_search_ranks_accented_names_like_plain_ones(client, make_user, admin, session):
+    from sqlalchemy import select
+
+    from app.api.areas import _area_search
+    from app.models import Area
+
+    sun = make_user("sun")
+    for name in ("Vélez-Málaga", "Malagasy Coast", "Málaga", "Kemal", "Lyon"):
+        client.post("/admin/areas", json={"name": name, "kind": "city"}, headers=admin)
+
+    def search(q: str) -> list[str]:
+        return [a["name"] for a in client.get("/areas", params={"q": q}, headers=sun).json()]
+
+    # Exact, then prefix, then substring, whether or not the accent is typed.
+    ranked = ["Málaga", "Malagasy Coast", "Vélez-Málaga"]
+    assert search("malaga") == ranked
+    assert search("málaga") == ranked
+    assert search("MÁLAGA") == ranked
+    # "Málaga" is a prefix match for "mal", so it beats the shorter "Kemal",
+    # which only contains it.
+    assert search("mal") == ["Málaga", "Malagasy Coast", "Kemal", "Vélez-Málaga"]
+
+    # The tier each name lands in for "malaga": 0 exact, 1 prefix, 2 substring.
+    # (Ordering alone can't tell an exact match from the shortest prefix match.)
+    filters, order_by = _area_search("malaga", None)
+    tiers = dict(session.execute(select(Area.name, order_by[0]).where(*filters)).all())
+    assert tiers == {"Málaga": 0, "Malagasy Coast": 1, "Vélez-Málaga": 2}
+
+
+def test_area_search_takes_wildcard_characters_literally(client, make_user, admin):
+    sun = make_user("sun")
+    for name in ("100% Agave", "1000 Islands", "Rue_Basse", "Rue Basse"):
+        client.post("/admin/areas", json={"name": name}, headers=admin)
+
+    def search(q: str) -> list[str]:
+        return [a["name"] for a in client.get("/areas", params={"q": q}, headers=sun).json()]
+
+    assert search("100%") == ["100% Agave"]
+    assert search("%") == ["100% Agave"]
+    assert search("rue_b") == ["Rue_Basse"]
+    assert search("_") == ["Rue_Basse"]
+    # A character the accent-folding itself turns into "%" is no wildcard either.
+    assert search("％") == ["100% Agave"]
+
+
 def test_area_kind_and_level_default_to_null(client, admin):
     area = client.post("/admin/areas", json={"name": "Kreuzberg"}, headers=admin).json()
     assert area["kind"] is None
@@ -181,6 +248,21 @@ def test_admin_list_areas_filters_and_ranks(client, admin):
     assert client.get("/admin/areas", params={"kind": "city"}, headers=admin).json()["total"] == 3
     # A blank q is no filter.
     assert client.get("/admin/areas", params={"q": "  "}, headers=admin).json()["total"] == 4
+
+
+def test_admin_list_areas_ignores_accents(client, admin):
+    for name in ("Córdoba", "Cordoba Province", "Nueva Córdoba", "Lyon"):
+        client.post("/admin/areas", json={"name": name, "kind": "city"}, headers=admin)
+
+    # Same folding as GET /areas, and the total counts the accented matches too.
+    for q in ("cordoba", "córdoba"):
+        found = client.get("/admin/areas", params={"q": q}, headers=admin).json()
+        assert found["total"] == 3
+        assert [a["name"] for a in found["items"]] == [
+            "Córdoba",
+            "Cordoba Province",
+            "Nueva Córdoba",
+        ]
 
 
 def test_admin_read_area(client, admin):

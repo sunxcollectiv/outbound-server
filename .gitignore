@@ -6,3 +6,7 @@ __pycache__/
 .env
 # APNs auth keys (.p8): keep them out of the repo.
 *.p8
+# macOS Finder metadata
+.DS_Store
+# Claude Code local files
+.claude/

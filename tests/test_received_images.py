@@ -1,7 +1,8 @@
 import hashlib
 import uuid
+from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.models import EmailReceiptStatus, ImageReceipt
 from app.services.extraction import (
@@ -354,3 +355,60 @@ def test_process_not_a_booking_never_imports(client, make_user, make_trip, image
     ).json()
     assert body["outcome"] == "skipped"
     assert body["receipt"]["status"] == "rejected"
+
+
+# --- admin list + content ---
+
+
+def test_admin_list_images_newest_first_with_total(client, admin, session):
+    first = _upload(client, admin, "first.png")
+    second = _upload(client, admin, "second.png")
+    # A test is one transaction, so now() gave both rows the same created_at
+    # and the order would fall to the random id. Backdate the first.
+    session.execute(
+        update(ImageReceipt)
+        .where(ImageReceipt.id == uuid.UUID(first))
+        .values(created_at=func.now() - timedelta(minutes=1))
+    )
+
+    r = client.get("/admin/received/images", headers=admin)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 2
+    assert [i["id"] for i in body["items"]] == [second, first]
+    assert body["items"][0]["filename"] == "second.png"
+    assert body["items"][0]["user_email"] is None  # admin uploads have no uploader
+    assert "data" not in body["items"][0]  # metadata only
+
+
+def test_admin_list_images_pages_and_filters_by_status(client, admin, image_extractor):
+    _upload(client, admin, "a.png")
+    _upload(client, admin, "b.png")
+    extracted = _extract_image(client, admin, image_extractor, FLIGHT, "c.png")
+
+    r = client.get("/admin/received/images", params={"limit": 1, "offset": 1}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 3
+    assert len(r.json()["items"]) == 1
+
+    r = client.get("/admin/received/images", params={"status": "extracted"}, headers=admin)
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 1
+    assert [i["id"] for i in r.json()["items"]] == [extracted]
+
+
+def test_admin_read_image_content(client, admin):
+    image_id = _upload(client, admin, "ticket.png")
+
+    r = client.get(f"/admin/received/images/{image_id}/content", headers=admin)
+    assert r.status_code == 200
+    assert r.content == PNG
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+    missing = client.get(f"/admin/received/images/{uuid.uuid4()}/content", headers=admin)
+    assert missing.status_code == 404
+
+
+def test_admin_image_list_requires_admin(client):
+    assert client.get("/admin/received/images").status_code in (401, 403)

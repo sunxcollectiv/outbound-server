@@ -905,6 +905,23 @@ class ImageReceiptRead(ReadModel):
     failures: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AdminImageReceiptRead(ImageReceiptRead):
+    """An image receipt as the admin list shows it: the receipt plus the
+    uploader's email (null for admin dev uploads, which have no uploader)."""
+
+    user_email: str | None = None
+
+
+class AdminImagePage(BaseModel):
+    """A page of received images for the admin dashboard, newest first, plus
+    the total across all pages for the pager."""
+
+    items: list[AdminImageReceiptRead]
+    total: int
+    limit: int
+    offset: int
+
+
 class ImportResult(ReadModel):
     """The outcome of importing one receipt: `placed` (into `trip_id`,
     `item_count` items created), `no_match`/`ambiguous` (left `extracted`; for

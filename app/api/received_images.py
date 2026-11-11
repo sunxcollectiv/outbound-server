@@ -2,12 +2,18 @@ import hashlib
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
-from app.schemas import ImageImportResult, ImageReceiptRead
+from app.schemas import (
+    AdminImagePage,
+    AdminImageReceiptRead,
+    ImageImportResult,
+    ImageReceiptRead,
+)
 from app.services.image_extraction import (
     ImageExtractionNotConfigured,
     ImageExtractor,
@@ -98,6 +104,66 @@ def process_upload(
     )
     session.commit()
     return result
+
+
+# --- admin: browse what's been received ---
+
+
+@admin_router.get("", response_model=AdminImagePage, summary="[admin] List images")
+def list_images(
+    session: SessionDep,
+    status_filter: Annotated[
+        EmailReceiptStatus | None,
+        Query(alias="status", description="restrict to one pipeline status"),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> AdminImagePage:
+    """Browse received images for the management dashboard, newest first, with
+    each uploader's email. Metadata only — fetch an image's bytes from
+    `/{image_id}/content`. `total` is the count across all pages, for the pager."""
+    filters = [ImageReceipt.status == status_filter] if status_filter else []
+    total = session.scalar(select(func.count()).select_from(ImageReceipt).where(*filters)) or 0
+    images = session.scalars(
+        select(ImageReceipt)
+        .options(selectinload(ImageReceipt.user))
+        .where(*filters)
+        .order_by(ImageReceipt.created_at.desc(), ImageReceipt.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    items = [
+        AdminImageReceiptRead.model_validate(image).model_copy(
+            update={"user_email": image.user.email if image.user else None}
+        )
+        for image in images
+    ]
+    return AdminImagePage(items=items, total=total, limit=limit, offset=offset)
+
+
+@admin_router.get(
+    "/{image_id}/content",
+    response_class=Response,
+    responses={200: {"content": {"image/*": {}}}},
+    summary="[admin] Read image content",
+)
+def read_image_content(image_id: uuid.UUID, session: SessionDep) -> Response:
+    """The uploaded image's bytes, served with its stored content type, so the
+    dashboard can show a preview."""
+    image = session.get(ImageReceipt, image_id)
+    if image is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Image not found")
+    return Response(
+        content=image.data,
+        media_type=image.content_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            # Uploads only had to claim image/*, so an SVG could carry script.
+            # Never let the bytes run as a page on this origin.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 # --- admin/dev: the pipeline stages, one at a time (no user behind them) ---

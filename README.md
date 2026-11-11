@@ -1,6 +1,6 @@
-# Outbound API
+# Wravel API
 
-Backend for Outbound, a collaborative trip-itinerary app. FastAPI, SQLAlchemy and
+Backend for Wravel, a collaborative trip-itinerary app. FastAPI, SQLAlchemy and
 Postgres 17, with Alembic migrations. Interactive API docs are served at `/docs`.
 
 ## Requirements

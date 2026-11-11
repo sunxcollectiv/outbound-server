@@ -16,7 +16,7 @@ from app.api import (
 from app.api.deps import get_admin_principal
 
 DESCRIPTION = """
-Backend for Outbound, a collaborative trip-itinerary app.
+Backend for Wravel, a collaborative trip-itinerary app.
 
 Authenticate at `/auth`, then send the returned token as
 `Authorization: Bearer <token>` on every other call. The **[admin]** APIs under
@@ -54,7 +54,7 @@ TAGS_METADATA = [
 ]
 
 app = FastAPI(
-    title="Outbound API",
+    title="Wravel API",
     version="0.1.0",
     description=DESCRIPTION,
     openapi_tags=TAGS_METADATA,

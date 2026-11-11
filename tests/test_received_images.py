@@ -1,7 +1,8 @@
 import hashlib
 import uuid
+from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.models import EmailReceiptStatus, ImageReceipt
 from app.services.extraction import (
@@ -359,9 +360,16 @@ def test_process_not_a_booking_never_imports(client, make_user, make_trip, image
 # --- admin list + content ---
 
 
-def test_admin_list_images_newest_first_with_total(client, admin):
+def test_admin_list_images_newest_first_with_total(client, admin, session):
     first = _upload(client, admin, "first.png")
     second = _upload(client, admin, "second.png")
+    # A test is one transaction, so now() gave both rows the same created_at
+    # and the order would fall to the random id. Backdate the first.
+    session.execute(
+        update(ImageReceipt)
+        .where(ImageReceipt.id == uuid.UUID(first))
+        .values(created_at=func.now() - timedelta(minutes=1))
+    )
 
     r = client.get("/admin/received/images", headers=admin)
     assert r.status_code == 200, r.text

@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import defer, selectinload
 
 from app.api.deps import CurrentUser, SessionDep
 from app.models import EmailReceiptStatus, ImageReceipt
@@ -126,7 +126,8 @@ def list_images(
     total = session.scalar(select(func.count()).select_from(ImageReceipt).where(*filters)) or 0
     images = session.scalars(
         select(ImageReceipt)
-        .options(selectinload(ImageReceipt.user))
+        # Metadata only: leave the image bytes in the database.
+        .options(defer(ImageReceipt.data), selectinload(ImageReceipt.user))
         .where(*filters)
         .order_by(ImageReceipt.created_at.desc(), ImageReceipt.id)
         .limit(limit)

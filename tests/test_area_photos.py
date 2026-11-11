@@ -9,6 +9,7 @@ from app.services.unsplash import (
     UnsplashNotConfigured,
     UnsplashPhoto,
     apply_area_photos,
+    search_query_for,
 )
 
 SEARCH_RESULTS = {
@@ -35,6 +36,19 @@ SEARCH_RESULTS = {
 def _client(handler) -> UnsplashClient:
     transport = httpx.MockTransport(handler)
     return UnsplashClient("test-key", http=httpx.Client(transport=transport), app_name="outbound")
+
+
+# --- the search query built for an area ---
+
+
+def test_search_query_adds_the_parent_for_any_nested_area():
+    japan = Area(name="Japan", kind="country")
+    indonesia = Area(name="Indonesia", kind="country")
+    italy = Area(name="Italy", kind="country")
+    assert search_query_for(japan) == "Japan"
+    assert search_query_for(Area(name="Kyoto", kind="city", parent=japan)) == "Kyoto Japan"
+    assert search_query_for(Area(name="Bali", kind="island", parent=indonesia)) == "Bali Indonesia"
+    assert search_query_for(Area(name="Tuscany", kind="region", parent=italy)) == "Tuscany Italy"
 
 
 # --- the real client, against a stubbed transport ---

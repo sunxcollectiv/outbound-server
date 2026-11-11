@@ -35,8 +35,9 @@ UnsplashDep = Annotated[UnsplashClient, Depends(get_unsplash_client)]
 _KIND_RANK = case(
     (Area.kind == "country", 0),
     (Area.kind == "territory", 1),
-    (Area.kind == "city", 2),
-    else_=3,
+    (Area.kind.in_(("region", "island")), 2),
+    (Area.kind == "city", 3),
+    else_=4,
 )
 
 
@@ -68,8 +69,9 @@ def _area_search(
     """The filters and ordering shared by the client search and the admin list.
     With a (non-blank) ``q``: name substring match, ranked exact name, then
     prefix, then substring; ties broken by shorter name, then broader kind
-    (country/territory before city), then alphabetically. Without it: plain
-    alphabetical. ``kind`` restricts to one kind (e.g. ``city``)."""
+    (country/territory, then region/island, then city), then alphabetically.
+    Without it: plain alphabetical. ``kind`` restricts to one kind (e.g.
+    ``city``)."""
     filters: list[ColumnElement[bool]] = []
     if kind:
         filters.append(Area.kind == kind)
@@ -122,9 +124,9 @@ def list_areas(
 ) -> list[Area]:
     """Text-search areas by name. Results are ranked best-match first: exact
     name, then prefix, then substring; ties broken by shorter name, then
-    broader kind (country/territory before city), then alphabetically. Pass
-    ``kind`` to restrict to one kind (e.g. ``city``). Without ``q`` it's a
-    plain alphabetical listing."""
+    broader kind (country/territory, then region/island, then city), then
+    alphabetically. Pass ``kind`` to restrict to one kind (e.g. ``city``).
+    Without ``q`` it's a plain alphabetical listing."""
     return _search_areas(session, q, kind, limit, offset)
 
 

@@ -72,3 +72,13 @@ def store_received_list(session: Session, emails: list[Any]) -> list[EmailReceip
         seen.add(inbound.email_id)
         stored.append(_upsert_received(session, inbound))
     return stored
+
+
+def store_received_webhook(session: Session, data: dict[str, Any]) -> EmailReceipt | None:
+    """Store the email an `email.received` webhook announces (its `data`:
+    metadata only — the extract stage fetches the body). None if it names no
+    email id."""
+    inbound = InboundEmail.from_webhook(data)
+    if inbound is None:
+        return None
+    return _upsert_received(session, inbound)

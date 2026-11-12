@@ -486,3 +486,38 @@ def test_process_is_idempotent(client, make_user, admin, make_trip, resend, mail
     # Re-running pulls the same mail, but it's already processed → nothing to do.
     assert client.post("/admin/received/mail/process", headers=admin).json() == []
     assert len(mail_extractor.calls) == 1
+
+
+def test_flight_import_reuses_the_seeded_airport_by_code(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    """A flight's airports resolve by IATA code to the airport we already have,
+    whatever the email called it, instead of adding a name-only stub."""
+    lax = Place(name="Los Angeles International Airport", category="airport", code="LAX")
+    session.add(lax)
+    session.commit()
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_code", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_code", headers=admin)
+
+    legs = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["segments"]
+    assert legs[0]["place"]["id"] == str(lax.id)
+    assert legs[0]["place"]["name"] == "Los Angeles International Airport"
+
+    # Airports we didn't have are created with their code, once each, so the
+    # next booking finds them by code too.
+    hnd = session.scalars(select(Place).where(Place.code == "HND")).all()
+    assert len(hnd) == 1 and hnd[0].category == "airport"
+    assert legs[0]["end_place"]["id"] == legs[1]["place"]["id"] == str(hnd[0].id)
+    assert not session.scalars(select(Place).where(Place.code.is_(None), Place.name == "LAX")).all()
+
+
+def test_second_flight_import_finds_airports_created_by_the_first(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_one", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_one", headers=admin)
+    _make_extracted(client, admin, resend, mail_extractor, "re_two", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_two", headers=admin)
+
+    for code in ("LAX", "HND", "ITM"):
+        assert len(session.scalars(select(Place).where(Place.code == code)).all()) == 1, code

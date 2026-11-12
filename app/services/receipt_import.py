@@ -43,10 +43,9 @@ from app.models import (
     User,
 )
 from app.schemas import TripItemCreate
-from app.services.place_resolver import resolve_place
+from app.services.place_resolver import PlaceCache, resolve_place
 
 Receipt = EmailReceipt | ImageReceipt
-PlaceCache = dict  # (norm_name, norm_address) -> place id, per import call
 
 Outcome = Literal["placed", "no_match", "ambiguous", "skipped"]
 
@@ -210,8 +209,20 @@ def _item_payload(
     hotels) to Place ids via the shared resolver as we go."""
     kind = item.get("kind") or "activity"
 
-    def place_id(descriptor: dict[str, Any] | None, tz: str | None) -> Any:
-        return resolve_place(session, descriptor, timezone=tz, created_by_id=user_id, cache=cache)
+    def place_id(
+        descriptor: dict[str, Any] | None, tz: str | None, mode: str | None = None
+    ) -> Any:
+        # On a flight the extracted code is an IATA airport code, so the place
+        # resolves by it (to the seeded airport). Other modes' codes (a station)
+        # aren't airports, so they match by name and address as before.
+        return resolve_place(
+            session,
+            descriptor,
+            timezone=tz,
+            created_by_id=user_id,
+            cache=cache,
+            code_category="airport" if mode == "flight" else None,
+        )
 
     values: dict[str, Any] = {
         "kind": kind,
@@ -228,8 +239,16 @@ def _item_payload(
                 "flight_number": seg.get("flight_number"),
                 "transit_mode": seg.get("transit_mode"),
                 "confirmation_number": seg.get("confirmation_number"),
-                "place_id": place_id(seg.get("origin"), seg.get("start_timezone")),
-                "end_place_id": place_id(seg.get("destination"), seg.get("end_timezone")),
+                "place_id": place_id(
+                    seg.get("origin"),
+                    seg.get("start_timezone"),
+                    seg.get("transit_mode") or item.get("transit_mode"),
+                ),
+                "end_place_id": place_id(
+                    seg.get("destination"),
+                    seg.get("end_timezone"),
+                    seg.get("transit_mode") or item.get("transit_mode"),
+                ),
             }
             for seg in segments
         ]
@@ -250,8 +269,9 @@ def _item_payload(
         values["rooms"] = _rooms(item.get("lodging"))
     else:
         values.update(_ends(item))
-        values["place_id"] = place_id(item.get("place"), item.get("start_timezone"))
-        values["end_place_id"] = place_id(item.get("end_place"), item.get("end_timezone"))
+        mode = item.get("transit_mode") if kind == "transit" else None
+        values["place_id"] = place_id(item.get("place"), item.get("start_timezone"), mode)
+        values["end_place_id"] = place_id(item.get("end_place"), item.get("end_timezone"), mode)
         if kind == "transit":
             values["transit_mode"] = item.get("transit_mode")
     return TripItemCreate(**values)

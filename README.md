@@ -119,6 +119,11 @@ Airports are places with `category` set to `airport` and their IATA code in
 commercial service, from [OurAirports](https://ourairports.com/data/) (public
 domain).
 
+`GET /places/airports?q=…&limit=…` searches them by code and name for a
+manually entered flight. Any signed-in user can call it. The order is: the
+exact code, then codes starting with `q`, names starting with `q`, names with a
+word starting with `q`, and names containing `q`.
+
 - `app/seeds/_airports_data.py`: **generated**. Do not edit it by hand.
 - `app/seeds/_airport_google_ids.py`: **generated** by
   `scripts/export_airport_google_ids.py`. Do not edit it by hand.

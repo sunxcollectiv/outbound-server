@@ -468,3 +468,53 @@ def test_a_category_we_set_is_not_replaced_by_googles():
     place = Place(category="airport")
     apply_google_place(place, {"id": "ChIJ-x", "primaryType": "heliport"})
     assert place.category == "airport"
+
+
+def _airport(session, code, name, **fields):
+    place = Place(category="airport", code=code, name=name, **fields)
+    session.add(place)
+    return place
+
+
+def test_airport_search_matches_code_and_name(client, make_user, session):
+    sun = make_user("sun")
+    _airport(session, "LHR", "London Heathrow Airport")
+    _airport(session, "LGW", "London Gatwick Airport")
+    _airport(session, "LAX", "Los Angeles International Airport")
+    _airport(session, "JFK", "John F Kennedy International Airport")
+    # Not an airport, so never offered even though the name matches.
+    session.add(Place(category="hotel", name="Heathrow Hilton"))
+    session.commit()
+
+    def codes(q, **params):
+        found = client.get("/places/airports", params={"q": q, **params}, headers=sun)
+        assert found.status_code == 200, found.text
+        return [place["code"] for place in found.json()]
+
+    assert codes("lhr") == ["LHR"]
+    assert codes("heath") == ["LHR"]
+    assert codes("london") == ["LGW", "LHR"]
+    assert codes("kennedy") == ["JFK"]
+    assert codes("%") == []
+    assert codes("  ") == []
+    assert codes("london", limit=1) == ["LGW"]
+
+
+def test_airport_search_ranks_the_exact_code_first(client, make_user, session):
+    sun = make_user("sun")
+    # "LA" is LAX's code prefix, but also the start of many names.
+    _airport(session, "ABC", "La Aurora International Airport")
+    _airport(session, "XYZ", "Playa Grande Airport")
+    _airport(session, "LAX", "Los Angeles International Airport")
+    _airport(session, "LA", "Exact Code Test Airport")
+    session.commit()
+
+    found = client.get("/places/airports", params={"q": "la"}, headers=sun).json()
+    # Exact code, code prefix, name prefix, then a word inside the name.
+    assert [place["code"] for place in found] == ["LA", "LAX", "ABC", "XYZ"]
+
+
+def test_airport_search_needs_a_user_and_a_query(client, make_user):
+    assert client.get("/places/airports", params={"q": "lhr"}).status_code == 401
+    sun = make_user("sun")
+    assert client.get("/places/airports", headers=sun).status_code == 422

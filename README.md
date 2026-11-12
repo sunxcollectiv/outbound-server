@@ -86,12 +86,27 @@ except the database is optional; a feature with no key is switched off.
 | `UNSPLASH_ACCESS_KEY` | Fetching area cover photos |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID` | Parsing forwarded emails and screenshots into trip items |
 | `RESEND_API_KEY` | Retrieving forwarded travel-confirmation emails |
+| `RESEND_WEBHOOK_SECRET` | Accepting Resend's `email.received` webhook at `POST /webhooks/resend` (the webhook's signing secret, `whsec_...`). Without it the route answers 503 |
 | `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_PRIVATE_KEY` or `APNS_KEY_PATH` | Push notifications. Without a key, pushes are skipped |
 | `APNS_USE_SANDBOX` | `true` (default) for Xcode builds; `false` for TestFlight and App Store builds |
 | `STOREKIT_APP_APPLE_ID` | Required to accept production in-app purchases |
 | `STOREKIT_ALLOW_XCODE` | Accept unsigned Xcode purchases. Local servers only |
 
 Never commit `.env` or an APNs `.p8` key; both are git-ignored.
+
+## Forwarded email
+
+A travel confirmation forwarded to the Resend inbound address becomes trip items without anyone asking for it:
+
+1. Resend posts an `email.received` event to `POST /webhooks/resend`. The call is authenticated by its signature, checked against `RESEND_WEBHOOK_SECRET`.
+2. The email is stored as a receipt and the webhook answers.
+3. In the background the email is checked against its sender, read by Claude, and imported into the sender's trip.
+
+An email is only imported when its From address is a registered user's email and the booking's dates overlap exactly one of their trips. Otherwise the receipt is kept with the reason (`ignored`, `rejected`, or `extracted` with no trip chosen).
+
+To set it up, add a webhook in the Resend dashboard for the `email.received` event pointing at `https://<host>/webhooks/resend`, and put its signing secret in `RESEND_WEBHOOK_SECRET`.
+
+`POST /admin/received/mail/process` runs the same pipeline by pulling recent mail from Resend. Use it to catch up on anything a webhook missed, such as mail that arrived while the server was down.
 
 ## Areas
 

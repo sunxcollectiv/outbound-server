@@ -12,6 +12,7 @@ from app.api import (
     trip_items,
     trips,
     users,
+    webhooks,
 )
 from app.api.deps import get_admin_principal
 
@@ -40,6 +41,7 @@ TAGS_METADATA = [
     {"name": "notifications", "description": "The in-app inbox, per-category/channel preferences, and push-device registration."},
     {"name": "pricing", "description": "The rate tables trips are priced from."},
     {"name": "credits", "description": "The caller's credit balance and ledger; trips are paid for in credits."},
+    {"name": "webhooks", "description": "Calls from outside services, authenticated by their signature rather than a bearer token: Resend announcing a received email."},
     {"name": "meta", "description": "Service health and metadata."},
     # --- admin (service-token only); one section per area ---
     {"name": "admin/users", "description": "[admin] Browse every user account (paginated)."},
@@ -70,6 +72,7 @@ app.include_router(received_images.router)  # user-facing POST /received/images/
 app.include_router(notifications.router)
 app.include_router(pricing.router)
 app.include_router(credits.router)
+app.include_router(webhooks.router)  # signature-checked, no bearer token
 # Everything privileged lives under /admin/* (management endpoints + the
 # announcements and received-mail/images routers, included inside admin.router).
 # The admin gate is applied once, here, so no route under /admin can be

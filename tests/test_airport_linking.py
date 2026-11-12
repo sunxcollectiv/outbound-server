@@ -9,6 +9,7 @@ from app.models import Place, TripDay
 from app.services.airport_linking import (
     choose_match,
     distance_km,
+    fill_airport_details,
     link_airport,
     merge_places,
     names_agree,
@@ -305,3 +306,27 @@ def test_merge_places_folds_a_codeless_stub_into_the_airport(
     assert (airport.category, airport.code) == ("airport", "LAX")
     assert airport.name == "Los Angeles International Airport"
     assert airport.google_place_id == "ChIJ-lax"
+
+
+def test_fill_details_for_an_airport_seeded_with_an_id(session, google_places):
+    place = _lax(session, google_place_id="ChIJ-lax")
+    google_places.places["ChIJ-lax"] = _candidate()
+
+    result = fill_airport_details(google_places, place)
+
+    assert result.linked
+    assert google_places.calls == ["ChIJ-lax"]
+    assert place.google_data["photos"] and place.google_fetched_at is not None
+    assert place.address == "1 World Way, Los Angeles, CA 90045, USA"
+    assert place.name == "Los Angeles International Airport"
+
+
+def test_fill_details_reports_an_id_google_no_longer_knows(session, google_places):
+    place = _lax(session, google_place_id="ChIJ-gone")
+
+    result = fill_airport_details(google_places, place)
+
+    assert not result.linked
+    assert "no longer knows" in result.reason
+    assert place.google_place_id == "ChIJ-gone"
+    assert place.google_data is None

@@ -120,6 +120,8 @@ commercial service, from [OurAirports](https://ourairports.com/data/) (public
 domain).
 
 - `app/seeds/_airports_data.py`: **generated**. Do not edit it by hand.
+- `app/seeds/_airport_google_ids.py`: **generated** by
+  `scripts/export_airport_google_ids.py`. Do not edit it by hand.
   Regenerate from the current OurAirports file:
 
   ```bash
@@ -130,17 +132,28 @@ The seed only adds airports whose code is not in the database yet. It never
 renames, moves or removes an existing one, so an airport that closes or changes
 code upstream has to be fixed by hand through `PATCH /admin/places/{id}`.
 
-Seeded airports have no Google place, so no real address or cover photo. To
-attach one where the match is confident (needs `GOOGLE_MAPS_API_KEY`; one billed
-Text Search request per airport, so start with a small dry run):
+Each seeded airport also gets its Google place id from
+`app/seeds/_airport_google_ids.py`, matched and reviewed once and exported from
+the database where that happened. Only the ids are seeded: Google's terms allow
+storing a place id indefinitely but not its address or photos, so a new server
+fetches those itself (needs `GOOGLE_MAPS_API_KEY`; one billed Place Details
+request per airport):
 
 ```bash
-uv run python scripts/link_airports_to_google.py --dry-run --limit 25
+uv run python scripts/link_airports_to_google.py --skip-search
 ```
 
-An airport is linked only when a single airport-typed result sits within 5 km
-of its coordinates and its name agrees (`app/services/airport_linking.py`). The
-rest are left unlinked and listed with the reason.
+Until then an airport shows a "City, Country" placeholder address, which the
+first Google fetch replaces.
+
+Without `--skip-search` the script also searches Google for airports that have
+no id at all, and links one only when a single airport-typed result sits within
+5 km of it and its name agrees (`app/services/airport_linking.py`). After
+reviewing new matches, regenerate the id list from that database:
+
+```bash
+uv run python scripts/export_airport_google_ids.py
+```
 
 ## Tests
 

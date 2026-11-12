@@ -22,8 +22,9 @@ Deliberately not done here, because each needs a secret or a decision:
   - A service token for the /admin APIs:  scripts/issue_service_token.py
   - Area cover photos (UNSPLASH_ACCESS_KEY, rate-limited):
                                           scripts/backfill_area_photos.py
-  - Google places for the airports (GOOGLE_MAPS_API_KEY, billed per search):
-                                          scripts/link_airports_to_google.py
+  - Google addresses and photos for the airports (GOOGLE_MAPS_API_KEY, billed
+    per airport; the seed gives them ids only):
+                                          scripts/link_airports_to_google.py --skip-search
 
 Airports are the only places seeded; every other place is created from Google
 as people add it.
@@ -106,8 +107,13 @@ def main() -> None:
         airports = seed_airports(session)
         print(
             f"Airports: created {airports['created']} ({airports['linked']} linked to an area), "
-            f"already present {airports['skipped']}"
+            f"already present {airports['skipped']}, Google ids applied {airports['google_ids']}"
         )
+        if airports["google_id_conflicts"]:
+            print(
+                f"  {airports['google_id_conflicts']} Google ids skipped: another place has them "
+                "(the link script merges those airports)"
+            )
 
     total = sum(count for _, count in by_kind)
     print(f"Areas now: {total} (" + ", ".join(f"{kind} {count}" for kind, count in by_kind) + ")")
@@ -119,7 +125,7 @@ def main() -> None:
     print("Not done here:")
     print('  - Admin access:  uv run python scripts/issue_service_token.py "<name>"')
     print("  - Area photos:   uv run python scripts/backfill_area_photos.py  (needs UNSPLASH_ACCESS_KEY)")
-    print("  - Airport links: uv run python scripts/link_airports_to_google.py  (needs GOOGLE_MAPS_API_KEY)")
+    print("  - Airport details: uv run python scripts/link_airports_to_google.py --skip-search  (needs GOOGLE_MAPS_API_KEY)")
 
 
 if __name__ == "__main__":

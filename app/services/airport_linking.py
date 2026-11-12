@@ -35,8 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import Place
-from app.seeds._airports_data import AIRPORTS
-from app.services.google_places import GooglePlacesClient, apply_google_place
+from app.services.google_places import GooglePlaceNotFound, GooglePlacesClient, apply_google_place
 
 # Google place types that mean "somewhere scheduled flights leave from".
 AIRPORT_TYPES = frozenset({"airport", "international_airport", "airstrip", "heliport"})
@@ -62,13 +61,6 @@ _GENERIC_WORDS = frozenset(
     de del di da do la le el the of and
     """.split()
 )
-
-# The seed's placeholder address for each code, to tell it from an edited one.
-_SEEDED_ADDRESS = {
-    code: ", ".join(part for part in (city, country) if part) or None
-    for code, _name, city, country, *_ in AIRPORTS
-}
-
 
 @dataclass(frozen=True)
 class LinkResult:
@@ -252,10 +244,22 @@ def link_airport(session: Session, client: GooglePlacesClient, place: Place) -> 
         )
 
     place.google_place_id = match["id"]
-    # Replace the seed's "City, Country" placeholder with the real address, but
-    # leave an address someone has edited.
-    if place.address is None or place.address == _SEEDED_ADDRESS.get(place.code or ""):
-        place.address = match.get("formattedAddress") or place.address
-    # Caches the result and fills anything still empty; never overwrites ours.
+    # Caches the result, fills anything still empty and swaps the seed's
+    # placeholder address for the real one; never overwrites our own data.
     apply_google_place(place, match)
     return LinkResult(True, reason, match["id"], _name(match))
+
+
+def fill_airport_details(client: GooglePlacesClient, place: Place) -> LinkResult:
+    """Fetch Place Details for an airport that has a Google id but no Google data
+    yet (a new server, seeded with ids only) and apply them: the cache, the
+    cover photo, and the real address in place of the seed's placeholder.
+    Changes are left uncommitted. A Google id Google no longer knows is
+    reported, not fixed: the airport keeps it for a person to re-link. Raises
+    GooglePlacesError if the request itself fails."""
+    try:
+        details = client.fetch_place(place.google_place_id)
+    except GooglePlaceNotFound:
+        return LinkResult(False, "Google no longer knows this place id", place.google_place_id)
+    apply_google_place(place, details)
+    return LinkResult(True, "details fetched", place.google_place_id, _name(details))

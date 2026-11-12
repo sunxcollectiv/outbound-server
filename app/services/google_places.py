@@ -151,8 +151,17 @@ def simplify_category(primary_type: str | None) -> str | None:
 def apply_google_place(place: Place, details: dict[str, Any]) -> None:
     """Refresh the Google cache on a place and fill in anything we don't have.
 
-    Google's values never overwrite columns that already hold our own data.
+    Google's values never overwrite columns that already hold our own data —
+    except a seeded airport's placeholder address, which isn't really data.
     """
+    # A seeded airport's "City, Country" placeholder is ours only nominally:
+    # Google's real address replaces it (an address someone typed is kept).
+    # Imported lazily: the seed list is large and the seeds import the models.
+    from app.seeds.airports import has_seeded_address
+
+    if details.get("formattedAddress") and has_seeded_address(place):
+        place.address = details["formattedAddress"]
+
     place.google_data = details
     place.google_fetched_at = datetime.now(UTC)
 

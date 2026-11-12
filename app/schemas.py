@@ -221,6 +221,8 @@ class AreaPhotosRefreshResponse(BaseModel):
 
 class PlaceBase(BaseModel):
     category: str | None = Field(default=None, max_length=60)
+    # Meaning depends on `category`: the IATA code for an "airport".
+    code: str | None = Field(default=None, min_length=1, max_length=20)
     notes: str | None = None
     photo_url: Url | None = None
     address: str | None = Field(default=None, max_length=500)
@@ -262,6 +264,7 @@ class PlaceRead(ReadModel):
     id: uuid.UUID
     name: str | None
     category: str | None
+    code: str | None
     notes: str | None
     photo_url: str | None
     address: str | None

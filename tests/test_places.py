@@ -12,6 +12,7 @@ from app.services.google_places import (
     GooglePlacesClient,
     GooglePlacesError,
     GooglePlacesNotConfigured,
+    apply_google_place,
     get_google_places_client,
     resolve_cover_photo,
 )
@@ -417,3 +418,53 @@ def test_place_admin_endpoints_are_admin_only(client, make_user):
     created = client.post("/places", json={"google_place_id": "ChIJ-open"}, headers=sun)
     assert created.status_code in (200, 201), created.text
     assert client.get(f"/places/{created.json()['id']}", headers=sun).status_code == 200
+
+
+def test_place_code_is_unique_within_a_category(client, make_user, admin):
+    sun = make_user("sun")
+    first = client.post("/places", json={"google_place_id": "ChIJ-lax"}, headers=sun).json()
+    second = client.post("/places", json={"google_place_id": "ChIJ-lax-2"}, headers=sun).json()
+
+    tagged = client.patch(
+        f"/admin/places/{first['id']}", json={"category": "airport", "code": "LAX"}, headers=admin
+    )
+    assert tagged.status_code == 200
+    assert tagged.json()["code"] == "LAX"
+
+    duplicate = client.patch(
+        f"/admin/places/{second['id']}", json={"category": "airport", "code": "LAX"}, headers=admin
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "A place with this category and code already exists"
+
+    # The same code under another category is a different thing.
+    other = client.patch(
+        f"/admin/places/{second['id']}", json={"category": "train_station", "code": "LAX"}, headers=admin
+    )
+    assert other.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("primary_type", "category"),
+    [
+        ("international_airport", "airport"),
+        ("airport", "airport"),
+        # Not every aviation type is somewhere you fly from, and nothing is
+        # matched by substring.
+        ("heliport", "heliport"),
+        ("airstrip", "airstrip"),
+        ("airport_store", "airport_store"),
+        ("hotel", "hotel"),
+        (None, None),
+    ],
+)
+def test_google_airport_types_are_stored_as_airport(primary_type, category):
+    place = Place()
+    apply_google_place(place, {"id": "ChIJ-x", "primaryType": primary_type})
+    assert place.category == category
+
+
+def test_a_category_we_set_is_not_replaced_by_googles():
+    place = Place(category="airport")
+    apply_google_place(place, {"id": "ChIJ-x", "primaryType": "heliport"})
+    assert place.category == "airport"

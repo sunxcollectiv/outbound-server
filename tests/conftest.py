@@ -75,6 +75,13 @@ class FakeGooglePlaces(GooglePlacesClient):
     def __init__(self) -> None:
         self.places: dict[str, dict[str, Any]] = {}
         self.calls: list[str] = []
+        # What search_text returns for any query; tests set it per case.
+        self.search_results: list[dict[str, Any]] = []
+        self.searches: list[dict[str, Any]] = []
+
+    def search_text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+        self.searches.append({"query": query, **kwargs})
+        return self.search_results
 
     def fetch_place(self, place_id: str) -> dict[str, Any]:
         self.calls.append(place_id)

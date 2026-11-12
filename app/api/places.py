@@ -67,11 +67,15 @@ def _fetch_place(places: GooglePlacesClient, place_id: str) -> dict:
 def _commit_unique_place(session: SessionDep) -> None:
     try:
         session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         session.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "A place with this google_place_id already exists"
-        ) from None
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        detail = (
+            "A place with this category and code already exists"
+            if constraint == "uq_places_category_code"
+            else "A place with this google_place_id already exists"
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, detail) from None
 
 
 def _try_enrich(session: SessionDep, places: GooglePlacesClient, place: Place) -> None:

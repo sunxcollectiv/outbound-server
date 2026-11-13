@@ -5,7 +5,7 @@ Postgres 17, with Alembic migrations. Interactive API docs are served at `/docs`
 
 ## Requirements
 
-- Python 3.12 or newer, managed with [uv](https://docs.astral.sh/uv/)
+- Python 3.15 (pinned in `.python-version`; the server image matches), managed with [uv](https://docs.astral.sh/uv/)
 - Postgres 17 (Docker Compose runs one for local development)
 
 ## Environments

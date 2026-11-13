@@ -1,8 +1,11 @@
 # The API's server image (staging, prod). Locally the API runs from the uv venv;
 # see the README.
-FROM python:3.12-slim
+# Same Python as local development (.python-version), so prod runs what the
+# tests ran on.
+FROM python:3.15-slim
 
-COPY --from=ghcr.io/astral-sh/uv:0.5.31 /uv /usr/local/bin/uv
+# The uv that wrote uv.lock.
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 WORKDIR /app
 # Unbuffered so `docker compose logs` shows a line when it is logged.

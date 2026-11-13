@@ -10,3 +10,6 @@ __pycache__/
 .DS_Store
 # Claude Code local files
 .claude/
+
+# .env backups from deploy/newenv.sh
+.env.*

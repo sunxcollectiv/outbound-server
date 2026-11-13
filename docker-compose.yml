@@ -1,20 +1,63 @@
+# Postgres for local development; Postgres and the API on a server.
+#
+# Locally the API is not containerised: it runs from the uv venv with reload.
+# The `app` service sits behind the `server` profile, so it is invisible to
+# `docker compose up -d db` here and switched on by COMPOSE_PROFILES=server in
+# a server's .env, where a plain `docker compose up -d` brings up both.
+#
+# Every value comes from .env, written by deploy/newenv.sh.
+
 services:
   db:
     image: postgres:17
-    container_name: outbound-db
+    container_name: wravel-db
     environment:
-      POSTGRES_USER: outbound
-      POSTGRES_PASSWORD: outbound
-      POSTGRES_DB: outbound
+      POSTGRES_USER: ${POSTGRES_USER:-wravel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (deploy/newenv.sh)}
+      POSTGRES_DB: ${POSTGRES_DB:-wravel}
     ports:
-      - "127.0.0.1:4930:5432"
+      # Loopback only, never 0.0.0.0: Compose's short syntax defaults to every
+      # interface, which on a host with no firewall is a public Postgres guarded
+      # only by its password. 4930 on every machine, leaving 5432 to any
+      # Postgres already installed.
+      - "127.0.0.1:${POSTGRES_PORT:-4930}:5432"
     volumes:
-      - outbound-db-data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U outbound -d outbound"]
-      interval: 2s
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wravel} -d ${POSTGRES_DB:-wravel}"]
+      interval: 3s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  app:
+    profiles: [server]
+    build: .
+    image: wravel-server
+    container_name: wravel-server
+    env_file: .env
+    environment:
+      # These win over env_file. DATABASE_URL is built from the same POSTGRES_*
+      # values the db container gets, so the two cannot drift.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-wravel}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-wravel}
+    ports:
+      # Loopback only; nginx on the host proxies here. Inside the container the
+      # API always listens on 4830.
+      - "127.0.0.1:${PORT:-4830}:4830"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      # The slim image has no curl; urlopen raises on anything but a 2xx.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4830/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Replaces a systemd unit: Docker starts at boot and brings the API back
+    # after a crash or reboot.
+    restart: unless-stopped
 
 volumes:
-  outbound-db-data:
+  pgdata:

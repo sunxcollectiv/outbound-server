@@ -33,7 +33,7 @@ from app.services.mail_extraction import (
 from app.services.resend import ResendClient, ResendError, get_resend_client
 from app.services.unsplash import UnsplashClient, UnsplashPhoto, get_unsplash_client
 
-TEST_DATABASE = "outbound_test"
+TEST_DATABASE = "wravel_test"
 
 
 @pytest.fixture(scope="session")

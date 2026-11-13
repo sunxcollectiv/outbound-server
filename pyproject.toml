@@ -1,7 +1,7 @@
 [project]
-name = "outbound-api"
+name = "wravel-server"
 version = "0.1.0"
-description = "Backend for the Outbound trip itinerary app"
+description = "Backend for Wravel, a collaborative trip-itinerary app"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",

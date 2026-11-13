@@ -51,24 +51,6 @@ uv run python scripts/bootstrap.py  # migrate, then seed countries, cities, regi
 uv run python main.py               # API on http://127.0.0.1:4830, with reload
 ```
 
-### Moving an `outbound` database to `wravel`
-
-The database, its user and its container used to be called `outbound`
-(container `outbound-db`, volume `wravel-server_outbound-db-data`). A machine
-with that old database moves its data over once:
-
-```bash
-docker exec outbound-db pg_dump -U outbound -Fc outbound > outbound.dump
-docker stop outbound-db && docker rm outbound-db  # frees port 4930; the old volume is kept
-deploy/newenv.sh local --force                    # keeps your keys, adds POSTGRES_* and DATABASE_URL
-docker compose up -d --wait db
-docker compose exec -T db pg_restore -U wravel -d wravel --no-owner < outbound.dump
-uv run python scripts/bootstrap.py
-```
-
-Once the app works against it, delete `outbound.dump` and the old volume
-(`docker volume rm wravel-server_outbound-db-data`).
-
 ## Deploying to a server
 
 One Linux host per environment: nginx on the host terminating TLS on 443 and

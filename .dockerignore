@@ -1,0 +1,12 @@
+.git
+.venv
+.idea
+.claude
+.pytest_cache
+**/__pycache__
+*.egg-info
+.DS_Store
+# Configuration and secrets reach the container through Compose, never the image.
+.env
+.env.*
+*.p8

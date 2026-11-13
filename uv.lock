@@ -903,52 +903,6 @@ wheels = [
 ]
 
 [[package]]
-name = "outbound-api"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "anthropic" },
-    { name = "app-store-server-library" },
-    { name = "argon2-cffi" },
-    { name = "email-validator" },
-    { name = "fastapi" },
-    { name = "httpx", extra = ["http2"] },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic-settings" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-multipart" },
-    { name = "sqlalchemy" },
-    { name = "tzdata" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.14" },
-    { name = "anthropic", specifier = ">=1.15" },
-    { name = "app-store-server-library", specifier = ">=3.1" },
-    { name = "argon2-cffi", specifier = ">=23.1" },
-    { name = "email-validator", specifier = ">=2.2" },
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "pydantic-settings", specifier = ">=2.6" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "sqlalchemy", specifier = ">=2.0.40" },
-    { name = "tzdata", specifier = ">=2024.2" },
-    { name = "uvicorn", specifier = ">=0.30" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "packaging"
 version = "26.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1419,3 +1373,49 @@ sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cf
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
 ]
+
+[[package]]
+name = "wravel-server"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "anthropic" },
+    { name = "app-store-server-library" },
+    { name = "argon2-cffi" },
+    { name = "email-validator" },
+    { name = "fastapi" },
+    { name = "httpx", extra = ["http2"] },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-multipart" },
+    { name = "sqlalchemy" },
+    { name = "tzdata" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.14" },
+    { name = "anthropic", specifier = ">=1.15" },
+    { name = "app-store-server-library", specifier = ">=3.1" },
+    { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "email-validator", specifier = ">=2.2" },
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", extras = ["http2"], specifier = ">=0.27" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "sqlalchemy", specifier = ">=2.0.40" },
+    { name = "tzdata", specifier = ">=2024.2" },
+    { name = "uvicorn", specifier = ">=0.30" },
+]
+provides-extras = ["dev"]

@@ -12,6 +12,7 @@ from app.services.google_places import (
     GooglePlacesClient,
     GooglePlacesError,
     GooglePlacesNotConfigured,
+    apply_google_place,
     get_google_places_client,
     resolve_cover_photo,
 )
@@ -417,3 +418,103 @@ def test_place_admin_endpoints_are_admin_only(client, make_user):
     created = client.post("/places", json={"google_place_id": "ChIJ-open"}, headers=sun)
     assert created.status_code in (200, 201), created.text
     assert client.get(f"/places/{created.json()['id']}", headers=sun).status_code == 200
+
+
+def test_place_code_is_unique_within_a_category(client, make_user, admin):
+    sun = make_user("sun")
+    first = client.post("/places", json={"google_place_id": "ChIJ-lax"}, headers=sun).json()
+    second = client.post("/places", json={"google_place_id": "ChIJ-lax-2"}, headers=sun).json()
+
+    tagged = client.patch(
+        f"/admin/places/{first['id']}", json={"category": "airport", "code": "LAX"}, headers=admin
+    )
+    assert tagged.status_code == 200
+    assert tagged.json()["code"] == "LAX"
+
+    duplicate = client.patch(
+        f"/admin/places/{second['id']}", json={"category": "airport", "code": "LAX"}, headers=admin
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "A place with this category and code already exists"
+
+    # The same code under another category is a different thing.
+    other = client.patch(
+        f"/admin/places/{second['id']}", json={"category": "train_station", "code": "LAX"}, headers=admin
+    )
+    assert other.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("primary_type", "category"),
+    [
+        ("international_airport", "airport"),
+        ("airport", "airport"),
+        # Not every aviation type is somewhere you fly from, and nothing is
+        # matched by substring.
+        ("heliport", "heliport"),
+        ("airstrip", "airstrip"),
+        ("airport_store", "airport_store"),
+        ("hotel", "hotel"),
+        (None, None),
+    ],
+)
+def test_google_airport_types_are_stored_as_airport(primary_type, category):
+    place = Place()
+    apply_google_place(place, {"id": "ChIJ-x", "primaryType": primary_type})
+    assert place.category == category
+
+
+def test_a_category_we_set_is_not_replaced_by_googles():
+    place = Place(category="airport")
+    apply_google_place(place, {"id": "ChIJ-x", "primaryType": "heliport"})
+    assert place.category == "airport"
+
+
+def _airport(session, code, name, **fields):
+    place = Place(category="airport", code=code, name=name, **fields)
+    session.add(place)
+    return place
+
+
+def test_airport_search_matches_code_and_name(client, make_user, session):
+    sun = make_user("sun")
+    _airport(session, "LHR", "London Heathrow Airport")
+    _airport(session, "LGW", "London Gatwick Airport")
+    _airport(session, "LAX", "Los Angeles International Airport")
+    _airport(session, "JFK", "John F Kennedy International Airport")
+    # Not an airport, so never offered even though the name matches.
+    session.add(Place(category="hotel", name="Heathrow Hilton"))
+    session.commit()
+
+    def codes(q, **params):
+        found = client.get("/places/airports", params={"q": q, **params}, headers=sun)
+        assert found.status_code == 200, found.text
+        return [place["code"] for place in found.json()]
+
+    assert codes("lhr") == ["LHR"]
+    assert codes("heath") == ["LHR"]
+    assert codes("london") == ["LGW", "LHR"]
+    assert codes("kennedy") == ["JFK"]
+    assert codes("%") == []
+    assert codes("  ") == []
+    assert codes("london", limit=1) == ["LGW"]
+
+
+def test_airport_search_ranks_the_exact_code_first(client, make_user, session):
+    sun = make_user("sun")
+    # "LA" is LAX's code prefix, but also the start of many names.
+    _airport(session, "ABC", "La Aurora International Airport")
+    _airport(session, "XYZ", "Playa Grande Airport")
+    _airport(session, "LAX", "Los Angeles International Airport")
+    _airport(session, "LA", "Exact Code Test Airport")
+    session.commit()
+
+    found = client.get("/places/airports", params={"q": "la"}, headers=sun).json()
+    # Exact code, code prefix, name prefix, then a word inside the name.
+    assert [place["code"] for place in found] == ["LA", "LAX", "ABC", "XYZ"]
+
+
+def test_airport_search_needs_a_user_and_a_query(client, make_user):
+    assert client.get("/places/airports", params={"q": "lhr"}).status_code == 401
+    sun = make_user("sun")
+    assert client.get("/places/airports", headers=sun).status_code == 422

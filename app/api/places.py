@@ -2,7 +2,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -67,11 +67,15 @@ def _fetch_place(places: GooglePlacesClient, place_id: str) -> dict:
 def _commit_unique_place(session: SessionDep) -> None:
     try:
         session.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         session.rollback()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "A place with this google_place_id already exists"
-        ) from None
+        constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+        detail = (
+            "A place with this category and code already exists"
+            if constraint == "uq_places_category_code"
+            else "A place with this google_place_id already exists"
+        )
+        raise HTTPException(status.HTTP_409_CONFLICT, detail) from None
 
 
 def _try_enrich(session: SessionDep, places: GooglePlacesClient, place: Place) -> None:
@@ -153,6 +157,45 @@ def list_places(
     )
     if q:
         query = query.where(Place.name.icontains(q, autoescape=True))
+    return list(session.scalars(query))
+
+
+@router.get("/airports", response_model=list[PlaceRead])
+def search_airports(
+    _: CurrentUser,
+    session: SessionDep,
+    q: Annotated[str, Query(min_length=1, max_length=100)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+) -> list[Place]:
+    """Airports whose IATA code or name matches `q` (case-insensitive), for
+    picking the ends of a manually entered flight. Best matches first: the exact
+    code, then codes starting with `q`, names starting with it, names with a
+    word starting with it, and finally names containing it anywhere."""
+    term = q.strip()
+    if not term:
+        return []
+    code = Place.code
+    name = Place.name
+    rank = case(
+        (func.upper(code) == term.upper(), 0),
+        (code.istartswith(term, autoescape=True), 1),
+        (name.istartswith(term, autoescape=True), 2),
+        (name.icontains(f" {term}", autoescape=True), 3),
+        else_=4,
+    )
+    query = (
+        select(Place)
+        .options(selectinload(Place.area))
+        .where(
+            Place.category == "airport",
+            or_(
+                code.istartswith(term, autoescape=True),
+                name.icontains(term, autoescape=True),
+            ),
+        )
+        .order_by(rank, name, Place.id)
+        .limit(limit)
+    )
     return list(session.scalars(query))
 
 

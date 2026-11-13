@@ -27,6 +27,21 @@ FIELD_MASK = (
     "googleMapsUri,addressComponents,photos"
 )
 
+# Text Search (New). Results are Place objects, so the same fields can be asked
+# for with a "places." prefix and a result can be cached exactly like a Place
+# Details response.
+TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+SEARCH_FIELD_MASK = ",".join(f"places.{field}" for field in FIELD_MASK.split(","))
+
+# Google place types that we store as one category. Google tells a commercial
+# airport apart as "airport" or "international_airport"; to us both are just an
+# airport, and the seeded airports use that same category. This is an exact
+# lookup over Google's published type list, not a substring rule, so anything
+# else with "airport" in it would be left alone. "airstrip" and "heliport" are
+# deliberately absent: those are mostly private strips and hospital or rooftop
+# pads, not somewhere a traveller flies from.
+CATEGORY_ALIASES = {"international_airport": "airport"}
+
 # addressComponent types that name the city, best first. postalTown covers UK-style
 # places with no locality; adminArea2 is a last resort (county/prefecture).
 LOCALITY_TYPES = ("locality", "postal_town", "administrative_area_level_2")
@@ -66,6 +81,47 @@ class GooglePlacesClient:
             raise GooglePlacesError(f"Google Places returned {response.status_code}")
         return response.json()
 
+    def search_text(
+        self,
+        query: str,
+        *,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        radius_m: float = 20_000,
+        included_type: str | None = None,
+        max_results: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Free-text search, best match first. Each result has the same shape as
+        `fetch_place` returns. With coordinates, results near them are preferred
+        (a bias, not a filter); `included_type` likewise prefers that place type."""
+        if not self._api_key:
+            raise GooglePlacesNotConfigured("GOOGLE_MAPS_API_KEY is not set")
+        body: dict[str, Any] = {
+            "textQuery": query,
+            "pageSize": max_results,
+            "languageCode": "en",
+        }
+        if included_type:
+            body["includedType"] = included_type
+        if latitude is not None and longitude is not None:
+            body["locationBias"] = {
+                "circle": {
+                    "center": {"latitude": latitude, "longitude": longitude},
+                    "radius": radius_m,
+                }
+            }
+        try:
+            response = self._http.post(
+                TEXT_SEARCH_URL,
+                json=body,
+                headers={"X-Goog-Api-Key": self._api_key, "X-Goog-FieldMask": SEARCH_FIELD_MASK},
+            )
+        except httpx.HTTPError as exc:
+            raise GooglePlacesError(f"Google Places request failed: {exc}") from exc
+        if response.status_code != 200:
+            raise GooglePlacesError(f"Google Places returned {response.status_code}")
+        return response.json().get("places") or []
+
 
 def get_google_places_client() -> GooglePlacesClient:
     return GooglePlacesClient(get_settings().google_maps_api_key)
@@ -87,11 +143,25 @@ def place_needs_refresh(
     return place.google_fetched_at < _refresh_cutoff(now, after_days)
 
 
+def simplify_category(primary_type: str | None) -> str | None:
+    """The category we store for a Google primaryType (see CATEGORY_ALIASES)."""
+    return CATEGORY_ALIASES.get(primary_type, primary_type) if primary_type else None
+
+
 def apply_google_place(place: Place, details: dict[str, Any]) -> None:
     """Refresh the Google cache on a place and fill in anything we don't have.
 
-    Google's values never overwrite columns that already hold our own data.
+    Google's values never overwrite columns that already hold our own data —
+    except a seeded airport's placeholder address, which isn't really data.
     """
+    # A seeded airport's "City, Country" placeholder is ours only nominally:
+    # Google's real address replaces it (an address someone typed is kept).
+    # Imported lazily: the seed list is large and the seeds import the models.
+    from app.seeds.airports import has_seeded_address
+
+    if details.get("formattedAddress") and has_seeded_address(place):
+        place.address = details["formattedAddress"]
+
     place.google_data = details
     place.google_fetched_at = datetime.now(UTC)
 
@@ -102,7 +172,7 @@ def apply_google_place(place: Place, details: dict[str, Any]) -> None:
         "latitude": coords.get("latitude"),
         "longitude": coords.get("longitude"),
         "timezone": (details.get("timeZone") or {}).get("id"),
-        "category": details.get("primaryType"),
+        "category": simplify_category(details.get("primaryType")),
     }
     for field, value in fallbacks.items():
         if getattr(place, field, None) is None and value is not None:

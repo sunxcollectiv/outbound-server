@@ -412,3 +412,59 @@ def test_admin_read_image_content(client, admin):
 
 def test_admin_image_list_requires_admin(client):
     assert client.get("/admin/received/images").status_code in (401, 403)
+
+
+# --- airports resolve by code on flights only ---
+
+def test_image_flight_import_reuses_the_airport_by_code(
+    client, make_user, admin, make_trip, image_extractor, session
+):
+    from app.models import Place
+
+    lax = Place(name="Los Angeles International Airport", category="airport", code="LAX")
+    session.add(lax)
+    session.flush()
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    image_id = _extracted_for(client, admin, session, image_extractor, FLIGHT, sun)
+    client.post(f"/admin/received/images/import/{image_id}", headers=admin)
+
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["place"]["id"] == str(lax.id)
+    assert item["place"]["name"] == "Los Angeles International Airport"
+    hnd = session.scalars(select(Place).where(Place.code == "HND")).one()
+    assert item["end_place"]["id"] == str(hnd.id)
+
+
+def test_image_train_import_does_not_use_an_airport_with_the_same_code(
+    client, make_user, admin, make_trip, image_extractor, session
+):
+    """A rail station code that happens to equal an airport code stays a
+    separate, name-matched place."""
+    from app.models import Place
+
+    airport = Place(name="Liverpool John Lennon Airport", category="airport", code="LPL")
+    session.add(airport)
+    session.flush()
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    train = Extraction(
+        category="train", confidence=0.9, summary="Train",
+        items=[ExtractedItem(
+            kind="transit", transit_mode="train", title="Train",
+            segments=[ExtractedSegment(
+                transit_mode="train", start_local="2026-04-11T09:00", start_timezone="Asia/Tokyo",
+                end_local="2026-04-11T11:00", end_timezone="Asia/Tokyo",
+                origin=ExtractedPlace(name="Liverpool Lime Street", iata_code="LPL"),
+                destination=ExtractedPlace(name="Manchester Piccadilly", iata_code="MAN"),
+            )],
+        )],
+    )
+    image_id = _extracted_for(client, admin, session, image_extractor, train, sun)
+    assert client.post(f"/admin/received/images/import/{image_id}", headers=admin).json()["outcome"] == "placed"
+
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["place"]["id"] != str(airport.id)
+    assert item["place"]["name"] == "Liverpool Lime Street"
+    station = session.get(Place, uuid.UUID(item["place"]["id"]))
+    assert (station.category, station.code) == (None, None)

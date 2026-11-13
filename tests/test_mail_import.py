@@ -1,5 +1,5 @@
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models import EmailReceipt, EmailReceiptStatus, Place
 from app.services.mail_extraction import (
@@ -486,3 +486,137 @@ def test_process_is_idempotent(client, make_user, admin, make_trip, resend, mail
     # Re-running pulls the same mail, but it's already processed → nothing to do.
     assert client.post("/admin/received/mail/process", headers=admin).json() == []
     assert len(mail_extractor.calls) == 1
+
+
+def test_flight_import_reuses_the_seeded_airport_by_code(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    """A flight's airports resolve by IATA code to the airport we already have,
+    whatever the email called it, instead of adding a name-only stub."""
+    lax = Place(name="Los Angeles International Airport", category="airport", code="LAX")
+    session.add(lax)
+    session.commit()
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    _make_extracted(client, admin, resend, mail_extractor, "re_code", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_code", headers=admin)
+
+    legs = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["segments"]
+    assert legs[0]["place"]["id"] == str(lax.id)
+    assert legs[0]["place"]["name"] == "Los Angeles International Airport"
+
+    # Airports we didn't have are created with their code, once each, so the
+    # next booking finds them by code too.
+    hnd = session.scalars(select(Place).where(Place.code == "HND")).all()
+    assert len(hnd) == 1 and hnd[0].category == "airport"
+    assert legs[0]["end_place"]["id"] == legs[1]["place"]["id"] == str(hnd[0].id)
+    assert not session.scalars(select(Place).where(Place.code.is_(None), Place.name == "LAX")).all()
+
+
+def test_second_flight_import_finds_airports_created_by_the_first(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    sun = make_user("sun")
+    make_trip(sun)  # the import needs a trip to land in
+    _make_extracted(client, admin, resend, mail_extractor, "re_one", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_one", headers=admin)
+    _make_extracted(client, admin, resend, mail_extractor, "re_two", "sun@example.com", FLIGHT_2LEG)
+    client.post("/admin/received/mail/import/re_two", headers=admin)
+
+    for code in ("LAX", "HND", "ITM"):
+        assert len(session.scalars(select(Place).where(Place.code == code)).all()) == 1, code
+
+
+def _airport(session, code, name):
+    place = Place(name=name, category="airport", code=code)
+    session.add(place)
+    session.commit()
+    return place
+
+
+def _import(client, admin, resend, mail_extractor, email_id, extraction):
+    _make_extracted(client, admin, resend, mail_extractor, email_id, "sun@example.com", extraction)
+    body = client.post(f"/admin/received/mail/import/{email_id}", headers=admin).json()
+    assert body["outcome"] == "placed", body
+
+
+def test_single_leg_flight_item_without_segments_resolves_by_code(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    lax = _airport(session, "LAX", "Los Angeles International Airport")
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    flight = Extraction(
+        category="flight", confidence=0.9, summary="Flight",
+        items=[ExtractedItem(
+            kind="transit", transit_mode="flight", title="Flight",
+            start_local="2026-04-09T11:00", start_timezone="America/Los_Angeles",
+            end_local="2026-04-10T15:00", end_timezone="Asia/Tokyo",
+            place=ExtractedPlace(name="Los Angeles", iata_code="LAX"),
+            end_place=ExtractedPlace(name="Tokyo Haneda", iata_code="HND"),
+        )],
+    )
+    _import(client, admin, resend, mail_extractor, "re_single", flight)
+
+    item = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]
+    assert item["place"]["id"] == str(lax.id)
+    assert session.scalars(select(Place).where(Place.code == "HND")).one().name == "Tokyo Haneda"
+
+
+def test_a_leg_with_no_mode_uses_the_items_flight_mode(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    lax = _airport(session, "LAX", "Los Angeles International Airport")
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    leg = _leg("ANA", "NH1", "2026-04-09T11:00", "America/Los_Angeles",
+               "2026-04-10T15:00", "Asia/Tokyo", "LAX", "HND")
+    leg.transit_mode = None
+    flight = Extraction(
+        category="flight", confidence=0.9, summary="Flight",
+        items=[ExtractedItem(kind="transit", transit_mode="flight", title="Flight", segments=[leg])],
+    )
+    _import(client, admin, resend, mail_extractor, "re_nomode", flight)
+
+    legs = client.get(f"/trips/{trip['id']}/items", headers=sun).json()[0]["segments"]
+    assert legs[0]["place"]["id"] == str(lax.id)
+
+
+def test_non_flight_email_imports_never_resolve_to_an_airport(client, make_user, admin, make_trip, resend, mail_extractor, session):
+    """Trains, buses, hotels and activities keep matching by name and address,
+    even when the extractor put an airport-looking code on them."""
+    lpl = _airport(session, "LPL", "Liverpool John Lennon Airport")
+    lax = _airport(session, "LAX", "Los Angeles International Airport")
+    sun = make_user("sun")
+    trip = make_trip(sun)
+    bookings = Extraction(
+        category="other", confidence=0.9, summary="Mixed",
+        items=[
+            ExtractedItem(
+                kind="transit", transit_mode="train", title="Train",
+                start_local="2026-04-11T09:00", start_timezone="Asia/Tokyo",
+                end_local="2026-04-11T11:00", end_timezone="Asia/Tokyo",
+                place=ExtractedPlace(name="Liverpool Lime Street", iata_code="LPL"),
+                end_place=ExtractedPlace(name="Manchester Piccadilly", iata_code="MAN"),
+            ),
+            ExtractedItem(
+                kind="transit", transit_mode="bus", title="Airport bus",
+                start_local="2026-04-12T09:00", start_timezone="Asia/Tokyo",
+                end_local="2026-04-12T10:00", end_timezone="Asia/Tokyo",
+                place=ExtractedPlace(name="Downtown stop", iata_code="LAX"),
+            ),
+            ExtractedItem(
+                kind="lodging", title="Airport hotel",
+                start_local="2026-04-12", end_local="2026-04-13", start_timezone="Asia/Tokyo",
+                place=ExtractedPlace(name="Hotel near LAX", address="1 Century Blvd", iata_code="LAX"),
+            ),
+            ExtractedItem(
+                kind="activity", title="Tour",
+                start_local="2026-04-13T10:00", start_timezone="Asia/Tokyo",
+                place=ExtractedPlace(name="Tour meeting point", iata_code="LAX"),
+            ),
+        ],
+    )
+    _import(client, admin, resend, mail_extractor, "re_mixed", bookings)
+
+    items = client.get(f"/trips/{trip['id']}/items", headers=sun).json()
+    assert len(items) == 4
+    place_ids = {i["place"]["id"] for i in items} | {i["end_place"]["id"] for i in items if i["end_place"]}
+    assert str(lpl.id) not in place_ids and str(lax.id) not in place_ids
+    assert {i["place"]["name"] for i in items} == {
+        "Liverpool Lime Street", "Downtown stop", "Hotel near LAX", "Tour meeting point"
+    }
+    # Nothing new was filed as an airport.
+    assert session.scalars(select(func.count()).select_from(Place).where(Place.code.is_not(None))).one() == 2

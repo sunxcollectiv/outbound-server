@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,9 +27,23 @@ class Place(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """
 
     __tablename__ = "places"
+    __table_args__ = (
+        # A code identifies one place within its category (one LAX airport).
+        Index(
+            "uq_places_category_code",
+            "category",
+            "code",
+            unique=True,
+            postgresql_where=text("code IS NOT NULL"),
+        ),
+    )
 
     name: Mapped[str | None] = mapped_column(String(200), index=True)
     category: Mapped[str | None] = mapped_column(String(60))
+    # The short public code this kind of place is known by; what it means depends
+    # on `category`. For category "airport" it is the IATA code ("LAX"). Other
+    # categories can adopt their own scheme (a rail station code, say) later.
+    code: Mapped[str | None] = mapped_column(String(20))
     notes: Mapped[str | None] = mapped_column(Text)
     photo_url: Mapped[str | None] = mapped_column(String(2048))
     address: Mapped[str | None] = mapped_column(String(500))

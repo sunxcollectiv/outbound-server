@@ -13,7 +13,7 @@ Postgres 17, with Alembic migrations. Interactive API docs are served at `/docs`
 ```bash
 uv sync --extra dev               # create .venv and install dependencies
 docker compose up -d db           # Postgres on 127.0.0.1:4930
-uv run python scripts/bootstrap.py  # migrate, then seed countries, cities, regions
+uv run python scripts/bootstrap.py  # migrate, then seed countries, cities, regions, airports
 uv run python main.py             # API on http://127.0.0.1:4830, with reload
 ```
 
@@ -32,7 +32,8 @@ integrations below stay off.
    ```
 
    This runs the migrations to head, then seeds countries and territories,
-   cities, and islands and regions: about 1,700 areas. Every step is idempotent,
+   cities, and islands and regions (about 1,700 areas), then about 4,100
+   airports as places. Every step is idempotent,
    so run it again after each deploy to apply new migrations and pick up
    additions to the seed lists. It never edits or removes existing rows. Pass
    `--skip-migrations` if your deploy pipeline already runs Alembic.
@@ -66,7 +67,8 @@ integrations below stay off.
 | Countries, territories, cities, islands, regions | `scripts/bootstrap.py` (lists in `app/seeds/`) |
 | Pricing | In code (`app/services/pricing.py`); nothing to seed |
 | Area photos | Unsplash, via the backfill script or on demand when a trip is opened |
-| Places | Not seeded. Created from Google as people add them to trips |
+| Airports | `scripts/bootstrap.py` (list in `app/seeds/_airports_data.py`), as places with category `airport` |
+| Other places | Not seeded. Created from Google as people add them to trips |
 | Users, trips, credits, notifications | Not seeded. Move them with `pg_dump` / `pg_restore` |
 
 A few areas with no `kind` (for example "New York") appear on their own: they
@@ -124,6 +126,54 @@ Areas are the countries, cities, islands and regions a trip is tagged with.
 
 Removing an entry from a list does not delete its row. Delete it through
 `DELETE /admin/areas/{id}`.
+
+## Airports
+
+Airports are places with `category` set to `airport` and their IATA code in
+`code`. The seeded list is every airport with an IATA code and scheduled
+commercial service, from [OurAirports](https://ourairports.com/data/) (public
+domain).
+
+`GET /places/airports?q=…&limit=…` searches them by code and name for a
+manually entered flight. Any signed-in user can call it. The order is: the
+exact code, then codes starting with `q`, names starting with `q`, names with a
+word starting with `q`, and names containing `q`.
+
+- `app/seeds/_airports_data.py`: **generated**. Do not edit it by hand.
+- `app/seeds/_airport_google_ids.py`: **generated** by
+  `scripts/export_airport_google_ids.py`. Do not edit it by hand.
+  Regenerate from the current OurAirports file:
+
+  ```bash
+  uv run --with geonamescache --with timezonefinder python scripts/generate_airports.py
+  ```
+
+The seed only adds airports whose code is not in the database yet. It never
+renames, moves or removes an existing one, so an airport that closes or changes
+code upstream has to be fixed by hand through `PATCH /admin/places/{id}`.
+
+Each seeded airport also gets its Google place id from
+`app/seeds/_airport_google_ids.py`, matched and reviewed once and exported from
+the database where that happened. Only the ids are seeded: Google's terms allow
+storing a place id indefinitely but not its address or photos, so a new server
+fetches those itself (needs `GOOGLE_MAPS_API_KEY`; one billed Place Details
+request per airport):
+
+```bash
+uv run python scripts/link_airports_to_google.py --skip-search
+```
+
+Until then an airport shows a "City, Country" placeholder address, which the
+first Google fetch replaces.
+
+Without `--skip-search` the script also searches Google for airports that have
+no id at all, and links one only when a single airport-typed result sits within
+5 km of it and its name agrees (`app/services/airport_linking.py`). After
+reviewing new matches, regenerate the id list from that database:
+
+```bash
+uv run python scripts/export_airport_google_ids.py
+```
 
 ## Tests
 

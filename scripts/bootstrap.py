@@ -1,4 +1,4 @@
-"""Bring a database to a usable state: the schema, then the area taxonomy.
+"""Bring a database to a usable state: the schema, the area taxonomy, airports.
 
 For a fresh server (or a fresh local database) this is the one command to run
 once DATABASE_URL points at it:
@@ -11,6 +11,7 @@ It runs, in order:
   2. Countries and territories   (app.seeds.countries)
   3. Cities                      (app.seeds.cities)
   4. Islands and regions         (app.seeds.regions)
+  5. Airports                    (app.seeds.airports)
 
 Every step is idempotent, so it is safe to re-run after each deploy: it applies
 any new migrations and adds whatever the seed lists have gained, and never edits
@@ -21,8 +22,12 @@ Deliberately not done here, because each needs a secret or a decision:
   - A service token for the /admin APIs:  scripts/issue_service_token.py
   - Area cover photos (UNSPLASH_ACCESS_KEY, rate-limited):
                                           scripts/backfill_area_photos.py
+  - Google addresses and photos for the airports (GOOGLE_MAPS_API_KEY, billed
+    per airport; the seed gives them ids only):
+                                          scripts/link_airports_to_google.py --skip-search
 
-Places are not seeded at all: they are created from Google as people add them.
+Airports are the only places seeded; every other place is created from Google
+as people add it.
 
 Runs against DATABASE_URL (the dev database by default), NOT the test database.
 Pass --skip-migrations when the deploy pipeline already runs Alembic.
@@ -40,6 +45,7 @@ from sqlalchemy import func, make_url, select
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Area
+from app.seeds.airports import seed_airports
 from app.seeds.cities import seed_cities
 from app.seeds.countries import seed_areas
 from app.seeds.regions import seed_regions
@@ -57,7 +63,7 @@ def migrate() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Migrate the database and seed the area taxonomy. Idempotent."
+        description="Migrate the database and seed areas and airports. Idempotent."
     )
     parser.add_argument(
         "--skip-migrations",
@@ -97,6 +103,18 @@ def main() -> None:
             .order_by(func.count().desc())
         ).all()
 
+        # After the areas, so each airport can be linked to its city.
+        airports = seed_airports(session)
+        print(
+            f"Airports: created {airports['created']} ({airports['linked']} linked to an area), "
+            f"already present {airports['skipped']}, Google ids applied {airports['google_ids']}"
+        )
+        if airports["google_id_conflicts"]:
+            print(
+                f"  {airports['google_id_conflicts']} Google ids skipped: another place has them "
+                "(the link script merges those airports)"
+            )
+
     total = sum(count for _, count in by_kind)
     print(f"Areas now: {total} (" + ", ".join(f"{kind} {count}" for kind, count in by_kind) + ")")
 
@@ -107,6 +125,7 @@ def main() -> None:
     print("Not done here:")
     print('  - Admin access:  uv run python scripts/issue_service_token.py "<name>"')
     print("  - Area photos:   uv run python scripts/backfill_area_photos.py  (needs UNSPLASH_ACCESS_KEY)")
+    print("  - Airport details: uv run python scripts/link_airports_to_google.py --skip-search  (needs GOOGLE_MAPS_API_KEY)")
 
 
 if __name__ == "__main__":

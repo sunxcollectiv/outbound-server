@@ -4,13 +4,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Area, Place
+from app.models import Place
 from app.seeds._airport_google_ids import GOOGLE_PLACE_IDS
 from app.seeds._airports_data import AIRPORTS
 from app.seeds.airports import _city_candidates, has_seeded_address, seed_airports
-from app.services.google_places import apply_google_place
 from app.seeds.cities import seed_cities
 from app.seeds.countries import seed_areas
+from app.services.google_places import apply_google_place
 
 
 def _airport(session: Session, code: str) -> Place:

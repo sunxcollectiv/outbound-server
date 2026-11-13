@@ -87,7 +87,7 @@ def _run_pass(
         try:
             result = step(airport)
         except GooglePlacesNotConfigured:
-            raise SystemExit("GOOGLE_MAPS_API_KEY is not set — nothing to fetch.")
+            raise SystemExit("GOOGLE_MAPS_API_KEY is not set — nothing to fetch.") from None
         except GooglePlacesError as exc:
             session.rollback()
             counts["failed"] += 1

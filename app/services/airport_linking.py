@@ -35,7 +35,11 @@ from sqlalchemy.orm import Session
 
 from app.db import Base
 from app.models import Place
-from app.services.google_places import GooglePlaceNotFound, GooglePlacesClient, apply_google_place
+from app.services.google_places import (
+    GooglePlaceNotFound,
+    GooglePlacesClient,
+    apply_google_place,
+)
 
 # Google place types that mean "somewhere scheduled flights leave from".
 AIRPORT_TYPES = frozenset({"airport", "international_airport", "airstrip", "heliport"})

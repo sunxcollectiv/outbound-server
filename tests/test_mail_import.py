@@ -513,7 +513,7 @@ def test_flight_import_reuses_the_seeded_airport_by_code(client, make_user, admi
 
 def test_second_flight_import_finds_airports_created_by_the_first(client, make_user, admin, make_trip, resend, mail_extractor, session):
     sun = make_user("sun")
-    trip = make_trip(sun)
+    make_trip(sun)  # the import needs a trip to land in
     _make_extracted(client, admin, resend, mail_extractor, "re_one", "sun@example.com", FLIGHT_2LEG)
     client.post("/admin/received/mail/import/re_one", headers=admin)
     _make_extracted(client, admin, resend, mail_extractor, "re_two", "sun@example.com", FLIGHT_2LEG)
